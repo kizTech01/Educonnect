@@ -1,0 +1,89 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Lecturer Dashboard | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="card-grid metrics">
+    <article class="metric-card">
+        <span>Managed Courses</span>
+        <strong>{{ registered_courses|length }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Students Reached</span>
+        <strong>{{ student_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Uploaded Course Files</span>
+        <strong>{{ upload_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Paid Courses</span>
+        <strong>{{ paid_course_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Messages Sent</span>
+        <strong>{{ message_count }}</strong>
+    </article>
+</section>
+
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Registered Teaching Courses</h2>
+            <a href="{% url 'portal:lecturer-courses' %}" class="ghost-btn small">Register Courses</a>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Course</th>
+                        <th>Schedule</th>
+                        <th>Fee</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for course in registered_courses %}
+                        <tr>
+                            <td>
+                                <span class="table-cell-title">{{ course.code }} - {{ course.title }}</span>
+                                <span class="table-cell-subtext">{{ course.department.name }} | Level {{ course.level }}</span>
+                            </td>
+                            <td>
+                                {{ course.schedule_day|default:"TBA" }} {{ course.schedule_time|time:"H:i"|default:"" }} | {{ course.venue|default:"Venue pending" }}
+                            </td>
+                            <td>
+                                {% if course.is_free %}
+                                    <span class="status-pill success">Free</span>
+                                {% else %}
+                                    <span class="status-pill warning">Paid {{ course.amount }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="actions-cell">
+                                {% if course.file %}
+                                    <a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small">Download</a>
+                                {% endif %}
+                                {% if not course.is_free %}
+                                    <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Paid IDs</a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="4">Register your assigned courses to manage them here.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Course File Uploads</h2>
+            <a href="{% url 'portal:lecturer-courses' %}" class="ghost-btn small">View Courses</a>
+        </div>
+        <p class="muted-note">Upload course files directly from course management. Students can download free files immediately or pay before downloading paid files.</p>
+    </div>
+</section>
+{% endblock %}

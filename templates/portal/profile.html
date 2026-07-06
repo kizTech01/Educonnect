@@ -1,0 +1,48 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Profile | MAU EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Manage Personal Information</h2>
+    </div>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="primary-btn">Save Profile</button>
+    </form>
+</section>
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Browser Alerts</h2>
+    </div>
+    <p class="muted-note">
+        {% if request.user.role == "student" %}
+            Enable browser alerts on this device if you want lecturer messages and class reminders to appear as live notifications.
+        {% else %}
+            Enable browser alerts on this device if you want class reminders to appear as live notifications.
+        {% endif %}
+    </p>
+    <div class="actions-cell">
+        <button
+            type="button"
+            class="ghost-btn"
+            data-enable-browser-alerts
+            data-enabled="{% if browser_alerts_enabled %}true{% else %}false{% endif %}"
+        >
+            {% if browser_alerts_enabled %}Browser alerts enabled{% else %}Enable browser alerts{% endif %}
+        </button>
+    </div>
+</section>
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Change Password</h2>
+    </div>
+    <p class="muted-note">We will verify the request through your email before your password can be changed.</p>
+    <form method="post" action="{% url 'portal:profile-password-reset' %}">
+        {% csrf_token %}
+        <button type="submit" class="ghost-btn">Send Password Reset Link</button>
+    </form>
+</section>
+{% endblock %}

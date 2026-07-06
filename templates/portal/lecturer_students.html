@@ -1,0 +1,100 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Lecturer Students | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Filter Student Roster</h2>
+            <a href="{% url 'portal:lecturer-students-pdf' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}" class="ghost-btn small">Print PDF</a>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Department {{ filter_form.department }}</label>
+            <label>Level {{ filter_form.level }}</label>
+            <label>Search {{ filter_form.search }}</label>
+            <button type="submit" class="primary-btn">Filter Students</button>
+        </form>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Students In Your Managed Courses</h2>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID Number</th>
+                        <th>Name</th>
+                        <th>Department</th>
+                        <th>Level</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for student in students %}
+                        <tr>
+                            <td>{{ student.id_number }}</td>
+                            <td>{{ student.full_name }}</td>
+                            <td>{{ student.department.name|default:"-" }}</td>
+                            <td>{{ student.level|default:"-" }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="4">No students registered on your managed courses yet.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Paid Material Access Control</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Student</th>
+                    <th>Material</th>
+                    <th>Course</th>
+                    <th>Amount</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for access in payment_rows %}
+                    <tr>
+                        <td>{{ access.student.id_number }} - {{ access.student.full_name }}</td>
+                        <td>{{ access.material.title }}</td>
+                        <td>{{ access.material.course.code }}</td>
+                        <td>{{ access.material.amount }}</td>
+                        <td>{{ access.get_status_display }}</td>
+                        <td class="actions-cell">
+                            <form method="post" action="{% url 'portal:lecturer-material-access' access.id 'paid' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="ghost-btn small">Mark Paid</button>
+                            </form>
+                            <form method="post" action="{% url 'portal:lecturer-material-access' access.id 'pending' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="ghost-btn small">Pending</button>
+                            </form>
+                            <form method="post" action="{% url 'portal:lecturer-material-access' access.id 'blocked' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="danger-btn small">Block</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="6">No paid-material access records yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

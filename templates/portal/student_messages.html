@@ -1,0 +1,44 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Student Messages | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout inbox-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Inbox</h2>
+        </div>
+        <div class="message-list">
+            {% for recipient in recipients %}
+                <div class="message-item shell {% if not recipient.is_read %}unread{% endif %}">
+                    <a href="{% url 'portal:student-messages' %}?open={{ recipient.id }}">
+                        <strong>{{ recipient.notification.subject }}</strong>
+                        <span>{{ recipient.notification.sender.full_name }}</span>
+                    </a>
+                    <form method="post" action="{% url 'portal:student-message-delete' recipient.id %}">
+                        {% csrf_token %}
+                        <button type="submit" class="danger-btn small">Delete</button>
+                    </form>
+                </div>
+            {% empty %}
+                <p class="empty-text">No messages available.</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Message View</h2>
+        </div>
+        {% if selected_message %}
+            <div class="message-reader">
+                <h3>{{ selected_message.notification.subject }}</h3>
+                <p class="muted-note">From {{ selected_message.notification.sender.full_name }}</p>
+                <div class="reader-body">{{ selected_message.notification.body|linebreaks }}</div>
+            </div>
+        {% else %}
+            <p class="empty-text">Select a message from your inbox to view it here.</p>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

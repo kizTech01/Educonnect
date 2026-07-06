@@ -1,0 +1,9 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}
+    {% if departmental_download_scope == 'lecturer' %}Paid Courses Students{% else %}Departmental Users{% endif %} | EduConnect
+{% endblock %}
+
+{% block dashboard_content %}
+{% include 'portal/includes/departmental_download_panel.html' %}
+{% endblock %}

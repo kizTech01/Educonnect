@@ -1,0 +1,116 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Set Departmental Fee | MAU EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Departments</h2>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Search Department
+                <input type="text" name="search" value="{{ request.GET.search }}" class="input-field" placeholder="Department name or code">
+            </label>
+            <button type="submit" class="primary-btn">Search</button>
+        </form>
+        <div class="message-list association-list">
+            {% for department in departments %}
+                <a href="{% url 'portal:admin-departmental-fees' %}?department={{ department.id }}{% if request.GET.search %}&search={{ request.GET.search }}{% endif %}" class="message-item shell">
+                    <div>
+                        <strong>{{ department.name }}</strong>
+                        <span>{{ department.code }}</span>
+                    </div>
+                </a>
+            {% empty %}
+                <p class="empty-text">No departments found.</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Create Academic Session</h2>
+        </div>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create-session">
+            {{ session_form.as_p }}
+            <button type="submit" class="primary-btn">Create Session</button>
+        </form>
+        <div class="panel-head">
+            <h2>Create Association</h2>
+        </div>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create-association">
+            {{ association_form.as_p }}
+            <button type="submit" class="primary-btn">Add Association</button>
+        </form>
+    </div>
+</section>
+
+{% if selected_department %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>{{ selected_department.name }} Fee Setup</h2>
+        <span class="status-pill success">Current Session {{ current_departmental_session.name }}</span>
+    </div>
+    <div class="message-list association-list">
+        {% for association in association_list %}
+            <div class="message-item shell">
+                <div>
+                    <strong>{{ association.name }}</strong>
+                    <span>{% if association.is_constant %}Constant association{% else %}Custom association{% endif %}</span>
+                </div>
+                {% if not association.is_constant %}
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="action" value="delete-association">
+                        <input type="hidden" name="association_id" value="{{ association.id }}">
+                        <button type="submit" class="danger-btn small">Delete</button>
+                    </form>
+                {% else %}
+                    <span class="status-pill warning">Locked</span>
+                {% endif %}
+            </div>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="message-list">
+        {% for row in session_fee_rows %}
+            <form method="post" class="detail-card session-fee-card">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="update-session-fees">
+                <input type="hidden" name="department_id" value="{{ selected_department.id }}">
+                <input type="hidden" name="session_id" value="{{ row.session.id }}">
+                <div class="panel-head">
+                    <h3>{{ row.session.name }}</h3>
+                    <label class="inline-check">
+                        <input type="checkbox" name="make_current" {% if row.session.is_current %}checked{% endif %}>
+                        <span>Current session</span>
+                    </label>
+                </div>
+                <div class="fee-grid">
+                    {% for code, fee in row.fee_map.items %}
+                        <label>
+                            {{ fee.association.name }}
+                            <input type="number" step="0.01" min="0" name="fee_{{ fee.association.id }}" value="{{ fee.amount }}" class="input-field">
+                        </label>
+                    {% endfor %}
+                </div>
+                <button type="submit" class="primary-btn small">Save {{ row.session.name }} Fees</button>
+            </form>
+        {% empty %}
+            <p class="empty-text">No academic sessions available yet.</p>
+        {% endfor %}
+    </div>
+</section>
+{% else %}
+<section class="panel-card">
+    <p class="muted-note">Select a department to manage its own departmental fee setup by session.</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,98 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block body_class %}dashboard-page{% endblock %}
+
+{% block content %}
+<main class="dashboard-layout" data-dashboard-layout>
+    <aside class="dashboard-sidebar" id="dashboard-sidebar" data-dashboard-sidebar aria-label="Dashboard navigation">
+        <div class="sidebar-brand">
+            <img src="{% static 'images/sch-logo.png' %}" alt="MAU EduConnect logo">
+            <div>
+                <h3>MAU EduConnect</h3>
+                <p>{{ request.user.full_name }}</p>
+                {% if request.user.department %}
+                    <small>{{ request.user.department.name }}</small>
+                {% endif %}
+            </div>
+            <button type="button" class="sidebar-close-btn" data-sidebar-close aria-label="Close sidebar navigation">
+                Close menu
+            </button>
+        </div>
+        <ul class="sidebar-menu">
+            {% for item in sidebar_links %}
+                <li>
+                    {% if item.children %}
+                        <details class="sidebar-dropdown" {% if item.active %}open{% endif %}>
+                            <summary class="{% if item.active %}active{% endif %}">{{ item.label }}</summary>
+                            <div class="sidebar-submenu">
+                                {% for child in item.children %}
+                                    <a href="{{ child.url }}" class="{% if child.active %}active{% endif %}">{{ child.label }}</a>
+                                {% endfor %}
+                            </div>
+                        </details>
+                    {% else %}
+                        <a href="{{ item.url }}" class="{% if item.active %}active{% endif %}">{{ item.label }}</a>
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+        <div class="sidebar-note">
+            <span>Role</span>
+            <strong>{% if request.user.is_superuser %}Administrator{% else %}{{ request.user.get_role_display }}{% endif %}</strong>
+            {% if request.user.department %}
+                <small>{{ request.user.department.name }}</small>
+            {% endif %}
+        </div>
+    </aside>
+
+    <section class="dashboard-main">
+        <div
+            class="alert-runtime"
+            data-alert-feed-url="{% url 'portal:alerts-feed' %}"
+            data-alert-preferences-url="{% url 'portal:alert-preferences' %}"
+            data-browser-alerts-enabled="{% if request.user.browser_alerts_enabled %}true{% else %}false{% endif %}"
+            data-class-alerts-enabled="{% if request.user.class_reminder_alerts_enabled %}true{% else %}false{% endif %}"
+            data-user-role="{{ request.user.role }}"
+        ></div>
+        <div class="dashboard-topbar">
+            <div class="dashboard-topbar-copy">
+                <button
+                    type="button"
+                    class="dashboard-sidebar-toggle"
+                    data-sidebar-toggle
+                    aria-controls="dashboard-sidebar"
+                    aria-expanded="false"
+                    aria-label="Open sidebar navigation"
+                >
+                    <span class="dashboard-sidebar-toggle-icon" aria-hidden="true">&#9776;</span>
+                </button>
+                <div class="dashboard-title-block">
+                    <p class="eyebrow">MAU EduConnect Workspace</p>
+                    <h1>{{ section_title }}</h1>
+                    <p class="dashboard-topbar-summary">
+                        {% if request.user.role == "student" %}
+                            Keep your courses, downloads, messages, and payments in one calm workspace.
+                        {% elif request.user.role == "lecturer" %}
+                            Manage courses, materials, student access, and announcements from one workspace.
+                        {% else %}
+                            Oversee users, courses, departments, and portal content from one workspace.
+                        {% endif %}
+                    </p>
+                </div>
+            </div>
+            <div class="dashboard-meta">
+                <span class="dashboard-role-chip">{% if request.user.is_superuser %}Administrator{% else %}{{ request.user.get_role_display }}{% endif %}</span>
+                {% if request.user.id_number %}
+                    <span>ID {{ request.user.id_number }}</span>
+                {% endif %}
+                {% if request.user.level %}
+                    <span>Level {{ request.user.level }}</span>
+                {% endif %}
+            </div>
+        </div>
+        {% block dashboard_content %}{% endblock %}
+    </section>
+    <div class="dashboard-backdrop" data-dashboard-backdrop aria-hidden="true"></div>
+</main>
+{% endblock %}

@@ -1,0 +1,64 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Manage Departments | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Add Department</h2>
+        </div>
+        <form method="post" class="stack-form" action="{% url 'portal:admin-departments' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+            {% csrf_token %}
+            {{ form.as_p }}
+            <button type="submit" class="primary-btn">Create Department</button>
+        </form>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Search Departments</h2>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Search <input type="text" name="search" class="input-field" value="{{ request.GET.search }}" placeholder="Name, code, or description"></label>
+            <button type="submit" class="primary-btn">Filter Departments</button>
+        </form>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Departments</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Code</th>
+                    <th>Courses</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for department in departments %}
+                    <tr>
+                        <td>{{ department.name }}</td>
+                        <td>{{ department.code }}</td>
+                        <td>{{ department.course_total }}</td>
+                        <td class="actions-cell">
+                            <form method="post" action="{% url 'portal:admin-delete-department' department.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="danger-btn small">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="4">No departments created yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

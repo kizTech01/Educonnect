@@ -1,0 +1,175 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Manage Users | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Search Users</h2>
+    </div>
+    <form method="get" class="stack-form">
+        <label>Search <input type="text" name="search" class="input-field" value="{{ request.GET.search }}" placeholder="Name, ID, or department"></label>
+        <button type="submit" class="primary-btn">Filter Users</button>
+    </form>
+</section>
+
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Add Student</h2>
+        </div>
+        <form method="post" class="stack-form" action="{% url 'portal:admin-users' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create-student">
+            {% if student_form.non_field_errors %}
+                <div class="flash error">{{ student_form.non_field_errors }}</div>
+            {% endif %}
+            <label>Username {{ student_form.username }} {{ student_form.username.errors }}</label>
+            <label>First name {{ student_form.first_name }} {{ student_form.first_name.errors }}</label>
+            <label>Last name {{ student_form.last_name }} {{ student_form.last_name.errors }}</label>
+            <label>Email address {{ student_form.email }} {{ student_form.email.errors }}</label>
+            <label>Student ID {{ student_form.id_number }} {{ student_form.id_number.errors }}</label>
+            <label>Department {{ student_form.department }} {{ student_form.department.errors }}</label>
+            <label>Level {{ student_form.level }} {{ student_form.level.errors }}</label>
+            <label>Phone number {{ student_form.phone_number }} {{ student_form.phone_number.errors }}</label>
+            <label>
+                <span>Password</span>
+                <div class="password-control">
+                    {{ student_form.password1 }}
+                    <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                </div>
+                {{ student_form.password1.errors }}
+            </label>
+            <label>
+                <span>Confirm password</span>
+                <div class="password-control">
+                    {{ student_form.password2 }}
+                    <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                </div>
+                {{ student_form.password2.errors }}
+            </label>
+            <button type="submit" class="primary-btn">Create Student</button>
+        </form>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Add Lecturer</h2>
+        </div>
+        <form method="post" class="stack-form" action="{% url 'portal:admin-users' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create-lecturer">
+            {% if lecturer_form.non_field_errors %}
+                <div class="flash error">{{ lecturer_form.non_field_errors }}</div>
+            {% endif %}
+            <label>Username {{ lecturer_form.username }} {{ lecturer_form.username.errors }}</label>
+            <label>First name {{ lecturer_form.first_name }} {{ lecturer_form.first_name.errors }}</label>
+            <label>Last name {{ lecturer_form.last_name }} {{ lecturer_form.last_name.errors }}</label>
+            <label>Email address {{ lecturer_form.email }} {{ lecturer_form.email.errors }}</label>
+            <label>Lecturer ID {{ lecturer_form.id_number }} {{ lecturer_form.id_number.errors }}</label>
+            <label>Department {{ lecturer_form.department }} {{ lecturer_form.department.errors }}</label>
+            <label>Phone number {{ lecturer_form.phone_number }} {{ lecturer_form.phone_number.errors }}</label>
+            <label>
+                <span>Password</span>
+                <div class="password-control">
+                    {{ lecturer_form.password1 }}
+                    <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                </div>
+                {{ lecturer_form.password1.errors }}
+            </label>
+            <label>
+                <span>Confirm password</span>
+                <div class="password-control">
+                    {{ lecturer_form.password2 }}
+                    <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                </div>
+                {{ lecturer_form.password2.errors }}
+            </label>
+            <button type="submit" class="primary-btn">Create Lecturer</button>
+        </form>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Lecturers</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>ID</th>
+                    <th>Department</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for lecturer in lecturers %}
+                    <tr>
+                        <td>{{ lecturer.full_name }}</td>
+                        <td>{{ lecturer.id_number }}</td>
+                        <td>{{ lecturer.department.name|default:"-" }}</td>
+                        <td>{% if lecturer.is_approved %}Approved{% else %}Pending{% endif %}</td>
+                        <td class="actions-cell">
+                            {% if not lecturer.is_approved %}
+                                <form method="post" action="{% url 'portal:admin-approve-lecturer' lecturer.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                    {% csrf_token %}
+                                    <button type="submit" class="primary-btn small">Approve</button>
+                                </form>
+                            {% endif %}
+                            <form method="post" action="{% url 'portal:admin-delete-user' lecturer.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="danger-btn small">Remove</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5">No lecturers created yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Students</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>ID</th>
+                    <th>Department</th>
+                    <th>Level</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for student in students %}
+                    <tr>
+                        <td>{{ student.full_name }}</td>
+                        <td>{{ student.id_number }}</td>
+                        <td>{{ student.department.name|default:"-" }}</td>
+                        <td>{{ student.level }}</td>
+                        <td class="actions-cell">
+                            <form method="post" action="{% url 'portal:admin-delete-user' student.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="danger-btn small">Remove</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5">No students created yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

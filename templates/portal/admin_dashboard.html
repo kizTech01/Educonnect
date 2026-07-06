@@ -1,0 +1,86 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Admin Dashboard | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="card-grid metrics">
+    <article class="metric-card">
+        <span>Students</span>
+        <strong>{{ student_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Lecturers</span>
+        <strong>{{ lecturer_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Departments</span>
+        <strong>{{ department_count }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Uploaded Course Files</span>
+        <strong>{{ uploaded_course_count }}</strong>
+    </article>
+</section>
+
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Pending Lecturer Approvals</h2>
+            <a href="{% url 'portal:admin-users' %}" class="ghost-btn small">Manage Users</a>
+        </div>
+        <div class="message-list">
+            {% for lecturer in pending_lecturers %}
+                <div class="message-item shell">
+                    <div>
+                        <strong>{{ lecturer.full_name }}</strong>
+                        <span>{{ lecturer.department.name|default:"No department" }}</span>
+                    </div>
+                    <form method="post" action="{% url 'portal:admin-approve-lecturer' lecturer.id %}">
+                        {% csrf_token %}
+                        <button type="submit" class="primary-btn small">Approve</button>
+                    </form>
+                </div>
+            {% empty %}
+                <p class="empty-text">No pending lecturer approvals.</p>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Recent Courses</h2>
+            <a href="{% url 'portal:admin-courses' %}" class="ghost-btn small">View Courses</a>
+        </div>
+        <div class="message-list">
+            {% for course in recent_courses %}
+                <div class="message-item">
+                    <strong>{{ course.title }}</strong>
+                    <span>{{ course.code }} | {{ course.lecturer.full_name|default:"No lecturer" }} | {% if course.is_free %}Free{% else %}Paid {{ course.amount }}{% endif %}</span>
+                </div>
+            {% empty %}
+                <p class="empty-text">No courses created yet.</p>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Lecturer Messages</h2>
+        <span class="muted-note">Messages sent from lecturer accounts</span>
+    </div>
+    <div class="message-list">
+        {% for notification in lecturer_messages %}
+            <div class="message-item shell">
+                <div>
+                    <strong>{{ notification.subject }}</strong>
+                    <span>From {{ notification.sender.full_name }} | {{ notification.recipient_total }} recipients</span>
+                    <p>{{ notification.body|truncatechars:180 }}</p>
+                </div>
+                <span>{{ notification.created_at|date:"M d, Y H:i" }}</span>
+            </div>
+        {% empty %}
+            <p class="empty-text">No lecturer messages have been sent yet.</p>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,57 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ page_title }} | EduConnect{% endblock %}
+
+{% block content %}
+<section class="login-section auth-page">
+    <div class="container">
+        <div class="section-heading centered">
+            <span class="eyebrow">{{ role_label }} Access</span>
+            <h2>{{ page_title }}</h2>
+            <p>{{ page_description }}</p>
+        </div>
+        <div class="auth-grid">
+            <div class="login-card auth-card">
+                <span class="card-tag">{{ role_label }}</span>
+                <h3>{{ login_button_label }}</h3>
+                <p>
+                    {% if auth_role == 'admin' %}
+                        Use the administrator credentials to manage the portal.
+                    {% elif auth_role == 'lecturer' %}
+                        Register teaching courses, publish materials, and send updates to students.
+                    {% else %}
+                        Sign in to register courses, open materials, and read lecturer updates.
+                    {% endif %}
+                </p>
+                {% if login_form.non_field_errors %}
+                    <div class="flash error">{{ login_form.non_field_errors }}</div>
+                {% endif %}
+                <form method="post" action="{{ login_action }}" class="stack-form">
+                    {% csrf_token %}
+                    {{ login_form.role }}
+                    <label>Username {{ login_form.username }} {{ login_form.username.errors }}</label>
+                    <label>
+                        <span>Password</span>
+                        <div class="password-control">
+                            {{ login_form.password }}
+                            <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                        </div>
+                        {{ login_form.password.errors }}
+                    </label>
+                    <button type="submit" class="primary-btn full-width">{{ login_button_label }}</button>
+                </form>
+                <div class="auth-links">
+                    <a href="{% url 'portal:home' %}" class="ghost-btn small">Back to Home</a>
+                    {% if signup_available %}
+                        {% if is_student %}
+                            <a href="{% url 'portal:student-signup' %}" class="ghost-btn small">{{ signup_toggle_label }}</a>
+                        {% else %}
+                            <a href="{% url 'portal:lecturer-signup' %}" class="ghost-btn small">{{ signup_toggle_label }}</a>
+                        {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

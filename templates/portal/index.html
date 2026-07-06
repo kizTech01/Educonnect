@@ -1,0 +1,115 @@
+{% extends 'base.html' %}
+
+{% block title %}EduConnect | University Management Portal{% endblock %}
+
+{% block content %}
+<section class="hero-section" id="overview">
+    <div class="container hero-grid">
+        <div class="hero-copy">
+            <span class="eyebrow">Smart University Operations</span>
+            <h3>Manage lecturers, student engagement, materials, timetables, and department communication in one portal.</h3>
+            <p>EduConnect gives your university a shared digital home for academic coordination, paid and free learning materials, timetable access, handbook downloads, and targeted lecturer-to-student communication.</p>
+            <div class="hero-actions">
+                <a href="#login-hub" class="primary-btn">Access Portal</a>
+                <a href="{% url 'portal:student-signup' %}" class="ghost-btn">Sign Up</a>
+                <a href="{% url 'portal:role-login' role='lecturer' %}" class="ghost-btn">Lecturer Login</a>
+                <a href="{% url 'portal:role-login' role='admin' %}" class="ghost-btn">Admin Login</a>
+                <a href="#features" class="ghost-btn">See Features</a>
+            </div>
+            <!-- <div class="hero-stats">
+                <div class="stat-chip">
+                    <strong>{{ department_count }}</strong>
+                    <span>Departments</span>
+                </div>
+                <div class="stat-chip">
+                    <strong>{{ course_count }}</strong>
+                    <span>Courses</span>
+                </div>
+                <div class="stat-chip">
+                    <strong>{{ student_count }}</strong>
+                    <span>Students</span>
+                </div>
+                <div class="stat-chip">
+                    <strong>{{ material_count }}</strong>
+                    <span>Materials</span>
+                </div>
+            </div>
+        </div> -->
+        <div class="hero-panel">
+            <div class="hero-card large">
+                <span class="card-tag">Student</span>
+                <h3>Courses, materials, handbook, timetable, and lecturer messages.</h3>
+                <p>Students can register courses, browse lecturer materials, receive notifications, and download approved resources.</p>
+            </div>
+            <div class="hero-card accent">
+                <span class="card-tag">Lecturer</span>
+                <h3>Upload free or paid materials and control student access.</h3>
+            </div>
+            <div class="hero-card">
+                <span class="card-tag">Admin</span>
+                <h3>Approve lecturers, manage departments, documents, courses, and portal users.</h3>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="feature-section" id="features">
+    <div class="container">
+        <div class="section-heading">
+            <span class="eyebrow">Core Modules</span>
+            <h2>Built for student engagement and lecturer coordination</h2>
+        </div>
+        <div class="feature-grid">
+            <article class="feature-card">
+                <h3>Academic Resources</h3>
+                <p>Upload and manage timetables, departmental handbooks, and course materials in one place.</p>
+            </article>
+            <article class="feature-card">
+                <h3>Role-Based Dashboards</h3>
+                <p>Dedicated workflows for students, lecturers, and portal administrators.</p>
+            </article>
+            <article class="feature-card">
+                <h3>Paid Material Control</h3>
+                <p>Lecturers can publish free or paid materials, track students with pending amounts, and block downloads when needed.</p>
+            </article>
+            <article class="feature-card">
+                <h3>Targeted Communication</h3>
+                <p>Send messages to students by department, level, and lecturer-managed courses.</p>
+            </article>
+        </div>
+    </div>
+</section>
+
+
+<section class="login-section" id="login-hub">
+    <div class="container">
+        <div class="section-heading centered">
+            <span class="eyebrow">Portal Access</span>
+            <h2>Student Login</h2>
+            <p>Students can sign in here or use the sign up button to create a new account.</p>
+        </div>
+        <div class="auth-grid">
+            <div class="login-card">
+                <h3>Student Login</h3>
+                <p>Register courses, view materials, download timetable and handbook, and manage lecturer messages.</p>
+                <form method="post" action="{% url 'portal:login' %}" class="stack-form">
+                    {% csrf_token %}
+                    {{ student_login_form.role }}
+                    <label>Username {{ student_login_form.username }}</label>
+                    <label>
+                        <span>Password</span>
+                        <div class="password-control">
+                            {{ student_login_form.password }}
+                            <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                        </div>
+                    </label>
+                    <button type="submit" class="primary-btn full-width">Enter Student Dashboard</button>
+                </form>
+                <div class="auth-links">
+                    <a href="{% url 'portal:student-signup' %}" class="ghost-btn small">Sign up</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,110 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Lecturer Documents | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Upload Timetable</h2>
+        </div>
+        <form method="post" enctype="multipart/form-data" class="stack-form" action="{% url 'portal:lecturer-documents' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create-timetable">
+            <label>Department {{ timetable_form.department }} {{ timetable_form.department.errors }}</label>
+            <label>Semester {{ timetable_form.semester }} {{ timetable_form.semester.errors }}</label>
+            <label>Level {{ timetable_form.level }} {{ timetable_form.level.errors }}</label>
+            <label>Timetable file {{ timetable_form.file }} {{ timetable_form.file.errors }}</label>
+            <button type="submit" class="primary-btn">Upload Timetable</button>
+        </form>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Filter Timetables</h2>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Department {{ timetable_filter_form.department }}</label>
+            <label>Semester {{ timetable_filter_form.semester }}</label>
+            <label>Level {{ timetable_filter_form.level }}</label>
+            <label>Search {{ timetable_filter_form.search }}</label>
+            <button type="submit" class="primary-btn">Apply Filter</button>
+        </form>
+    </div>
+</section>
+
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Filter Handbooks</h2>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Department {{ handbook_filter_form.department }}</label>
+            <label>Search {{ handbook_filter_form.search }}</label>
+            <button type="submit" class="primary-btn">Apply Filter</button>
+        </form>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Handbooks</h2>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Department</th>
+                        <th>Title</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in handbooks %}
+                        <tr>
+                            <td>{{ item.department.name }}</td>
+                            <td>{{ item.title }}</td>
+                            <td><a href="{% url 'portal:download-document' 'handbook' item.id %}" class="ghost-btn small">Download</a></td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="3">No handbook documents uploaded.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Timetables</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Department</th>
+                    <th>Semester</th>
+                    <th>Level</th>
+                    <th>Title</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in timetables %}
+                    <tr>
+                        <td>{{ item.department.name }}</td>
+                        <td>{{ item.get_semester_display }}</td>
+                        <td>{{ item.level|default:"-" }}</td>
+                        <td>{{ item.title }}</td>
+                        <td><a href="{% url 'portal:download-document' 'timetable' item.id %}" class="ghost-btn small">Download</a></td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5">No timetable documents uploaded.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

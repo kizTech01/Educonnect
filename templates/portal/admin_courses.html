@@ -1,0 +1,117 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Manage Courses | MAU EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Add Course</h2>
+        </div>
+        <form method="post" enctype="multipart/form-data" class="stack-form" action="{% url 'portal:admin-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create-course">
+            <label>Department {{ form.department }} {{ form.department.errors }}</label>
+            <label>Course title {{ form.title }} {{ form.title.errors }}</label>
+            <label>Course code {{ form.code }} {{ form.code.errors }}</label>
+            <label>Lecturer {{ form.lecturer }} {{ form.lecturer.errors }}</label>
+            <label>Level {{ form.level }} {{ form.level.errors }}</label>
+            <label>Semester {{ form.semester }} {{ form.semester.errors }}</label>
+            <label>Course file {{ form.file }} {{ form.file.errors }}</label>
+            <label>Free course {{ form.is_free }} {{ form.is_free.errors }}</label>
+            <label>Amount {{ form.amount }} {{ form.amount.errors }}</label>
+            <p class="muted-note">Entering an amount marks the course as paid automatically. Leave it blank or at 0.00 for free courses.</p>
+            <button type="submit" class="primary-btn">Save Course</button>
+        </form>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Search Courses</h2>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Department {{ filter_form.department }}</label>
+            <label>Level {{ filter_form.level }}</label>
+            <label>Fee type {{ filter_form.fee_type }}</label>
+            <label>Search {{ filter_form.search }}</label>
+            <button type="submit" class="primary-btn">Filter Courses</button>
+        </form>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Current Courses</h2>
+    </div>
+    {% if request.GET.fee_type == 'paid' %}
+        <p class="muted-note">Showing only courses that are not free, including their fixed payable amounts.</p>
+    {% endif %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Code</th>
+                    <th>Title</th>
+                    <th>Department</th>
+                    <th>Level</th>
+                    <th>Lecturer</th>
+                    <th>Fee</th>
+                    <th>File</th>
+                    <th>Schedule</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for course in courses %}
+                    <tr>
+                        <td>{{ course.code }}</td>
+                        <td>{{ course.title }}</td>
+                        <td>{{ course.department.name }}</td>
+                        <td>{{ course.level }}</td>
+                        <td>{{ course.lecturer.full_name|default:"Pending" }}</td>
+                        <td>{% if course.is_free %}Free{% else %}Paid {{ course.amount }}{% endif %}</td>
+                        <td>{% if course.file %}<a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small">Download</a>{% else %}<span class="muted-note">No file</span>{% endif %}</td>
+                        <td>{{ course.schedule_day|default:"TBA" }} {{ course.schedule_time|time:"H:i"|default:"" }} {{ course.venue|default:"" }}</td>
+                        <td class="actions-cell">
+                            <a href="{% url 'portal:admin-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
+                            <form method="post" action="{% url 'portal:admin-delete-course' course.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="danger-btn small">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="9">No courses created yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+{% if edit_form %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Edit {{ edit_course.code }}</h2>
+    </div>
+    <form method="post" enctype="multipart/form-data" class="stack-form" action="{% url 'portal:admin-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="update-course">
+        <input type="hidden" name="course_id" value="{{ edit_course.id }}">
+        <label>Course title {{ edit_form.title }} {{ edit_form.title.errors }}</label>
+        <label>Description {{ edit_form.description }} {{ edit_form.description.errors }}</label>
+        <label>Level {{ edit_form.level }} {{ edit_form.level.errors }}</label>
+        <label>Semester {{ edit_form.semester }} {{ edit_form.semester.errors }}</label>
+        <label>Credit units {{ edit_form.credit_units }} {{ edit_form.credit_units.errors }}</label>
+        <label>Schedule day {{ edit_form.schedule_day }} {{ edit_form.schedule_day.errors }}</label>
+        <label>Schedule time {{ edit_form.schedule_time }} {{ edit_form.schedule_time.errors }}</label>
+        <label>Venue {{ edit_form.venue }} {{ edit_form.venue.errors }}</label>
+        <label>Course file {{ edit_form.file }} {{ edit_form.file.errors }}</label>
+        <label>Course type {{ edit_form.is_free }} {{ edit_form.is_free.errors }}</label>
+        <label>Amount {{ edit_form.amount }} {{ edit_form.amount.errors }}</label>
+        <p class="muted-note">Entering an amount marks the course as paid automatically. Leave it blank or at 0.00 for free courses.</p>
+        <button type="submit" class="primary-btn">Update Course</button>
+    </form>
+</section>
+{% endif %}
+{% endblock %}

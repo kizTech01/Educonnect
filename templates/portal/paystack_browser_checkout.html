@@ -1,0 +1,63 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}{{ checkout_heading }} | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>{{ checkout_heading }}</h2>
+    </div>
+
+    {% if checkout_notice %}
+        <div class="flash warning">{{ checkout_notice }}</div>
+    {% endif %}
+
+    <div class="detail-grid">
+        <p><strong>{{ checkout_label }}:</strong> {{ checkout_value }}</p>
+        <p><strong>Reference:</strong> {{ payment.paystack_reference }}</p>
+        <p><strong>Amount:</strong> {{ checkout_amount_display }}</p>
+    </div>
+
+    <div class="reader-body">
+        <p class="muted-note">Paystack will open directly in your browser. If it does not appear automatically, use the button below.</p>
+        <button type="button" class="primary-btn" id="open-paystack">Open Paystack</button>
+        <a href="{{ checkout_cancel_url }}" class="ghost-btn small">Cancel</a>
+    </div>
+</section>
+
+<script src="https://js.paystack.co/v1/inline.js"></script>
+<script>
+(function () {
+    const launchPaystack = function () {
+        if (!window.PaystackPop || typeof window.PaystackPop.setup !== "function") {
+            return;
+        }
+
+        const handler = PaystackPop.setup({
+            key: "{{ checkout_public_key|escapejs }}",
+            email: "{{ checkout_email|escapejs }}",
+            amount: {{ checkout_amount_in_kobo }},
+            ref: "{{ payment.paystack_reference|escapejs }}",
+            callback: function (response) {
+                const reference = response && (response.reference || response.trxref)
+                    ? (response.reference || response.trxref)
+                    : "{{ payment.paystack_reference|escapejs }}";
+                window.location.href = "{{ checkout_callback_url|escapejs }}?reference=" + encodeURIComponent(reference);
+            },
+            onClose: function () {
+                window.location.href = "{{ checkout_cancel_url|escapejs }}";
+            },
+        });
+
+        handler.openIframe();
+    };
+
+    const button = document.getElementById("open-paystack");
+    if (button) {
+        button.addEventListener("click", launchPaystack);
+    }
+
+    launchPaystack();
+})();
+</script>
+{% endblock %}

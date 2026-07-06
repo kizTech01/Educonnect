@@ -1,0 +1,158 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Student Courses | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Search Courses</h2>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Department {{ filter_form.department }}</label>
+            <label>Level {{ filter_form.level }}</label>
+            <label>Search {{ filter_form.search }}</label>
+            <button type="submit" class="primary-btn">Filter Courses</button>
+        </form>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>My Registered Courses</h2>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                <tr>
+                    <th>Course</th>
+                    <th>Lecturer</th>
+                    <th>Department</th>
+                    <th>Level</th>
+                    <th>Payment</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody>
+                    {% for row in registration_rows %}
+                        <tr>
+                            <td>
+                                <span class="table-cell-title">{{ row.registration.course.code }} - {{ row.registration.course.title }}</span>
+                                <span class="table-cell-subtext">{{ row.registration.course.department.name }} | Level {{ row.registration.course.level }}</span>
+                            </td>
+                            <td>{{ row.registration.course.lecturer.full_name|default:"Pending assignment" }}</td>
+                            <td>{{ row.registration.course.department.name }}</td>
+                            <td>{{ row.registration.course.level }}</td>
+                            <td>
+                                {% if row.registration.course.is_free %}
+                                    <span class="status-pill success">Free</span>
+                                {% elif row.is_paid %}
+                                    <span class="status-pill success">Paid {{ row.display_amount }}</span>
+                                {% else %}
+                                    <span class="status-pill warning">Pending {{ row.display_amount }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="actions-cell">
+                                {% if row.needs_payment %}
+                                    <form method="post" action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="action" value="pay-course">
+                                        <input type="hidden" name="course_id" value="{{ row.registration.course.id }}">
+                                        <button type="submit" class="primary-btn small">Payment {{ row.display_amount }}</button>
+                                    </form>
+                                {% elif row.can_download %}
+                                    <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small">Download</a>
+                                {% else %}
+                                    <span class="status-pill success">{% if row.registration.course.is_free %}Free{% else %}Paid{% endif %}</span>
+                                {% endif %}
+                                <form method="post" action="{% url 'portal:student-course-delete' row.registration.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                    {% csrf_token %}
+                                    <button type="submit" class="danger-btn small">Remove</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="6">You have not registered any courses.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Available Courses</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Course</th>
+                    <th>Department</th>
+                    <th>Level</th>
+                    <th>Lecturer</th>
+                    <th>Fee</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for course in available_courses %}
+                    <tr>
+                        <td>
+                            <span class="table-cell-title">{{ course.code }} - {{ course.title }}</span>
+                            <span class="table-cell-subtext">{{ course.department.name }} | {{ course.lecturer.full_name|default:"Pending assignment" }}</span>
+                        </td>
+                        <td>{{ course.department.name }}</td>
+                        <td>{{ course.level }}</td>
+                        <td>{{ course.lecturer.full_name|default:"Pending assignment" }}</td>
+                        <td>
+                            {% if course.is_free %}
+                                <span class="status-pill success">Free</span>
+                            {% elif course.id in paid_course_ids %}
+                                <span class="status-pill success">Paid {{ course.amount }}</span>
+                            {% else %}
+                                <span class="status-pill warning">{{ course.amount }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if course.id in registered_course_ids %}
+                                <span class="status-pill success">Registered</span>
+                            {% elif course.is_free %}
+                                <span class="status-pill success">Free</span>
+                            {% else %}
+                                <span class="status-pill warning">Pay {{ course.amount }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="actions-cell">
+                            {% if course.id in registered_course_ids %}
+                                <span class="muted-note">Already registered</span>
+                            {% elif course.is_free %}
+                                <form method="post" action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="register-course">
+                                    <input type="hidden" name="course_id" value="{{ course.id }}">
+                                    <button type="submit" class="ghost-btn small">Register</button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="pay-course">
+                                    <input type="hidden" name="course_id" value="{{ course.id }}">
+                                    <button type="submit" class="primary-btn small">Pay {{ course.amount }}</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="7">No courses match your current filters.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

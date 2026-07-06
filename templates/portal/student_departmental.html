@@ -1,0 +1,146 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Student Departmental | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Current Session Payment</h2>
+            <div class="dashboard-meta">
+                <span class="status-pill success">{{ current_session.name }}</span>
+                <span class="status-pill">{{ current_semester }}</span>
+            </div>
+        </div>
+        <div class="detail-grid">
+            <p><strong>Student:</strong> {{ request.user.full_name }}</p>
+            <p><strong>Student ID:</strong> {{ request.user.id_number }}</p>
+            <p><strong>Department:</strong> {{ request.user.department.name|default:"Not assigned" }}</p>
+            <p><strong>Level:</strong> {{ request.user.level }}</p>
+        </div>
+        {% if not request.user.department %}
+            <div class="flash error">Your account does not have a department yet. Update your profile or ask the admin to assign your department before paying departmental fees.</div>
+            <a href="{% url 'portal:profile' %}" class="ghost-btn small">Open Profile</a>
+        {% elif departmental_payment and departmental_payment.is_paid %}
+            <div class="reader-body">
+                <p><strong>Payment completed.</strong></p>
+                <p>{{ departmental_payment.association_summary }}</p>
+                <p>Reference: {{ departmental_payment.paystack_reference }}</p>
+                <a href="{% url 'portal:download-exam-card' departmental_payment.id %}" class="primary-btn small">Download Exam Card PDF</a>
+            </div>
+        {% else %}
+            <form method="post" enctype="multipart/form-data" class="stack-form departmental-student-form" data-departmental-form>
+                {% csrf_token %}
+                {% if departmental_form.non_field_errors %}
+                    <div class="flash error">{{ departmental_form.non_field_errors }}</div>
+                {% endif %}
+                <label>
+                    White Form
+                    {{ departmental_form.white_form }}
+                    {{ departmental_form.white_form.errors }}
+                </label>
+                <label>
+                    School Receipt
+                    {{ departmental_form.school_receipt }}
+                    {{ departmental_form.school_receipt.errors }}
+                </label>
+                <label>
+                    Supporting Documents
+                    {{ departmental_form.supporting_documents }}
+                    {{ departmental_form.supporting_documents.errors }}
+                </label>
+
+                <div class="detail-card">
+                    <h3>Fee Breakdown</h3>
+                    <div class="message-list">
+                        <div class="message-item shell">
+                            <div>
+                                <strong>{{ fee_map.departmental_fee.association.name }}</strong>
+                                <span>Required</span>
+                            </div>
+                            <span class="status-pill success">{{ fee_map.departmental_fee.amount }}</span>
+                        </div>
+                        <div class="radio-group">
+                            <strong>Select one association</strong>
+                            {{ departmental_form.association_choice.errors }}
+                            {% for option in departmental_form.association_choice %}
+                                <label class="option-row" data-fee-option>
+                                    {{ option.tag }}
+                                    <span>{{ option.choice_label }}</span>
+                                </label>
+                            {% endfor %}
+                        </div>
+                        {% if departmental_form.additional_associations %}
+                            <div class="checkbox-group">
+                                <strong>Additional Associations</strong>
+                                {{ departmental_form.additional_associations.errors }}
+                                {% for option in departmental_form.additional_associations %}
+                                    <label class="option-row" data-fee-option>
+                                        {{ option.tag }}
+                                        <span>{{ option.choice_label }}</span>
+                                    </label>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    </div>
+                    <p class="departmental-total">
+                        Total Amount Payable:
+                        <strong data-total-display>{{ fee_map.departmental_fee.amount }}</strong>
+                    </p>
+                </div>
+
+                <script type="application/json" id="departmental-fees-data">
+                    {
+                        "departmental_fee": "{{ fee_map.departmental_fee.amount }}",
+                        {% for code, fee in fee_map.items %}
+                            "{{ code }}": "{{ fee.amount }}"{% if not forloop.last %},{% endif %}
+                        {% endfor %}
+                    }
+                </script>
+
+                <button type="submit" class="primary-btn">Pay</button>
+                <p class="muted-note">You will be redirected to Paystack to complete payment and then returned to this site automatically.</p>
+            </form>
+        {% endif %}
+    </div>
+
+    <div class="panel-card payment-history-card">
+        <div class="panel-head">
+            <h2>Payment History</h2>
+            <span class="muted-note">Download exam card PDFs for any paid session.</span>
+        </div>
+        <div class="table-wrap responsive-table-wrap">
+            <table class="responsive-table">
+                <thead>
+                    <tr>
+                        <th>Session</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                        <th>Exam Card</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for payment in departmental_history %}
+                        <tr>
+                            <td>{{ payment.session.name }}</td>
+                            <td>{{ payment.get_status_display }}</td>
+                            <td>{{ payment.paid_at|date:"M d, Y H:i"|default:"-" }}</td>
+                            <td>
+                                {% if payment.is_paid %}
+                                    <a href="{% url 'portal:download-exam-card' payment.id %}" class="ghost-btn small">Download</a>
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="4">No departmental payment history yet.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+{% endblock %}

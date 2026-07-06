@@ -1,0 +1,71 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ page_title }} | EduConnect{% endblock %}
+
+{% block content %}
+<section class="login-section auth-page">
+    <div class="container">
+        <div class="section-heading centered">
+            <span class="eyebrow">{{ role_label }} Access</span>
+            <h2>{{ page_title }}</h2>
+            <p>{{ page_description }}</p>
+        </div>
+        <div class="auth-grid">
+            <div class="login-card auth-card">
+                <span class="card-tag">{{ role_label }}</span>
+                <h3>{{ page_title }}</h3>
+                {% if signup_form.non_field_errors %}
+                    <div class="flash error">{{ signup_form.non_field_errors }}</div>
+                {% endif %}
+                <form method="post" action="{{ signup_action }}" class="stack-form">
+                    {% csrf_token %}
+                    <label>Username {{ signup_form.username }} {{ signup_form.username.errors }}</label>
+                    <label>First name {{ signup_form.first_name }} {{ signup_form.first_name.errors }}</label>
+                    <label>Last name {{ signup_form.last_name }} {{ signup_form.last_name.errors }}</label>
+                    <label>Email address {{ signup_form.email }} {{ signup_form.email.errors }}</label>
+                    <label>
+                        {% if is_student %}
+                            Student ID
+                        {% else %}
+                            Lecturer ID
+                        {% endif %}
+                        {{ signup_form.id_number }} {{ signup_form.id_number.errors }}
+                    </label>
+                    <label>Department {{ signup_form.department }} {{ signup_form.department.errors }}</label>
+                    {% if is_student %}
+                        <label>Level {{ signup_form.level }} {{ signup_form.level.errors }}</label>
+                    {% endif %}
+                    <label>Phone number {{ signup_form.phone_number }} {{ signup_form.phone_number.errors }}</label>
+                    <label>
+                        <span>Password</span>
+                        <div class="password-control">
+                            {{ signup_form.password1 }}
+                            <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                        </div>
+                        {{ signup_form.password1.errors }}
+                    </label>
+                    <label>
+                        <span>Confirm password</span>
+                        <div class="password-control">
+                            {{ signup_form.password2 }}
+                            <button type="button" class="password-toggle" data-password-toggle>Show</button>
+                        </div>
+                        {{ signup_form.password2.errors }}
+                    </label>
+                    <button type="submit" class="primary-btn full-width">
+                        {% if is_student %}
+                            Create Student Account
+                        {% else %}
+                            Create Lecturer Account
+                        {% endif %}
+                    </button>
+                </form>
+                <div class="auth-links">
+                    <a href="{{ back_url }}" class="ghost-btn small">Back to Login</a>
+                    <a href="{% url 'portal:home' %}" class="ghost-btn small">Home</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

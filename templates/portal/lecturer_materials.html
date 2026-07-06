@@ -1,0 +1,122 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Lecturer Materials | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Upload Course Files</h2>
+        </div>
+        <form method="post" enctype="multipart/form-data" class="stack-form" action="{% url 'portal:lecturer-materials' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+            {% csrf_token %}
+            {{ form.as_p }}
+            <button type="submit" class="primary-btn">Publish Files</button>
+        </form>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Search Materials</h2>
+        </div>
+        <form method="get" class="stack-form">
+            <label>Search <input type="text" name="search" class="input-field" value="{{ request.GET.search }}" placeholder="Title, course, lecturer, or department"></label>
+            <button type="submit" class="primary-btn">Filter Materials</button>
+        </form>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Material Rules</h2>
+    </div>
+    <ul class="bullet-list">
+        <li>You can upload one or many files for the same course in one submission.</li>
+        <li>Mark the files as free or paid before publishing.</li>
+        <li>Students on your registered courses automatically receive an access record.</li>
+        <li>Use the student access page to switch a material between pending, paid, or blocked.</li>
+    </ul>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>All Materials Library</h2>
+        <span class="muted-note">Lecturers can view and download every material here</span>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Course</th>
+                    <th>Lecturer</th>
+                    <th>Type</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for material in all_materials %}
+                    <tr>
+                        <td>{{ material.title }}</td>
+                        <td>{{ material.course.code }}</td>
+                        <td>{{ material.lecturer.full_name|default:"-" }}</td>
+                        <td>{% if material.is_free %}Free{% else %}Paid ({{ material.amount }}){% endif %}</td>
+                        <td class="actions-cell">
+                            <a href="{% url 'portal:download-material' material.id %}" class="ghost-btn small">Download</a>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5">No materials available yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Published Materials</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Course</th>
+                    <th>Pricing</th>
+                    <th>Access Stats</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in material_rows %}
+                    <tr>
+                        <td>{{ row.material.title }}</td>
+                        <td>{{ row.material.course.code }}</td>
+                        <td>{% if row.material.is_free %}Free{% else %}Paid ({{ row.material.amount }}){% endif %}</td>
+                        <td>
+                            Available {{ row.stats.available|default:0 }},
+                            Paid {{ row.stats.paid|default:0 }},
+                            Pending {{ row.stats.pending|default:0 }},
+                            Blocked {{ row.stats.blocked|default:0 }}
+                        </td>
+                        <td class="actions-cell">
+                            <a href="{% url 'portal:download-material' row.material.id %}" class="ghost-btn small">Preview</a>
+                            <form method="post" action="{% url 'portal:lecturer-material-delete' row.material.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}
+                                <button type="submit" class="danger-btn small">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5">No materials uploaded yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

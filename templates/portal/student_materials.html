@@ -1,0 +1,96 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Student Downloads | MAU EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Search Course Downloads</h2>
+    </div>
+    <form method="get" class="stack-form">
+        <label>Search <input type="text" name="search" class="input-field" value="{{ request.GET.search }}" placeholder="Course, lecturer, or department"></label>
+        <button type="submit" class="primary-btn">Filter Downloads</button>
+    </form>
+</section>
+
+<section class="stack-form">
+    {% for row in download_rows %}
+        <article class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <h2>{{ row.registration.course.code }} - {{ row.registration.course.title }}</h2>
+                    <p class="muted-note">{{ row.registration.course.department.name }} | Level {{ row.registration.course.level }} | {{ row.registration.course.lecturer.full_name|default:"Pending lecturer" }}</p>
+                </div>
+                <span class="status-pill {% if row.registration.course.is_free or row.is_paid %}success{% else %}warning{% endif %}">
+                    {% if row.registration.course.is_free or row.is_paid %}
+                        Ready
+                    {% else %}
+                        Payment Required
+                    {% endif %}
+                </span>
+            </div>
+
+                <div class="detail-grid">
+                <p><strong>Registered:</strong> {{ row.registration.created_at|date:"M d, Y" }}</p>
+                <p><strong>Payment:</strong>
+                    {% if row.registration.course.is_free %}
+                        Free
+                    {% elif row.is_paid %}
+                        Paid {{ row.display_amount }}
+                    {% else %}
+                        Pending {{ row.display_amount }}
+                    {% endif %}
+                </p>
+            </div>
+
+            {% if row.needs_payment %}
+                <form method="post" action="{% url 'portal:student-courses' %}" class="stack-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="pay-course">
+                    <input type="hidden" name="course_id" value="{{ row.registration.course.id }}">
+                    <button type="submit" class="primary-btn full-width">Payment {{ row.display_amount }}</button>
+                </form>
+            {% else %}
+                <div class="message-list">
+                    {% if row.registration.course.file %}
+                        <div class="message-item shell">
+                            <div>
+                                <strong>Main Course File</strong>
+                                <span>{{ row.registration.course.file.name|slice:"-60:" }}</span>
+                            </div>
+                            <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small">Download</a>
+                        </div>
+                    {% endif %}
+
+                    {% for item in row.materials %}
+                        <div class="message-item shell">
+                            <div>
+                                <strong>{{ item.material.title }}</strong>
+                                <span>
+                                    {% if item.material.description %}
+                                        {{ item.material.description|truncatechars:120 }}
+                                    {% else %}
+                                        Course attachment
+                                    {% endif %}
+                                </span>
+                            </div>
+                            {% if item.access and item.access.status == "blocked" %}
+                                <span class="status-pill danger">Blocked</span>
+                            {% else %}
+                                <a href="{% url 'portal:download-material' item.material.id %}" class="ghost-btn small">Download</a>
+                            {% endif %}
+                        </div>
+                    {% empty %}
+                        <p class="empty-text">No additional files have been uploaded for this course yet.</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        </article>
+    {% empty %}
+        <article class="resource-card empty">
+            <h3>No downloads yet</h3>
+            <p>Course files for your registered courses will appear here.</p>
+        </article>
+    {% endfor %}
+</section>
+{% endblock %}

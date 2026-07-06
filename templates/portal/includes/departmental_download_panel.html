@@ -1,0 +1,132 @@
+<section id="students" class="panel-card">
+    <div class="panel-head">
+        <div>
+            <h2>
+                {% if departmental_download_scope == 'lecturer' %}
+                    Paid Courses Students
+                {% else %}
+                    Paid Departmental Students
+                {% endif %}
+            </h2>
+            <p class="muted-note">Filter by student ID, department, or level, then open a student to inspect the uploaded payment documents.</p>
+        </div>
+        <a href="{% url 'portal:departmental-student-ids-pdf' %}" class="ghost-btn small">Download All IDs</a>
+    </div>
+
+    <form method="get" class="stack-form filter-grid filter-grid-vertical">
+        <div class="filter-field">
+            {{ departmental_search_form.student_id.label_tag }}
+            {{ departmental_search_form.student_id }}
+        </div>
+        <div class="filter-field">
+            {{ departmental_search_form.department.label_tag }}
+            {{ departmental_search_form.department }}
+        </div>
+        <div class="filter-field">
+            {{ departmental_search_form.level.label_tag }}
+            {{ departmental_search_form.level }}
+        </div>
+        <div class="filter-actions">
+            <button type="submit" class="primary-btn small">Filter</button>
+        </div>
+    </form>
+
+    <div class="split-layout departmental-summary">
+        <div class="panel-card">
+            <div class="panel-head">
+                <h3>Paid Students</h3>
+                <span class="muted-note">{{ departmental_completed_payments|length }} records</span>
+            </div>
+            <div class="message-list">
+                {% for payment in departmental_completed_payments %}
+                    <a
+                        href="{% if departmental_download_scope == 'lecturer' %}{% url 'portal:lecturer-departmental-download' %}{% else %}{% url 'portal:admin-departmental-download' %}{% endif %}?payment={{ payment.id }}{% if request.GET.department %}&department={{ request.GET.department }}{% endif %}{% if request.GET.level %}&level={{ request.GET.level }}{% endif %}{% if request.GET.student_id %}&student_id={{ request.GET.student_id }}{% endif %}"
+                        class="message-item shell {% if departmental_selected_payment and departmental_selected_payment.id == payment.id %}selected{% endif %}"
+                    >
+                        <div>
+                            <strong>{{ payment.student.full_name }}</strong>
+                            <span>{{ payment.student.id_number }} | {{ payment.department.name }} | Level {{ payment.student.level }}</span>
+                        </div>
+                        <span class="status-pill success">{{ payment.session.name }}</span>
+                    </a>
+                {% empty %}
+                    <p class="empty-text">No paid departmental records yet.</p>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="panel-card">
+            {% if departmental_selected_payment %}
+                <div class="panel-head">
+                    <h3>{{ departmental_selected_payment.student.full_name }}</h3>
+                    <span class="status-pill success">{{ departmental_selected_payment.session.name }}</span>
+                </div>
+                <div class="detail-grid">
+                    <p><strong>Student ID:</strong> {{ departmental_selected_payment.student.id_number }}</p>
+                    <p><strong>Department:</strong> {{ departmental_selected_payment.department.name }}</p>
+                    <p><strong>Level:</strong> {{ departmental_selected_payment.student.level }}</p>
+                    <p><strong>Reference:</strong> {{ departmental_selected_payment.paystack_reference }}</p>
+                    <p><strong>Amount:</strong> {{ departmental_selected_payment.total_amount }}</p>
+                    <p><strong>Paid At:</strong> {{ departmental_selected_payment.paid_at|date:"M d, Y H:i"|default:"-" }}</p>
+                </div>
+                <div class="message-list">
+                    {% for document in departmental_selected_payment.documents.all %}
+                        <div class="message-item shell">
+                            <div>
+                                <strong>{{ document.get_category_display }}</strong>
+                                <span>{{ document.title }}</span>
+                            </div>
+                            <a href="{% url 'portal:download-departmental-document' document.id %}" class="ghost-btn small">Download</a>
+                        </div>
+                    {% empty %}
+                        <p class="empty-text">No uploaded documents found for this student.</p>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div class="empty-text">Select a student from the list to view their departmental payment details and documents.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <section class="split-layout departmental-summary">
+        <div class="panel-card">
+            <div class="panel-head">
+                <h3>By Department</h3>
+                <span class="muted-note">Completed payments</span>
+            </div>
+            <div class="message-list">
+                {% for row in departmental_department_totals %}
+                    <div class="message-item shell">
+                        <div>
+                            <strong>{{ row.department__name }}</strong>
+                            <span>{{ row.total }} students</span>
+                        </div>
+                        <a href="{% url 'portal:departmental-student-ids-pdf' %}?department={{ row.department__id }}" class="ghost-btn small">Download IDs</a>
+                    </div>
+                {% empty %}
+                    <p class="empty-text">No paid departmental records yet.</p>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="panel-head">
+                <h3>By Level</h3>
+                <span class="muted-note">Department and level filters</span>
+            </div>
+            <div class="message-list">
+                {% for row in departmental_level_totals %}
+                    <div class="message-item shell">
+                        <div>
+                            <strong>{{ row.department__name }}{% if row.student__level %} - Level {{ row.student__level }}{% endif %}</strong>
+                            <span>{{ row.total }} students</span>
+                        </div>
+                        <a href="{% url 'portal:departmental-student-ids-pdf' %}?department={{ row.department__id }}&level={{ row.student__level }}" class="ghost-btn small">Download IDs</a>
+                    </div>
+                {% empty %}
+                    <p class="empty-text">No level summaries available.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+</section>

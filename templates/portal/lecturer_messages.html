@@ -1,0 +1,61 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Lecturer Messages | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>Send Message</h2>
+        </div>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            {{ form.as_p }}
+            <button type="submit" class="primary-btn">Send Notification</button>
+        </form>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head">
+            <h2>How Targeting Works</h2>
+        </div>
+        <ul class="bullet-list">
+            <li>Select one or more departments to narrow the audience.</li>
+            <li>Choose a level from the dropdown when you want only students in that class year.</li>
+            <li>If no department is selected, your message reaches students across your registered courses.</li>
+        </ul>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Sent Messages</h2>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Subject</th>
+                    <th>Level</th>
+                    <th>Recipients</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for notification in sent_notifications %}
+                    <tr>
+                        <td>{{ notification.subject }}</td>
+                        <td>{{ notification.level|default:"All levels" }}</td>
+                        <td>{{ notification.recipient_total }}</td>
+                        <td>{{ notification.created_at|date:"M d, Y H:i" }}</td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="4">No messages have been sent yet.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
