@@ -242,7 +242,7 @@ def sidebar_links(request):
                 "url": f'{reverse("portal:admin-courses")}?fee_type=paid',
                 "active": current == "admin-courses" and request.GET.get("fee_type") == "paid",
             },
-            {"label": "Documents", "url_name": "portal:admin-documents"},
+            {"label": "Timetable and Handbook", "url_name": "portal:admin-documents"},
             {"label": "Users", "url_name": "portal:admin-users"},
         ]
     elif request.user.role == User.Role.LECTURER:
@@ -262,7 +262,7 @@ def sidebar_links(request):
             {"label": "Register Courses", "url_name": "portal:lecturer-courses"},
             {"label": "View Courses", "url_name": "portal:lecturer-courses"},
             {"label": "Messages", "url_name": "portal:lecturer-messages"},
-            {"label": "Documents", "url_name": "portal:lecturer-documents"},
+            {"label": "Timetable and Handbook", "url_name": "portal:lecturer-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
     else:
@@ -271,7 +271,7 @@ def sidebar_links(request):
             {"label": "Departmental", "url_name": "portal:student-departmental"},
             {"label": "Course Registration", "url_name": "portal:student-courses"},
             {"label": "Messages", "url_name": "portal:student-messages"},
-            {"label": "Timetable & Handbook", "url_name": "portal:student-documents"},
+            {"label": "Timetable and Handbook", "url_name": "portal:student-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
     resolved_links = []
@@ -1189,6 +1189,10 @@ def student_courses(request):
             return redirect(_redirect_with_query(request, "portal:student-courses"))
 
         if action == "register-course":
+            payment = payments.get(course.id) or CoursePayment.objects.filter(student=request.user, course=course).first()
+            if not course.is_free and not (payment and payment.is_paid):
+                messages.error(request, "Please complete the course payment before registering this course.")
+                return redirect(_redirect_with_query(request, "portal:student-courses"))
             registration, created = StudentCourseRegistration.objects.get_or_create(
                 student=request.user,
                 course=course,
@@ -1438,7 +1442,7 @@ def student_documents(request):
         handbooks = handbooks.filter(department=request.user.department)
     context = dashboard_context(
         request,
-        "Timetable & Handbook",
+        "Timetable and Handbook",
         timetable_filter_form=timetable_filter_form,
         handbook_filter_form=handbook_filter_form,
         timetables=timetables,
@@ -1506,6 +1510,15 @@ def lecturer_courses(request):
                 messages.success(request, "Course registered for your lecturer workspace.")
             else:
                 messages.info(request, "That course is already in your workspace.")
+            return redirect(_redirect_with_query(request, "portal:lecturer-courses"))
+        elif action == "remove-course":
+            course = get_object_or_404(registered_courses, pk=request.POST.get("course_id"))
+            with transaction.atomic():
+                LecturerCourseRegistration.objects.filter(lecturer=request.user, course=course).delete()
+                if course.lecturer_id == request.user.id:
+                    course.lecturer = None
+                    course.save(update_fields=["lecturer", "updated_at"])
+            messages.success(request, "Course removed from your lecturer workspace.")
             return redirect(_redirect_with_query(request, "portal:lecturer-courses"))
         elif action == "update-course":
             course = get_object_or_404(registered_courses, pk=request.POST.get("course_id"))
@@ -1666,7 +1679,6 @@ def lecturer_messages(request):
 @role_required(User.Role.LECTURER)
 def lecturer_documents(request):
     timetable_filter_form, timetables = _filtered_timetables(request, prefix="tt")
-    handbook_filter_form, handbooks = _filtered_handbooks(request, prefix="hb")
     timetable_form = TimetableForm()
     if request.method == "POST" and request.POST.get("action") == "create-timetable":
         timetable_form = TimetableForm(request.POST, request.FILES)
@@ -1676,12 +1688,10 @@ def lecturer_documents(request):
             return redirect(_append_querystring(reverse("portal:lecturer-documents"), request))
     context = dashboard_context(
         request,
-        "Department Documents",
+        "Timetable and Handbook",
         timetable_form=timetable_form,
         timetable_filter_form=timetable_filter_form,
-        handbook_filter_form=handbook_filter_form,
         timetables=timetables,
-        handbooks=handbooks,
     )
     return render(request, "portal/lecturer_documents.html", context)
 

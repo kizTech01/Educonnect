@@ -42,10 +42,16 @@
                                 <span class="table-cell-muted">No file uploaded</span>
                             {% endif %}
                         </td>
-                        <td class="actions-cell">
-                            <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
-                            <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
-                        </td>
+                            <td class="actions-cell">
+                                <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
+                                <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
+                                <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="remove-course">
+                                    <input type="hidden" name="course_id" value="{{ course.id }}">
+                                    <button type="submit" class="danger-btn small">Remove</button>
+                                </form>
+                            </td>
                     </tr>
                 {% empty %}
                     <tr>
@@ -116,6 +122,12 @@
                                     <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
                                 {% endif %}
                                 <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
+                                <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action" value="remove-course">
+                                    <input type="hidden" name="course_id" value="{{ course.id }}">
+                                    <button type="submit" class="danger-btn small">Remove</button>
+                                </form>
                             </td>
                         </tr>
                     {% empty %}

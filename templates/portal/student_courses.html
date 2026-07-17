@@ -129,7 +129,7 @@
                         <td class="actions-cell">
                             {% if course.id in registered_course_ids %}
                                 <span class="muted-note">Already registered</span>
-                            {% elif course.is_free %}
+                            {% elif course.is_free or course.id in paid_course_ids %}
                                 <form method="post" action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                     {% csrf_token %}
                                     <input type="hidden" name="action" value="register-course">

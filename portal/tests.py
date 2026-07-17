@@ -31,6 +31,7 @@ from .models import (
     MaterialAccess,
     Notification,
     NotificationRecipient,
+    LecturerCourseRegistration,
     StudentCourseRegistration,
     User,
     UserAlert,
@@ -270,6 +271,37 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, reverse("portal:student-course-delete", args=[registration.id]))
         self.assertContains(response, "Remove")
 
+    def test_student_can_reregister_paid_course_without_new_payment(self):
+        registration = StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+
+        self.client.force_login(self.student)
+        remove_response = self.client.post(reverse("portal:student-course-delete", args=[registration.id]))
+        self.assertEqual(remove_response.status_code, 302)
+        self.assertFalse(StudentCourseRegistration.objects.filter(student=self.student, course=self.paid_course).exists())
+
+        page_response = self.client.get(reverse("portal:student-courses"))
+        self.assertContains(page_response, self.paid_course.code)
+        self.assertContains(page_response, 'name="action" value="register-course"', html=False)
+        self.assertNotContains(page_response, 'name="action" value="pay-course"', html=False)
+
+        register_response = self.client.post(
+            reverse("portal:student-courses"),
+            {
+                "action": "register-course",
+                "course_id": self.paid_course.id,
+            },
+        )
+
+        self.assertEqual(register_response.status_code, 302)
+        self.assertTrue(StudentCourseRegistration.objects.filter(student=self.student, course=self.paid_course).exists())
+        self.assertEqual(CoursePayment.objects.filter(student=self.student, course=self.paid_course).count(), 1)
+
     def test_student_courses_shows_download_button_for_free_registered_course(self):
         StudentCourseRegistration.objects.create(student=self.student, course=self.free_course, registered_by=self.student)
 
@@ -354,6 +386,24 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "Register Courses")
         self.assertNotContains(response, "My Courses")
 
+    def test_sidebar_uses_timetable_and_handbook_label_for_all_roles(self):
+        student_request = self.factory.get(reverse("portal:student-dashboard"))
+        student_request.user = self.student
+        student_request.resolver_match = None
+        lecturer_request = self.factory.get(reverse("portal:lecturer-dashboard"))
+        lecturer_request.user = self.lecturer
+        lecturer_request.resolver_match = None
+        admin_request = self.factory.get(reverse("portal:admin-dashboard"))
+        admin_request.user = self.admin
+        admin_request.resolver_match = None
+
+        self.assertIn("Timetable and Handbook", [item["label"] for item in sidebar_links(student_request)])
+        self.assertIn("Timetable and Handbook", [item["label"] for item in sidebar_links(lecturer_request)])
+        self.assertIn("Timetable and Handbook", [item["label"] for item in sidebar_links(admin_request)])
+        self.assertNotIn("Documents", [item["label"] for item in sidebar_links(student_request)])
+        self.assertNotIn("Documents", [item["label"] for item in sidebar_links(lecturer_request)])
+        self.assertNotIn("Documents", [item["label"] for item in sidebar_links(admin_request)])
+
     def test_lecturer_paid_courses_menu_shows_only_paid_registered_courses(self):
         self.client.force_login(self.lecturer)
         response = self.client.get(reverse("portal:lecturer-courses"), {"fee_type": "paid"})
@@ -362,7 +412,40 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "Paid Courses")
         self.assertContains(response, self.paid_course.code)
         self.assertNotContains(response, self.free_course.code)
-        self.assertContains(response, reverse("portal:lecturer-paid-course-students-pdf", args=[self.paid_course.id]))
+
+    def test_lecturer_can_remove_registered_course_and_register_again(self):
+        LecturerCourseRegistration.objects.create(lecturer=self.lecturer, course=self.paid_course)
+        self.client.force_login(self.lecturer)
+
+        remove_response = self.client.post(
+            reverse("portal:lecturer-courses"),
+            {
+                "action": "remove-course",
+                "course_id": self.paid_course.id,
+            },
+        )
+
+        self.assertEqual(remove_response.status_code, 302)
+        self.paid_course.refresh_from_db()
+        self.assertIsNone(self.paid_course.lecturer)
+        self.assertFalse(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer, course=self.paid_course).exists())
+
+        page_response = self.client.get(reverse("portal:lecturer-courses"))
+        self.assertContains(page_response, self.paid_course.code)
+        self.assertContains(page_response, 'name="action" value="register-course"', html=False)
+
+        register_response = self.client.post(
+            reverse("portal:lecturer-courses"),
+            {
+                "action": "register-course",
+                "course_id": self.paid_course.id,
+            },
+        )
+
+        self.assertEqual(register_response.status_code, 302)
+        self.paid_course.refresh_from_db()
+        self.assertEqual(self.paid_course.lecturer, self.lecturer)
+        self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer, course=self.paid_course).exists())
 
     def test_blank_course_gateway_stays_unconfigured_until_admin_saves_keys(self):
         CoursePaymentGateway.objects.all().delete()
@@ -408,6 +491,15 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertIn("Departmental", labels)
         departmental_link = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
         self.assertFalse(any(child["label"] == "Users" for child in departmental_link["children"]))
+
+    def test_lecturer_documents_page_is_timetable_only(self):
+        self.client.force_login(self.lecturer)
+        response = self.client.get(reverse("portal:lecturer-documents"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Upload Timetable")
+        self.assertNotContains(response, "Upload Handbook")
+        self.assertNotContains(response, "Filter Handbooks")
 
     def test_lecturer_users_page_lists_departmental_students_only(self):
         self.client.force_login(self.lecturer)

@@ -32,48 +32,6 @@
     </div>
 </section>
 
-<section class="split-layout">
-    <div class="panel-card">
-        <div class="panel-head">
-            <h2>Filter Handbooks</h2>
-        </div>
-        <form method="get" class="stack-form">
-            <label>Department {{ handbook_filter_form.department }}</label>
-            <label>Search {{ handbook_filter_form.search }}</label>
-            <button type="submit" class="primary-btn">Apply Filter</button>
-        </form>
-    </div>
-    <div class="panel-card">
-        <div class="panel-head">
-            <h2>Handbooks</h2>
-        </div>
-        <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Department</th>
-                        <th>Title</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for item in handbooks %}
-                        <tr>
-                            <td>{{ item.department.name }}</td>
-                            <td>{{ item.title }}</td>
-                            <td><a href="{% url 'portal:download-document' 'handbook' item.id %}" class="ghost-btn small">Download</a></td>
-                        </tr>
-                    {% empty %}
-                        <tr>
-                            <td colspan="3">No handbook documents uploaded.</td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</section>
-
 <section class="panel-card">
     <div class="panel-head">
         <h2>Timetables</h2>
