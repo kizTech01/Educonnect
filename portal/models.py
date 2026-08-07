@@ -2,6 +2,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from django.contrib.auth.models import AbstractUser
+from django.core.validators import FileExtensionValidator
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
@@ -54,6 +55,11 @@ class User(AbstractUser):
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES, blank=True)
     id_number = models.CharField(max_length=30, unique=True, null=True, blank=True)
     phone_number = models.CharField(max_length=30, blank=True)
+    passport_photo = models.FileField(
+        upload_to="passports/%Y/%m/",
+        blank=True,
+        validators=[FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png"])],
+    )
     is_approved = models.BooleanField(default=True)
     email_class_reminders = models.BooleanField(default=True)
     browser_alerts_enabled = models.BooleanField(default=False)
@@ -574,6 +580,10 @@ class CourseReminderDispatch(TimeStampedModel):
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="course_reminder_dispatches")
     scheduled_for = models.DateTimeField()
     channel = models.CharField(max_length=20, choices=Channel.choices)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=255, blank=True)
 
     class Meta:
         ordering = ["-scheduled_for", "-created_at"]

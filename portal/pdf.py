@@ -79,7 +79,7 @@ def _wrap_pdf_text(text: str, max_width: float, size: float, *, bold: bool = Fal
 def _text_lines(x: float, y: float, text: str, *, font: str = "F1", size: float = 10, color: str | None = None):
     commands = []
     if color:
-        commands.append(color)
+        commands.append(f"{color} rg")
     commands.extend(
         [
             "BT",
@@ -134,12 +134,11 @@ def _line_commands(x1: float, y1: float, x2: float, y2: float, *, stroke: str, l
     ]
 
 
-@lru_cache(maxsize=1)
-def _load_school_logo():
-    if not SCHOOL_LOGO_PATH.exists():
+def _load_png_image(image_path: Path):
+    if not image_path.exists():
         return None
 
-    data = SCHOOL_LOGO_PATH.read_bytes()
+    data = image_path.read_bytes()
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         return None
 
@@ -222,13 +221,62 @@ def _load_school_logo():
 
         previous_row = row
 
-    return width, height, zlib.compress(bytes(pixels))
+    return width, height, zlib.compress(bytes(pixels)), "FlateDecode"
 
 
-def _build_image_object(image_data: bytes, width: int, height: int) -> bytes:
+@lru_cache(maxsize=1)
+def _load_school_logo():
+    return _load_png_image(SCHOOL_LOGO_PATH)
+
+
+def _load_jpeg_image(image_path: Path):
+    if not image_path.exists():
+        return None
+
+    data = image_path.read_bytes()
+    if not data.startswith(b"\xff\xd8"):
+        return None
+
+    position = 2
+    sof_markers = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+    while position + 9 <= len(data):
+        if data[position] != 0xFF:
+            position += 1
+            continue
+        while position < len(data) and data[position] == 0xFF:
+            position += 1
+        if position >= len(data):
+            break
+        marker = data[position]
+        position += 1
+        if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+            continue
+        if position + 2 > len(data):
+            break
+        segment_length = struct.unpack(">H", data[position : position + 2])[0]
+        if segment_length < 2 or position + segment_length > len(data):
+            break
+        if marker in sof_markers:
+            height, width = struct.unpack(">HH", data[position + 3 : position + 7])
+            components = data[position + 7]
+            if width and height and components == 3:
+                return width, height, data, "DCTDecode"
+            return None
+        position += segment_length
+    return None
+
+
+def _load_passport_photo(passport_photo_path: str | None):
+    if not passport_photo_path:
+        return None
+    image_path = Path(passport_photo_path)
+    return _load_png_image(image_path) or _load_jpeg_image(image_path)
+
+
+def _build_image_object(image_data: bytes, width: int, height: int, image_filter: str) -> bytes:
     return (
         f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
-        "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode "
+        f"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /{image_filter} "
         f"/Length {len(image_data)} >>\nstream\n".encode("ascii")
         + image_data
         + b"\nendstream"
@@ -239,47 +287,41 @@ def build_exam_card_pdf(
     *,
     school_name: str,
     card_title: str,
-    subtitle: str | None,
     session_label: str | None = None,
     fields: list[tuple[str, str]],
-    reference: str,
     registered_courses: list[str] | None = None,
-    footer: str | None = None,
     portrait_text: str | None = None,
+    passport_photo_path: str | None = None,
 ) -> bytes:
-    student_rows = fields[:8] or [("Details", "")]
+    student_rows = [(label, value) for label, value in fields if label not in {"Department", "Clearance"}][:6] or [("Details", "")]
     course_entries = [course.strip() for course in (registered_courses or []) if course and course.strip()]
     if not course_entries:
         course_entries = ["No registered courses found."]
-    wrapped_courses = [_wrap_pdf_text(course, 660, 9.0, max_lines=2) for course in course_entries]
+    wrapped_courses = [_wrap_pdf_text(course, 650, 9.0, max_lines=2) for course in course_entries]
     course_line_count = sum(len(lines) for lines in wrapped_courses)
-    course_box_height = max(96, 24 + (course_line_count * 14))
-    session_height = 34 if session_label else 0
-    section_gap = 12
-    card_height = 456 + course_box_height + session_height + (section_gap if session_label else 0)
+    course_box_height = max(94, 28 + (course_line_count * 14))
+    student_height = 166
+    context_height = 50
+    section_gap = 16
+    bottom_margin = 24
+    course_y = bottom_margin
+    student_y = course_y + course_box_height + section_gap
+    context_y = student_y + student_height + section_gap
+    card_height = context_y + context_height + 128
 
     logo = _load_school_logo()
-    bottom_margin = 24
-    footer_height = 46
-    student_height = 176
-    course_y = bottom_margin + footer_height + section_gap
-    if session_label:
-        session_y = course_y + course_box_height + section_gap
-        student_y = session_y + session_height + section_gap
-    else:
-        session_y = None
-        student_y = course_y + course_box_height + section_gap
+    passport_photo = _load_passport_photo(passport_photo_path)
 
     commands: list[str] = ["q"]
-    commands.extend(_rect_commands(0, 0, CARD_WIDTH, card_height, fill=_rgb(0.995, 0.997, 0.992), stroke=_rgb(0.13, 0.52, 0.22), line_width=2.2))
-    commands.extend(_line_commands(CARD_MARGIN, card_height - 40, CARD_WIDTH - CARD_MARGIN, card_height - 40, stroke=_rgb(0.13, 0.52, 0.22), line_width=0.8))
+    commands.extend(_rect_commands(0, 0, CARD_WIDTH, card_height, fill=_rgb(0.998, 0.999, 0.996), stroke=_rgb(0.13, 0.52, 0.22), line_width=2.2))
+    commands.extend(_rect_commands(0, card_height - 12, CARD_WIDTH, 12, fill=_rgb(0.13, 0.52, 0.22)))
 
     if logo:
-        logo_width, logo_height, _ = logo
-        render_width = 58
+        logo_width, logo_height, _, _ = logo
+        render_width = 52
         render_height = render_width * (logo_height / logo_width)
         logo_x = (CARD_WIDTH - render_width) / 2
-        logo_y = card_height - 74
+        logo_y = card_height - 70
         commands.extend(
             [
                 "q",
@@ -292,49 +334,71 @@ def build_exam_card_pdf(
         commands.extend(
             [
                 "0.13 0.52 0.22 rg",
-                f"{(CARD_WIDTH / 2) - 18:.2f} {card_height - 74:.2f} 36 24 re f",
+                f"{(CARD_WIDTH / 2) - 18:.2f} {card_height - 70:.2f} 36 24 re f",
             ]
         )
-        commands.extend(_centered_text(CARD_WIDTH / 2, card_height - 66, "EDU", font="F2", size=11, color=_rgb(1, 1, 1), bold=True))
+        commands.extend(_centered_text(CARD_WIDTH / 2, card_height - 62, "MAU", font="F2", size=11, color=_rgb(1, 1, 1), bold=True))
 
-    school_y = card_height - 98
-    title_y = card_height - 116
-    subtitle_y = card_height - 134
+    school_y = card_height - 92
+    title_y = card_height - 112
 
-    commands.extend(_centered_text(CARD_WIDTH / 2, school_y, school_name, font="F2", size=12.3, color=_rgb(0.12, 0.12, 0.12), bold=True))
-    commands.extend(_line_commands(200, school_y - 4, CARD_WIDTH - 200, school_y - 4, stroke=_rgb(0.45, 0.45, 0.45), line_width=0.4))
-    commands.extend(_centered_text(CARD_WIDTH / 2, title_y, card_title, font="F2", size=10.4, color=_rgb(0.09, 0.16, 0.29), bold=True))
-    commands.extend(_line_commands(270, title_y - 3, CARD_WIDTH - 270, title_y - 3, stroke=_rgb(0.69, 0.69, 0.69), line_width=0.35))
-    if subtitle:
-        commands.extend(_centered_text(CARD_WIDTH / 2, subtitle_y, subtitle, font="F1", size=8.4, color=_rgb(0.22, 0.22, 0.22)))
+    commands.extend(_centered_text(CARD_WIDTH / 2, school_y, school_name, font="F2", size=13.0, color=_rgb(0.08, 0.18, 0.10), bold=True))
+    commands.extend(_centered_text(CARD_WIDTH / 2, title_y, card_title.upper(), font="F2", size=9.8, color=_rgb(0.13, 0.52, 0.22), bold=True))
 
-    badge_x = CARD_WIDTH - 162
-    badge_y = card_height - 112
-    commands.extend(_rect_commands(badge_x, badge_y, 128, 64, fill=_rgb(0.95, 0.99, 0.95), stroke=_rgb(0.13, 0.52, 0.22), line_width=1.0))
-    commands.extend(_text_lines(badge_x + 12, badge_y + 45, "STATUS", font="F2", size=7.6, color=_rgb(0.13, 0.52, 0.22)))
-    commands.extend(_text_lines(badge_x + 12, badge_y + 28, "PAID", font="F2", size=16, color=_rgb(0.12, 0.12, 0.12)))
-    reference_size = _fit_font_size(reference, 104, 7.1)
-    commands.extend(_text_lines(badge_x + 12, badge_y + 12, f"REF {reference}", font="F1", size=reference_size, color=_rgb(0.22, 0.22, 0.22)))
+    context_x = CARD_MARGIN
+    context_w = CARD_WIDTH - (CARD_MARGIN * 2)
+    context_columns = [
+        ("DEPARTMENT", next((value for label, value in fields if label == "Department"), "-")),
+        ("SESSION", session_label or "-"),
+    ]
+    context_col_w = context_w / len(context_columns)
+    commands.extend(_rect_commands(context_x, context_y, context_w, context_height, fill=_rgb(0.94, 0.98, 0.94), stroke=_rgb(0.13, 0.52, 0.22), line_width=0.9))
+    for index, (label, value) in enumerate(context_columns):
+        column_x = context_x + (index * context_col_w)
+        if index:
+            commands.extend(_line_commands(column_x, context_y, column_x, context_y + context_height, stroke=_rgb(0.62, 0.75, 0.63), line_width=0.6))
+        commands.extend(_text_lines(column_x + 12, context_y + 31, label, font="F2", size=7.4, color=_rgb(0.13, 0.52, 0.22)))
+        value_size = _fit_font_size(value, context_col_w - 24, 8.8, bold=True)
+        commands.extend(_text_lines(column_x + 12, context_y + 13, value or "-", font="F2", size=value_size, color=_rgb(0.12, 0.12, 0.12)))
 
     photo_x = CARD_MARGIN + 2
     photo_y = student_y + 12
     photo_w = 122
-    photo_h = student_height - 24
+    photo_h = student_height - 20
     commands.extend(_rect_commands(photo_x, photo_y, photo_w, photo_h, fill=_rgb(0.985, 0.995, 0.985), stroke=_rgb(0.38, 0.38, 0.38), line_width=1.0))
     commands.extend(_rect_commands(photo_x + 4, photo_y + 4, photo_w - 8, photo_h - 8, fill=_rgb(1, 1, 1), stroke=_rgb(0.72, 0.72, 0.72), line_width=0.6))
-    portrait_label = portrait_text or "STUDENT"
-    initials = "".join(part[0] for part in portrait_label.split()[:2]).upper() or "ST"
-    commands.extend(_centered_text(photo_x + (photo_w / 2), photo_y + 88, initials, font="F2", size=26, color=_rgb(0.13, 0.52, 0.22), bold=True))
-    commands.extend(_centered_text(photo_x + (photo_w / 2), photo_y + 68, portrait_label, font="F1", size=8.2, color=_rgb(0.25, 0.25, 0.25)))
-    commands.extend(_centered_text(photo_x + (photo_w / 2), photo_y + 18, "STUDENT PHOTO", font="F2", size=7.1, color=_rgb(0.3, 0.3, 0.3), bold=True))
+    if passport_photo:
+        photo_width, photo_height, _, _ = passport_photo
+        available_width = photo_w - 8
+        available_height = photo_h - 8
+        scale = min(available_width / photo_width, available_height / photo_height)
+        render_width = photo_width * scale
+        render_height = photo_height * scale
+        render_x = photo_x + 4 + ((available_width - render_width) / 2)
+        render_y = photo_y + 4 + ((available_height - render_height) / 2)
+        commands.extend(
+            [
+                "q",
+                f"{render_width:.2f} 0 0 {render_height:.2f} {render_x:.2f} {render_y:.2f} cm",
+                "/Im2 Do",
+                "Q",
+            ]
+        )
+    else:
+        portrait_label = portrait_text or "STUDENT"
+        initials = "".join(part[0] for part in portrait_label.split()[:2]).upper() or "ST"
+        commands.extend(_centered_text(photo_x + (photo_w / 2), photo_y + 78, initials, font="F2", size=26, color=_rgb(0.13, 0.52, 0.22), bold=True))
+        commands.extend(_centered_text(photo_x + (photo_w / 2), photo_y + 18, "UPLOAD PASSPORT", font="F2", size=7.1, color=_rgb(0.3, 0.3, 0.3), bold=True))
 
     table_x = 172
     table_y = student_y + 12
     table_w = CARD_WIDTH - table_x - CARD_MARGIN - 2
-    table_h = student_height - 24
+    table_h = student_height - 20
     row_h = table_h / len(student_rows)
     label_w = 150
     value_w = table_w - label_w
+
+    commands.extend(_text_lines(table_x, table_y + table_h + 7, "STUDENT INFORMATION", font="F2", size=8.0, color=_rgb(0.13, 0.52, 0.22)))
 
     for index, (label, value) in enumerate(student_rows):
         row_y = table_y + table_h - ((index + 1) * row_h)
@@ -348,12 +412,6 @@ def build_exam_card_pdf(
         baseline = row_y + (row_h / 2) - 3.4
         commands.extend(_text_lines(table_x + 10, baseline, label, font="F2", size=label_size, color=_rgb(0.1, 0.1, 0.1)))
         commands.extend(_text_lines(table_x + label_w + 10, baseline, value or "-", font="F1", size=value_size, color=_rgb(0.18, 0.18, 0.18)))
-
-    if session_label and session_y is not None:
-        commands.extend(_rect_commands(CARD_MARGIN, session_y, CARD_WIDTH - (CARD_MARGIN * 2), session_height, fill=_rgb(0.95, 0.99, 0.95), stroke=_rgb(0.13, 0.52, 0.22), line_width=0.9))
-        commands.extend(_text_lines(CARD_MARGIN + 14, session_y + 12, "SESSION", font="F2", size=8.0, color=_rgb(0.13, 0.52, 0.22)))
-        session_text_size = _fit_font_size(session_label, CARD_WIDTH - (CARD_MARGIN * 2) - 116, 10.0, bold=True)
-        commands.extend(_text_lines(CARD_MARGIN + 90, session_y + 11, session_label, font="F2", size=session_text_size, color=_rgb(0.12, 0.12, 0.12)))
 
     commands.extend(_rect_commands(CARD_MARGIN, course_y, CARD_WIDTH - (CARD_MARGIN * 2), course_box_height, fill=_rgb(0.98, 0.99, 0.98), stroke=_rgb(0.58, 0.58, 0.58), line_width=0.9))
     commands.extend(_rect_commands(CARD_MARGIN, course_y + course_box_height - 24, CARD_WIDTH - (CARD_MARGIN * 2), 24, fill=_rgb(0.13, 0.52, 0.22), stroke=_rgb(0.13, 0.52, 0.22), line_width=0.9))
@@ -376,14 +434,6 @@ def build_exam_card_pdf(
             )
             course_text_y -= 14
 
-    commands.extend(_rect_commands(CARD_MARGIN, bottom_margin, CARD_WIDTH - (CARD_MARGIN * 2), footer_height, fill=_rgb(0.98, 0.99, 0.98), stroke=_rgb(0.72, 0.72, 0.72), line_width=0.8))
-    commands.extend(_text_lines(CARD_MARGIN + 14, bottom_margin + 28, "IMPORTANT", font="F2", size=8.2, color=_rgb(0.13, 0.52, 0.22)))
-    footer_text = footer or "Present this card with a valid student ID at the examination venue."
-    footer_size = _fit_font_size(footer_text, 420, 8.9)
-    commands.extend(_text_lines(CARD_MARGIN + 14, bottom_margin + 14, footer_text, font="F1", size=footer_size, color=_rgb(0.18, 0.18, 0.18)))
-    commands.extend(_line_commands(CARD_WIDTH - 226, bottom_margin + 18, CARD_WIDTH - 50, bottom_margin + 18, stroke=_rgb(0.35, 0.35, 0.35), line_width=0.6))
-    commands.extend(_text_lines(CARD_WIDTH - 220, bottom_margin + 28, "Signature", font="F2", size=8.0, color=_rgb(0.18, 0.18, 0.18)))
-    commands.extend(_text_lines(CARD_WIDTH - 220, bottom_margin + 10, "........................................", font="F1", size=8.2, color=_rgb(0.18, 0.18, 0.18)))
     commands.append("Q")
 
     content = "\n".join(commands).encode("latin-1", errors="replace")
@@ -395,17 +445,28 @@ def build_exam_card_pdf(
 
     image_object_id = None
     if logo:
-        logo_width, logo_height, logo_bytes = logo
+        logo_width, logo_height, logo_bytes, logo_filter = logo
         image_object_id = len(objects) + 1
-        objects.append(_build_image_object(logo_bytes, logo_width, logo_height))
+        objects.append(_build_image_object(logo_bytes, logo_width, logo_height, logo_filter))
+
+    passport_image_object_id = None
+    if passport_photo:
+        photo_width, photo_height, photo_bytes, photo_filter = passport_photo
+        passport_image_object_id = len(objects) + 1
+        objects.append(_build_image_object(photo_bytes, photo_width, photo_height, photo_filter))
 
     content_object_id = len(objects) + 1
     objects.append(b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream")
 
     page_object_id = len(objects) + 1
     resources = ["/Font << /F1 3 0 R /F2 4 0 R >>"]
+    image_resources = []
     if image_object_id:
-        resources.append(f"/XObject << /Im1 {image_object_id} 0 R >>")
+        image_resources.append(f"/Im1 {image_object_id} 0 R")
+    if passport_image_object_id:
+        image_resources.append(f"/Im2 {passport_image_object_id} 0 R")
+    if image_resources:
+        resources.append(f"/XObject << {' '.join(image_resources)} >>")
     objects.append(
         (
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] "

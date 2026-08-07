@@ -33,7 +33,7 @@
                 <div class="message-item shell">
                     <div>
                         <strong>{{ lecturer.full_name }}</strong>
-                        <span>{{ lecturer.department.name|default:"No department" }}</span>
+                        <span>{{ lecturer.id_number|default:"No lecturer ID" }} · {{ lecturer.department.name|default:"No department" }}</span>
                     </div>
                     <form method="post" action="{% url 'portal:admin-approve-lecturer' lecturer.id %}">
                         {% csrf_token %}

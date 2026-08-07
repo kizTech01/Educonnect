@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.error import HTTPError, URLError
@@ -6,8 +7,9 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from django.conf import settings
-from django.core.mail import send_mail
+from django.core.mail import EmailMessage, get_connection
 from django.db import transaction
+from django.db.models import F
 from django.urls import reverse
 from django.utils import timezone
 
@@ -22,8 +24,6 @@ from .models import (
     UserAlert,
 )
 
-DEFAULT_ADMIN_USERNAME = getattr(settings, "BOOTSTRAP_ADMIN_USERNAME", "admin")
-DEFAULT_ADMIN_PASSWORD = getattr(settings, "BOOTSTRAP_ADMIN_PASSWORD", "mauyola")
 PAYSTACK_API_BASE = "https://api.paystack.co"
 PAYSTACK_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -40,6 +40,9 @@ DEFAULT_PAYSTACK_PUBLIC_KEY = getattr(
     "PAYSTACK_PUBLIC_KEY",
     "pk_test_fd50b599b31f0cfb316e4460621ca9921b7945ff",
 )
+NOTIFICATION_RECIPIENT_BATCH_SIZE = 500
+NOTIFICATION_EMAIL_BATCH_SIZE = 100
+logger = logging.getLogger(__name__)
 
 
 def paystack_amount_in_kobo(amount):
@@ -150,7 +153,7 @@ def sync_material_access_for_registration(registration: StudentCourseRegistratio
 
 
 def send_course_reminder_email(course: Course, recipients=None):
-    recipient_list = []
+    recipients_by_email = {}
     if recipients is None:
         recipients = []
         if course.lecturer_id:
@@ -162,18 +165,15 @@ def send_course_reminder_email(course: Course, recipients=None):
             ).distinct()
         )
 
-    seen = set()
     for user in recipients:
         if not user or user.role not in {User.Role.STUDENT, User.Role.LECTURER} or not user.email:
             continue
-        email_key = user.email.strip().lower()
-        if email_key in seen:
-            continue
-        seen.add(email_key)
-        recipient_list.append(user.email)
+        email = user.email.strip()
+        if email:
+            recipients_by_email.setdefault(email.lower(), {"email": email, "recipient_ids": set()})["recipient_ids"].add(user.id)
 
-    if not recipient_list:
-        return
+    if not recipients_by_email:
+        return set(), set(), ""
 
     schedule_day = course.schedule_day or "the scheduled day to be announced"
     schedule_time = course.schedule_time.strftime("%I:%M %p") if course.schedule_time else "the scheduled time to be announced"
@@ -182,13 +182,41 @@ def send_course_reminder_email(course: Course, recipients=None):
         f"This is a class reminder for {course.title} ({course.code}). "
         f"Please note that the class holds on {schedule_day} at {schedule_time} in {venue}."
     )
-    send_mail(
-        subject=f"Class Reminder: {course.code}",
-        message=message,
-        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@educonnect.local"),
-        recipient_list=recipient_list,
-        fail_silently=True,
-    )
+    recipient_groups = list(recipients_by_email.values())
+    delivered_recipient_ids = set()
+    failed_recipient_ids = set()
+    error_message = ""
+    connection = get_connection(fail_silently=False)
+
+    try:
+        connection.open()
+        for start in range(0, len(recipient_groups), NOTIFICATION_EMAIL_BATCH_SIZE):
+            batch = recipient_groups[start : start + NOTIFICATION_EMAIL_BATCH_SIZE]
+            sent_messages = connection.send_messages(
+                [
+                    EmailMessage(
+                        subject=f"Class Reminder: {course.code}",
+                        body=message,
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        bcc=[item["email"] for item in batch],
+                        connection=connection,
+                    )
+                ]
+            )
+            if sent_messages != 1:
+                raise RuntimeError("The email provider did not accept the class reminder batch.")
+            for item in batch:
+                delivered_recipient_ids.update(item["recipient_ids"])
+    except Exception as exc:
+        error_message = str(exc) or exc.__class__.__name__
+        logger.exception("Unable to send class reminder email for course %s", course.code)
+        for item in recipient_groups:
+            failed_recipient_ids.update(item["recipient_ids"])
+        failed_recipient_ids.difference_update(delivered_recipient_ids)
+    finally:
+        connection.close()
+
+    return delivered_recipient_ids, failed_recipient_ids, error_message
 
 
 def deliver_notification(notification):
@@ -205,30 +233,91 @@ def deliver_notification(notification):
     elif notification.sender.role == User.Role.LECTURER and not department_ids:
         students = students.filter(student_registrations__course__lecturer=notification.sender).distinct()
 
-    recipients = [
-        NotificationRecipient(notification=notification, student=student)
-        for student in students.distinct()
-    ]
-    NotificationRecipient.objects.bulk_create(recipients, ignore_conflicts=True)
+    recipient_rows = []
+    for student_id in students.distinct().values_list("id", flat=True).iterator(
+        chunk_size=NOTIFICATION_RECIPIENT_BATCH_SIZE
+    ):
+        recipient_rows.append(NotificationRecipient(notification=notification, student_id=student_id))
+        if len(recipient_rows) == NOTIFICATION_RECIPIENT_BATCH_SIZE:
+            NotificationRecipient.objects.bulk_create(recipient_rows, ignore_conflicts=True)
+            recipient_rows.clear()
+    if recipient_rows:
+        NotificationRecipient.objects.bulk_create(recipient_rows, ignore_conflicts=True)
 
     alert_rows = []
-    for recipient in NotificationRecipient.objects.filter(notification=notification).select_related("student"):
-        if not recipient.student.browser_alerts_enabled:
-            continue
+    browser_alert_recipients = NotificationRecipient.objects.filter(
+        notification=notification,
+        student__browser_alerts_enabled=True,
+    ).values_list("id", "student_id")
+    for recipient_id, student_id in browser_alert_recipients.iterator(
+        chunk_size=NOTIFICATION_RECIPIENT_BATCH_SIZE
+    ):
         alert_rows.append(
             UserAlert(
-                recipient=recipient.student,
+                recipient_id=student_id,
                 alert_type=UserAlert.AlertType.MESSAGE,
                 title=notification.subject,
                 body=notification.body,
-                target_url=reverse("portal:student-messages") + f"?open={recipient.id}",
-                dedupe_key=f"message:{notification.id}:{recipient.student_id}",
+                target_url=reverse("portal:student-messages") + f"?open={recipient_id}",
+                dedupe_key=f"message:{notification.id}:{student_id}",
             )
         )
-    UserAlert.objects.bulk_create(alert_rows, ignore_conflicts=True)
+        if len(alert_rows) == NOTIFICATION_RECIPIENT_BATCH_SIZE:
+            UserAlert.objects.bulk_create(alert_rows, ignore_conflicts=True)
+            alert_rows.clear()
+    if alert_rows:
+        UserAlert.objects.bulk_create(alert_rows, ignore_conflicts=True)
+
+    if notification.sender.role == User.Role.LECTURER:
+        transaction.on_commit(lambda: send_lecturer_message_emails(notification))
+
+
+def send_lecturer_message_emails(notification):
+    """Send a lecturer announcement to every recipient without exposing student emails."""
+    recipient_emails = (
+        NotificationRecipient.objects.filter(
+            notification=notification,
+            student__is_active=True,
+        )
+        .exclude(student__email="")
+        .values_list("student__email", flat=True)
+        .iterator(chunk_size=NOTIFICATION_EMAIL_BATCH_SIZE)
+    )
+    emails = []
+    seen = set()
+    for raw_email in recipient_emails:
+        email = raw_email.strip()
+        email_key = email.lower()
+        if email and email_key not in seen:
+            seen.add(email_key)
+            emails.append(email)
+
+    if not emails:
+        return
+
+    message = (
+        f"{notification.sender.full_name} sent you a message through EduConnect.\n\n"
+        f"Subject: {notification.subject}\n\n"
+        f"{notification.body}\n\n"
+        "Sign in to EduConnect to view the message in your inbox."
+    )
+    connection = get_connection(fail_silently=True)
+    email_messages = [
+        EmailMessage(
+            subject=f"EduConnect: {notification.subject}",
+            body=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            bcc=emails[start : start + NOTIFICATION_EMAIL_BATCH_SIZE],
+            connection=connection,
+        )
+        for start in range(0, len(emails), NOTIFICATION_EMAIL_BATCH_SIZE)
+    ]
+    connection.send_messages(email_messages)
 
 
 def create_alert(recipient, alert_type, title, body, target_url, dedupe_key):
+    if not recipient or recipient.role not in {User.Role.STUDENT, User.Role.LECTURER}:
+        return None
     UserAlert.objects.get_or_create(
         recipient=recipient,
         dedupe_key=dedupe_key,
@@ -287,20 +376,22 @@ def dispatch_due_course_reminders(now=None):
         )
 
         email_targets = []
+        email_dispatches = {}
         for recipient in recipients:
             if not recipient or recipient.role not in {User.Role.STUDENT, User.Role.LECTURER}:
                 continue
             if recipient.email_class_reminders and recipient.email:
-                _, created = CourseReminderDispatch.objects.get_or_create(
+                reminder_dispatch, _ = CourseReminderDispatch.objects.get_or_create(
                     course=course,
                     recipient=recipient,
                     scheduled_for=class_starts_at,
                     channel=CourseReminderDispatch.Channel.EMAIL,
                 )
-                if created:
+                if reminder_dispatch.delivered_at is None:
                     email_targets.append(recipient)
+                    email_dispatches[recipient.id] = reminder_dispatch.id
             if recipient.browser_alerts_enabled and recipient.class_reminder_alerts_enabled:
-                _, created = CourseReminderDispatch.objects.get_or_create(
+                alert_dispatch, created = CourseReminderDispatch.objects.get_or_create(
                     course=course,
                     recipient=recipient,
                     scheduled_for=class_starts_at,
@@ -318,9 +409,33 @@ def dispatch_due_course_reminders(now=None):
                         target_url=reverse("portal:dashboard"),
                         dedupe_key=f"class-reminder:{course.id}:{recipient.id}:{class_starts_at.isoformat()}",
                     )
+                    alert_dispatch.delivered_at = timezone.now()
+                    alert_dispatch.last_attempt_at = alert_dispatch.delivered_at
+                    alert_dispatch.attempt_count = 1
+                    alert_dispatch.save(update_fields=["delivered_at", "last_attempt_at", "attempt_count", "updated_at"])
 
         if email_targets:
-            send_course_reminder_email(course, recipients=email_targets)
+            delivered_ids, failed_ids, error_message = send_course_reminder_email(course, recipients=email_targets)
+            attempted_at = timezone.now()
+            if delivered_ids:
+                CourseReminderDispatch.objects.filter(
+                    pk__in=[email_dispatches[recipient_id] for recipient_id in delivered_ids]
+                ).update(
+                    delivered_at=attempted_at,
+                    last_attempt_at=attempted_at,
+                    attempt_count=F("attempt_count") + 1,
+                    last_error="",
+                    updated_at=attempted_at,
+                )
+            if failed_ids:
+                CourseReminderDispatch.objects.filter(
+                    pk__in=[email_dispatches[recipient_id] for recipient_id in failed_ids]
+                ).update(
+                    last_attempt_at=attempted_at,
+                    attempt_count=F("attempt_count") + 1,
+                    last_error=error_message[:255],
+                    updated_at=attempted_at,
+                )
 
 
 def process_due_course_reminders():
@@ -332,20 +447,26 @@ def process_due_course_reminders():
 
 
 def ensure_default_admin_user():
+    username = settings.BOOTSTRAP_ADMIN_USERNAME
+    password = settings.BOOTSTRAP_ADMIN_PASSWORD
+    if not username or not password:
+        return None
+
     admin_user, created = User.objects.get_or_create(
-        username=DEFAULT_ADMIN_USERNAME,
+        username=username,
         defaults={
             "role": User.Role.ADMIN,
             "is_staff": True,
             "is_superuser": True,
             "is_active": True,
             "is_approved": True,
+            "email": settings.BOOTSTRAP_ADMIN_EMAIL,
         },
     )
 
     updates = []
     if created:
-        admin_user.set_password(DEFAULT_ADMIN_PASSWORD)
+        admin_user.set_password(password)
         updates.append("password")
     if admin_user.role != User.Role.ADMIN:
         admin_user.role = User.Role.ADMIN

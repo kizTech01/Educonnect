@@ -346,6 +346,7 @@ class BaseProfileForm(StyledModelForm):
             "department",
             "level",
             "phone_number",
+            "passport_photo",
             "email_class_reminders",
             "class_reminder_alerts_enabled",
         ]

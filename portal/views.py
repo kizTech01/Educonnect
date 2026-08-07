@@ -81,7 +81,6 @@ from .services import (
     ensure_default_admin_user,
     initialize_paystack_transaction,
     paystack_amount_in_kobo,
-    process_due_course_reminders,
     sync_material_access_for_material,
     sync_material_access_for_registration,
     verify_paystack_transaction,
@@ -294,8 +293,6 @@ def sidebar_links(request):
 
 
 def dashboard_context(request, title, **extra):
-    if request.user.is_authenticated and request.user.role in {User.Role.STUDENT, User.Role.LECTURER}:
-        process_due_course_reminders()
     context = {"section_title": title, "sidebar_links": sidebar_links(request)}
     context.update(extra)
     return context
@@ -406,10 +403,18 @@ def _configured_paystack_webhook_secrets():
     secrets.update(
         DepartmentPaymentGateway.objects.exclude(paystack_secret_key="").values_list("paystack_secret_key", flat=True)
     )
+    # Keep in-flight payments verifiable if an admin rotates a gateway key before
+    # Paystack delivers the final webhook.
+    secrets.update(
+        CoursePayment.objects.exclude(paystack_secret_key_used="").values_list("paystack_secret_key_used", flat=True)
+    )
+    secrets.update(
+        DepartmentalPayment.objects.exclude(paystack_secret_key_used="").values_list("paystack_secret_key_used", flat=True)
+    )
     return [secret for secret in secrets if secret]
 
 
-def _paystack_signature_is_valid(request, secret_keys):
+def _paystack_signing_secret(request, secret_keys):
     signature = request.headers.get("X-Paystack-Signature", "")
     for secret_key in secret_keys:
         expected = hmac.new(
@@ -418,40 +423,58 @@ def _paystack_signature_is_valid(request, secret_keys):
             hashlib.sha512,
         ).hexdigest()
         if hmac.compare_digest(signature, expected):
-            return True
-    return False
+            return secret_key
+    return ""
 
 
-def _mark_payment_paid_from_paystack(reference, amount):
+def _paystack_signature_is_valid(request, secret_keys):
+    return bool(_paystack_signing_secret(request, secret_keys))
+
+
+def _mark_payment_paid_from_paystack(reference, amount, *, signing_secret):
     if not reference:
         return False
     course_payment = CoursePayment.objects.filter(paystack_reference=reference).select_related("course").first()
-    if course_payment and int(amount or 0) == paystack_amount_in_kobo(course_payment.amount):
+    if (
+        course_payment
+        and hmac.compare_digest(course_payment.paystack_secret_key_used, signing_secret)
+        and int(amount or 0) == paystack_amount_in_kobo(course_payment.amount)
+    ):
         _finalize_course_payment(course_payment)
         return True
     departmental_payment = DepartmentalPayment.objects.filter(paystack_reference=reference).first()
-    if departmental_payment and int(amount or 0) == paystack_amount_in_kobo(departmental_payment.total_amount):
+    if (
+        departmental_payment
+        and hmac.compare_digest(departmental_payment.paystack_secret_key_used, signing_secret)
+        and int(amount or 0) == paystack_amount_in_kobo(departmental_payment.total_amount)
+    ):
         _finalize_departmental_payment(departmental_payment)
         return True
     return False
 
 
 def _finalize_course_payment(payment):
-    payment.status = CoursePayment.Status.PAID
-    payment.save(update_fields=["status", "paid_at", "updated_at"])
-    registration, created = StudentCourseRegistration.objects.get_or_create(
-        student=payment.student,
-        course=payment.course,
-        defaults={"registered_by": payment.student},
-    )
-    if created:
-        sync_material_access_for_registration(registration)
-    _sync_course_material_access_for_paid_course(payment.student, payment.course)
+    with transaction.atomic():
+        payment = CoursePayment.objects.select_for_update().select_related("student", "course").get(pk=payment.pk)
+        if not payment.is_paid:
+            payment.status = CoursePayment.Status.PAID
+            payment.save(update_fields=["status", "paid_at", "updated_at"])
+        registration, created = StudentCourseRegistration.objects.get_or_create(
+            student=payment.student,
+            course=payment.course,
+            defaults={"registered_by": payment.student},
+        )
+        if created:
+            sync_material_access_for_registration(registration)
+        _sync_course_material_access_for_paid_course(payment.student, payment.course)
 
 
 def _finalize_departmental_payment(payment):
-    payment.status = DepartmentalPayment.Status.PAID
-    payment.save(update_fields=["status", "paid_at", "updated_at"])
+    with transaction.atomic():
+        payment = DepartmentalPayment.objects.select_for_update().get(pk=payment.pk)
+        if not payment.is_paid:
+            payment.status = DepartmentalPayment.Status.PAID
+            payment.save(update_fields=["status", "paid_at", "updated_at"])
 
 
 def _sync_course_material_access_for_paid_course(student, course):
@@ -769,7 +792,8 @@ def portal_logout(request):
 def paystack_webhook(request):
     if request.method != "POST":
         return JsonResponse({"ok": False, "message": "POST required."}, status=405)
-    if not _paystack_signature_is_valid(request, _configured_paystack_webhook_secrets()):
+    signing_secret = _paystack_signing_secret(request, _configured_paystack_webhook_secrets())
+    if not signing_secret:
         return JsonResponse({"ok": False, "message": "Invalid Paystack signature."}, status=400)
     try:
         payload = json.loads(request.body.decode("utf-8"))
@@ -783,6 +807,7 @@ def paystack_webhook(request):
         processed = _mark_payment_paid_from_paystack(
             data.get("reference"),
             data.get("amount"),
+            signing_secret=signing_secret,
         )
     return JsonResponse({"ok": True, "event": event, "processed": processed})
 
@@ -802,7 +827,7 @@ def profile(request):
     form_class = LecturerProfileForm if request.user.role == User.Role.LECTURER else StudentProfileForm
     form = form_class(instance=request.user)
     if request.method == "POST":
-        form = form_class(request.POST, instance=request.user)
+        form = form_class(request.POST, request.FILES, instance=request.user)
         if form.is_valid():
             form.save()
             messages.success(request, "Your profile information has been updated.")
@@ -1384,6 +1409,8 @@ def student_delete_message(request, recipient_id):
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER)
 def update_alert_preferences(request):
+    if request.user.role not in {User.Role.STUDENT, User.Role.LECTURER}:
+        raise PermissionDenied
     if request.method != "POST":
         raise PermissionDenied
     enable_browser_alerts = request.POST.get("browser_alerts_enabled") == "true"
@@ -1402,6 +1429,8 @@ def update_alert_preferences(request):
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER)
 def alerts_feed(request):
+    if request.user.role not in {User.Role.STUDENT, User.Role.LECTURER}:
+        raise PermissionDenied
     alerts_queryset = UserAlert.objects.filter(
         recipient=request.user,
         browser_delivered_at__isnull=True,
@@ -1708,7 +1737,7 @@ def admin_dashboard(request):
         "Admin Dashboard",
         student_count=User.objects.filter(role=User.Role.STUDENT).count(),
         lecturer_count=User.objects.filter(role=User.Role.LECTURER).count(),
-        pending_lecturers=User.objects.filter(role=User.Role.LECTURER, is_approved=False)[:6],
+        pending_lecturers=User.objects.filter(role=User.Role.LECTURER, is_approved=False).select_related("department")[:6],
         department_count=Department.objects.count(),
         course_count=Course.objects.count(),
         uploaded_course_count=Course.objects.exclude(file="").count(),
@@ -2136,21 +2165,17 @@ def download_exam_card(request, payment_id):
     pdf_bytes = build_exam_card_pdf(
         school_name="Modibbo Adama University Yola",
         card_title="Departmental Examination Clearance Card",
-        subtitle=payment.association_summary or "Departmental payment record",
         session_label=payment.session.name,
         fields=[
             ("Student Name", payment.student.full_name),
-            ("Student ID", payment.student.id_number or "N/A"),
+            ("Matric No.", payment.student.id_number or "N/A"),
             ("Department", payment.department.name),
             ("Level", payment.student.level or "N/A"),
             ("Semester", payment.semester_label),
-            ("Amount Paid", f"{payment.total_amount}"),
-            ("Clearance", payment.association_summary or "Departmental fee"),
         ],
-        reference=payment.paystack_reference,
         registered_courses=registered_courses,
-        footer="Present this card with your student ID before the departmental examination.",
         portrait_text=payment.student.full_name,
+        passport_photo_path=payment.student.passport_photo.path if payment.student.passport_photo else None,
     )
     session_slug = payment.session.name.replace("/", "-")
     response = HttpResponse(pdf_bytes, content_type="application/pdf")

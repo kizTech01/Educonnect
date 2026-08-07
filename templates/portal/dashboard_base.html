@@ -47,14 +47,16 @@
     </aside>
 
     <section class="dashboard-main">
-        <div
-            class="alert-runtime"
-            data-alert-feed-url="{% url 'portal:alerts-feed' %}"
-            data-alert-preferences-url="{% url 'portal:alert-preferences' %}"
-            data-browser-alerts-enabled="{% if request.user.browser_alerts_enabled %}true{% else %}false{% endif %}"
-            data-class-alerts-enabled="{% if request.user.class_reminder_alerts_enabled %}true{% else %}false{% endif %}"
-            data-user-role="{{ request.user.role }}"
-        ></div>
+        {% if request.user.role == "student" or request.user.role == "lecturer" %}
+            <div
+                class="alert-runtime"
+                data-alert-feed-url="{% url 'portal:alerts-feed' %}"
+                data-alert-preferences-url="{% url 'portal:alert-preferences' %}"
+                data-browser-alerts-enabled="{% if request.user.browser_alerts_enabled %}true{% else %}false{% endif %}"
+                data-class-alerts-enabled="{% if request.user.class_reminder_alerts_enabled %}true{% else %}false{% endif %}"
+                data-user-role="{{ request.user.role }}"
+            ></div>
+        {% endif %}
         <div class="dashboard-topbar">
             <div class="dashboard-topbar-copy">
                 <button

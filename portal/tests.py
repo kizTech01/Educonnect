@@ -12,6 +12,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.test import RequestFactory
 from django.test import TestCase
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.datastructures import MultiValueDict
@@ -37,8 +38,6 @@ from .models import (
     UserAlert,
 )
 from .services import (
-    DEFAULT_ADMIN_PASSWORD,
-    DEFAULT_ADMIN_USERNAME,
     DEFAULT_PAYSTACK_PUBLIC_KEY,
     DEFAULT_PAYSTACK_SECRET_KEY,
     dispatch_due_course_reminders,
@@ -47,6 +46,7 @@ from .services import (
 from .views import sidebar_links
 
 
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class DashboardAndCourseFlowTests(TestCase):
     def setUp(self):
         self.department = Department.objects.create(name="Computer Science", code="CSC")
@@ -492,6 +492,21 @@ class DashboardAndCourseFlowTests(TestCase):
         departmental_link = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
         self.assertFalse(any(child["label"] == "Users" for child in departmental_link["children"]))
 
+    def test_admin_dashboard_shows_pending_lecturer_id(self):
+        pending_lecturer = User.objects.create_user(
+            username="pending-lecturer",
+            password="pass1234",
+            role=User.Role.LECTURER,
+            department=self.department,
+            id_number="LEC-001",
+            is_approved=False,
+        )
+
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("portal:admin-dashboard"))
+
+        self.assertContains(response, pending_lecturer.id_number)
+
     def test_lecturer_documents_page_is_timetable_only(self):
         self.client.force_login(self.lecturer)
         response = self.client.get(reverse("portal:lecturer-documents"))
@@ -885,6 +900,29 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertIn(b"SESSION", response.content)
         self.assertIn(self.session.name.encode("utf-8"), response.content)
 
+    def test_paid_departmental_payment_shows_exam_card_download_to_student(self):
+        payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            total_amount=Decimal("4000.00"),
+            status=DepartmentalPayment.Status.PAID,
+            association_summary="Departmental Fee, ACF",
+        )
+
+        self.client.force_login(self.student)
+        departmental_page = self.client.get(reverse("portal:student-departmental"))
+        exam_card_url = reverse("portal:download-exam-card", args=[payment.id])
+
+        self.assertEqual(departmental_page.status_code, 200)
+        self.assertContains(departmental_page, "Payment completed.")
+        self.assertContains(departmental_page, "Download Exam Card PDF")
+        self.assertContains(departmental_page, exam_card_url)
+
+        download = self.client.get(exam_card_url)
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download["Content-Type"], "application/pdf")
+
     def test_admin_creating_session_makes_it_current(self):
         self.client.force_login(self.admin)
 
@@ -1017,12 +1055,38 @@ class DashboardAndCourseFlowTests(TestCase):
         dispatch_due_course_reminders(now=now)
 
         self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(set(mail.outbox[0].to), {"student@example.com", "lecturer@example.com"})
+        self.assertEqual(set(mail.outbox[0].bcc), {"student@example.com", "lecturer@example.com"})
+        self.assertEqual(mail.outbox[0].to, [])
         self.assertIn(self.paid_course.title, mail.outbox[0].body)
         self.assertEqual(
             CourseReminderDispatch.objects.filter(channel=CourseReminderDispatch.Channel.EMAIL).count(),
             2,
         )
+        self.assertFalse(
+            CourseReminderDispatch.objects.filter(
+                channel=CourseReminderDispatch.Channel.EMAIL,
+                delivered_at__isnull=True,
+            ).exists()
+        )
+
+    @patch("portal.services.get_connection")
+    def test_failed_course_reminder_email_is_recorded_for_retry(self, get_connection):
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        now = timezone.localtime().replace(second=0, microsecond=0)
+        if now.weekday() == 6:
+            now = now - timedelta(days=1)
+        weekday_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        self.paid_course.schedule_day = weekday_labels[now.weekday()]
+        self.paid_course.schedule_time = (now + timedelta(minutes=30)).time().replace(second=0, microsecond=0)
+        self.paid_course.save()
+        get_connection.return_value.send_messages.return_value = 0
+
+        dispatch_due_course_reminders(now=now)
+
+        failed_dispatches = CourseReminderDispatch.objects.filter(channel=CourseReminderDispatch.Channel.EMAIL)
+        self.assertEqual(failed_dispatches.count(), 2)
+        self.assertTrue(failed_dispatches.filter(delivered_at__isnull=True, attempt_count=1).exists())
+        self.assertTrue(failed_dispatches.exclude(last_error="").exists())
 
     def test_due_course_reminder_creates_browser_alert_for_opted_in_user(self):
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
@@ -1087,6 +1151,45 @@ class DashboardAndCourseFlowTests(TestCase):
         alert_titles = [alert["title"] for alert in response.json()["alerts"]]
         self.assertEqual(alert_titles, ["Class reminder"])
 
+    def test_admin_cannot_receive_or_access_browser_reminders(self):
+        from .services import create_alert
+
+        created_alert = create_alert(
+            recipient=self.admin,
+            alert_type=UserAlert.AlertType.CLASS_REMINDER,
+            title="Admin should not receive this",
+            body="Class starts soon.",
+            target_url=reverse("portal:admin-dashboard"),
+            dedupe_key="class-reminder:admin-test",
+        )
+
+        self.assertIsNone(created_alert)
+        self.assertFalse(UserAlert.objects.filter(recipient=self.admin).exists())
+
+        self.client.force_login(self.admin)
+        dashboard = self.client.get(reverse("portal:admin-dashboard"))
+        self.assertNotContains(dashboard, "alert-runtime")
+        self.assertEqual(self.client.get(reverse("portal:alerts-feed")).status_code, 403)
+        self.assertEqual(self.client.post(reverse("portal:alert-preferences")).status_code, 403)
+
+    def test_lecturer_message_sends_student_email(self):
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        notification = Notification.objects.create(
+            sender=self.lecturer,
+            subject="Class update",
+            body="Bring your lab manual.",
+        )
+
+        from .services import deliver_notification
+
+        with self.captureOnCommitCallbacks(execute=True):
+            deliver_notification(notification)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].bcc, [self.student.email])
+        self.assertIn(notification.subject, mail.outbox[0].subject)
+        self.assertIn(notification.body, mail.outbox[0].body)
+
     def test_paystack_webhook_marks_course_payment_paid(self):
         payment = CoursePayment.objects.create(
             student=self.student,
@@ -1148,6 +1251,37 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payment.status, CoursePayment.Status.PAID)
 
+    def test_paystack_webhook_requires_the_secret_used_for_the_payment(self):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PENDING,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        payload = {
+            "event": "charge.success",
+            "data": {
+                "reference": payment.paystack_reference,
+                "amount": 250000,
+            },
+        }
+        body = json.dumps(payload).encode("utf-8")
+        signature = hmac.new(b"sk_test_department", body, hashlib.sha512).hexdigest()
+
+        response = self.client.post(
+            reverse("portal:paystack-webhook"),
+            data=body,
+            content_type="application/json",
+            HTTP_X_PAYSTACK_SIGNATURE=signature,
+        )
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["processed"])
+        self.assertEqual(payment.status, CoursePayment.Status.PENDING)
+
     def test_paystack_webhook_creates_course_registration_and_access(self):
         gateway = CoursePaymentGateway.objects.get(slug="courses")
         payment = CoursePayment.objects.create(
@@ -1208,12 +1342,24 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertIn("password-reset/confirm", mail.outbox[0].body)
 
 
+@override_settings(
+    BOOTSTRAP_ADMIN_USERNAME="test-bootstrap-admin",
+    BOOTSTRAP_ADMIN_PASSWORD="test-bootstrap-password",
+)
 class DefaultAdminBootstrapTests(TestCase):
+    username = "test-bootstrap-admin"
+    password = "test-bootstrap-password"
+
+    @override_settings(BOOTSTRAP_ADMIN_USERNAME="", BOOTSTRAP_ADMIN_PASSWORD="")
+    def test_bootstrap_is_disabled_without_explicit_credentials(self):
+        self.assertIsNone(ensure_default_admin_user())
+        self.assertFalse(User.objects.filter(role=User.Role.ADMIN).exists())
+
     def test_bootstrap_admin_is_created_with_default_password(self):
         admin_user = ensure_default_admin_user()
 
-        self.assertEqual(admin_user.username, DEFAULT_ADMIN_USERNAME)
-        self.assertTrue(admin_user.check_password(DEFAULT_ADMIN_PASSWORD))
+        self.assertEqual(admin_user.username, self.username)
+        self.assertTrue(admin_user.check_password(self.password))
         self.assertEqual(admin_user.role, User.Role.ADMIN)
         self.assertTrue(admin_user.is_staff)
         self.assertTrue(admin_user.is_superuser)
@@ -1227,7 +1373,7 @@ class DefaultAdminBootstrapTests(TestCase):
         admin_user.refresh_from_db()
 
         self.assertTrue(admin_user.check_password("updated-secret-123"))
-        self.assertFalse(admin_user.check_password(DEFAULT_ADMIN_PASSWORD))
+        self.assertFalse(admin_user.check_password(self.password))
 
     def test_admin_login_uses_current_password_after_bootstrap(self):
         admin_user = ensure_default_admin_user()
@@ -1238,7 +1384,7 @@ class DefaultAdminBootstrapTests(TestCase):
             reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
             {
                 "role": User.Role.ADMIN,
-                "username": DEFAULT_ADMIN_USERNAME,
+                "username": self.username,
                 "password": "updated-secret-123",
             },
         )
@@ -1263,7 +1409,7 @@ class DefaultAdminBootstrapTests(TestCase):
             {
                 "csrfmiddlewaretoken": csrf_token,
                 "role": User.Role.ADMIN,
-                "username": DEFAULT_ADMIN_USERNAME,
+                "username": self.username,
                 "password": "updated-secret-123",
             },
         )
@@ -1280,7 +1426,7 @@ class DefaultAdminBootstrapTests(TestCase):
             reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
             {
                 "role": User.Role.ADMIN,
-                "username": DEFAULT_ADMIN_USERNAME,
+                "username": self.username,
                 "password": "updated-secret-123",
             },
         )

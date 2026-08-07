@@ -2902,3 +2902,226 @@ body {
         padding: 0.62rem 0.5rem;
     }
 }
+
+/* Compact desktop dashboard scale shared by student, lecturer, and admin. */
+@media (min-width: 1200px) {
+    body.dashboard-page {
+        --dashboard-sidebar-width: clamp(220px, 16.5vw, 232px);
+        --dashboard-shell-padding: clamp(1rem, 1.3vw, 1.25rem);
+        --dashboard-shell-gap: clamp(1rem, 1.3vw, 1.25rem);
+        font-size: 0.78rem;
+        line-height: 1.45;
+    }
+
+    .dashboard-page .nav-shell {
+        width: min(930px, calc(100% - 2rem));
+        padding: 0.65rem 0;
+    }
+
+    .dashboard-page .brand-mark,
+    .dashboard-page .header-actions {
+        gap: 0.6rem;
+    }
+
+    .dashboard-page .brand-mark img {
+        width: 34px;
+        height: 34px;
+    }
+
+    .dashboard-page .brand-mark strong {
+        font-size: 0.82rem;
+    }
+
+    .dashboard-page .brand-mark small,
+    .dashboard-page .header-actions .small {
+        font-size: 0.64rem;
+    }
+
+    .dashboard-page .header-actions .small,
+    .dashboard-page .small {
+        padding: 0.48rem 0.8rem;
+    }
+
+    .dashboard-page .dashboard-layout {
+        gap: var(--dashboard-shell-gap);
+        padding: var(--dashboard-shell-padding);
+        padding-left: calc(var(--dashboard-shell-padding) + var(--dashboard-sidebar-width) + var(--dashboard-shell-gap));
+    }
+
+    .dashboard-page .dashboard-sidebar {
+        top: calc(var(--site-header-height) + var(--dashboard-shell-padding));
+        left: var(--dashboard-shell-padding);
+        width: var(--dashboard-sidebar-width);
+        height: calc(100vh - var(--site-header-height) - (var(--dashboard-shell-padding) * 2));
+        max-height: calc(100vh - var(--site-header-height) - (var(--dashboard-shell-padding) * 2));
+        padding: 1rem;
+        gap: 1rem;
+        border-radius: 22px;
+    }
+
+    .dashboard-page .sidebar-brand {
+        gap: 0.7rem;
+    }
+
+    .dashboard-page .sidebar-brand img {
+        width: 34px;
+        height: 34px;
+    }
+
+    .dashboard-page .sidebar-brand h3 {
+        font-size: 0.9rem;
+    }
+
+    .dashboard-page .sidebar-brand p,
+    .dashboard-page .sidebar-brand small {
+        margin: 0.25rem 0 0;
+        font-size: 0.68rem;
+        line-height: 1.35;
+    }
+
+    .dashboard-page .sidebar-menu {
+        gap: 0.35rem;
+    }
+
+    .dashboard-page .sidebar-menu a,
+    .dashboard-page .sidebar-dropdown summary {
+        padding: 0.72rem 0.75rem;
+        border-radius: 13px;
+        font-size: 0.72rem;
+        line-height: 1.2;
+    }
+
+    .dashboard-page .sidebar-submenu {
+        gap: 0.25rem;
+        margin-top: 0.25rem;
+        padding-left: 0.55rem;
+    }
+
+    .dashboard-page .sidebar-submenu a {
+        padding: 0.55rem 0.65rem;
+        font-size: 0.67rem;
+    }
+
+    .dashboard-page .sidebar-note {
+        border-radius: 16px;
+        padding: 0.8rem;
+        font-size: 0.68rem;
+    }
+
+    .dashboard-page .sidebar-note strong {
+        font-size: 0.72rem;
+    }
+
+    .dashboard-page .dashboard-main {
+        gap: 0.75rem;
+    }
+
+    .dashboard-page .dashboard-topbar {
+        gap: 0.75rem;
+        padding: 0.85rem;
+        border-radius: 20px;
+    }
+
+    .dashboard-page .dashboard-title-block {
+        gap: 0.22rem;
+    }
+
+    .dashboard-page .dashboard-topbar h1 {
+        font-size: clamp(1.35rem, 1.7vw, 1.6rem);
+        line-height: 1.08;
+    }
+
+    .dashboard-page .eyebrow {
+        margin-bottom: 0.3rem;
+        font-size: 0.62rem;
+    }
+
+    .dashboard-page .dashboard-topbar-summary {
+        max-width: 56ch;
+        font-size: 0.66rem;
+        line-height: 1.4;
+    }
+
+    .dashboard-page .dashboard-role-chip,
+    .dashboard-page .dashboard-meta span {
+        min-height: auto;
+        padding: 0.52rem 0.8rem;
+        font-size: 0.68rem;
+    }
+
+    .dashboard-page .metrics,
+    .dashboard-page .split-layout {
+        gap: 0.75rem;
+    }
+
+    .dashboard-page .metric-card {
+        min-height: 78px;
+        gap: 0.35rem;
+        padding: 0.85rem;
+        border-radius: 18px;
+    }
+
+    .dashboard-page .metric-card span,
+    .dashboard-page .table-cell-subtext,
+    .dashboard-page .table-cell-muted,
+    .dashboard-page .table-wrap .muted-note {
+        font-size: 0.66rem;
+        line-height: 1.35;
+    }
+
+    .dashboard-page .metric-card strong {
+        font-size: 1.45rem;
+    }
+
+    .dashboard-page .panel-card,
+    .dashboard-page .resource-card,
+    .dashboard-page .feature-card,
+    .dashboard-page .preview-card,
+    .dashboard-page .login-card {
+        padding: 0.85rem;
+        border-radius: 18px;
+    }
+
+    .dashboard-page .panel-card,
+    .dashboard-page .message-list {
+        gap: 0.7rem;
+    }
+
+    .dashboard-page .panel-head {
+        gap: 0.7rem;
+        margin-bottom: 0.35rem;
+    }
+
+    .dashboard-page .panel-head h2,
+    .dashboard-page .panel-head h3 {
+        font-size: 0.9rem;
+    }
+
+    .dashboard-page .message-item {
+        gap: 0.65rem;
+        padding: 0.7rem 0.8rem;
+        border-radius: 14px;
+    }
+
+    .dashboard-page .message-item span,
+    .dashboard-page .message-item p,
+    .dashboard-page .stack-form,
+    .dashboard-page .stack-form label {
+        font-size: 0.68rem;
+        line-height: 1.4;
+    }
+
+    .dashboard-page .table-wrap {
+        border-radius: 14px;
+    }
+
+    .dashboard-page .table-wrap th,
+    .dashboard-page .table-wrap td {
+        padding: 0.72rem 0.7rem;
+        font-size: 0.68rem;
+    }
+
+    .dashboard-page .table-wrap thead th {
+        font-size: 0.62rem;
+    }
+}
