@@ -29,6 +29,7 @@
             <label>Last name {{ student_form.last_name }} {{ student_form.last_name.errors }}</label>
             <label>Email address {{ student_form.email }} {{ student_form.email.errors }}</label>
             <label>Student ID {{ student_form.id_number }} {{ student_form.id_number.errors }}</label>
+            <label>Faculty {{ student_form.faculty }} {{ student_form.faculty.errors }}</label>
             <label>Department {{ student_form.department }} {{ student_form.department.errors }}</label>
             <label>Level {{ student_form.level }} {{ student_form.level.errors }}</label>
             <label>Phone number {{ student_form.phone_number }} {{ student_form.phone_number.errors }}</label>
@@ -66,6 +67,7 @@
             <label>Last name {{ lecturer_form.last_name }} {{ lecturer_form.last_name.errors }}</label>
             <label>Email address {{ lecturer_form.email }} {{ lecturer_form.email.errors }}</label>
             <label>Lecturer ID {{ lecturer_form.id_number }} {{ lecturer_form.id_number.errors }}</label>
+            <label>Faculty {{ lecturer_form.faculty }} {{ lecturer_form.faculty.errors }}</label>
             <label>Department {{ lecturer_form.department }} {{ lecturer_form.department.errors }}</label>
             <label>Phone number {{ lecturer_form.phone_number }} {{ lecturer_form.phone_number.errors }}</label>
             <label>
@@ -118,6 +120,9 @@
                                     <button type="submit" class="primary-btn small">Approve</button>
                                 </form>
                             {% endif %}
+                            <form method="post" action="{% url 'portal:admin-reset-user-password' lecturer.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}<button type="submit" class="ghost-btn small">Reset Password</button>
+                            </form>
                             <form method="post" action="{% url 'portal:admin-delete-user' lecturer.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                 {% csrf_token %}
                                 <button type="submit" class="danger-btn small">Remove</button>
@@ -157,6 +162,9 @@
                         <td>{{ student.department.name|default:"-" }}</td>
                         <td>{{ student.level }}</td>
                         <td class="actions-cell">
+                            <form method="post" action="{% url 'portal:admin-reset-user-password' student.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                {% csrf_token %}<button type="submit" class="ghost-btn small">Reset Password</button>
+                            </form>
                             <form method="post" action="{% url 'portal:admin-delete-user' student.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                 {% csrf_token %}
                                 <button type="submit" class="danger-btn small">Remove</button>

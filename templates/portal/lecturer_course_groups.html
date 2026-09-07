@@ -1,0 +1,74 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Student Groups | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <div>
+                <h2>{{ course.code }} - {{ course.title }}</h2>
+                <p class="muted-note">{{ paid_student_total }} currently registered paid student{{ paid_student_total|pluralize }} in {{ current_academic_session.name }}.</p>
+            </div>
+            <a href="{% url 'portal:lecturer-courses' %}?fee_type=paid" class="ghost-btn small">Back to Paid Courses</a>
+        </div>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            <label class="grouping-switch">{{ form.enable_grouping }} Enable student grouping</label>
+            <p class="muted-note">Leave this switch off to use only the paid student ID downloads.</p>
+            <div id="grouping-options">
+                <label>How should students be grouped?</label>
+                {{ form.grouping_method }}
+                <label>Random group names {{ form.group_names }}</label>
+                <p class="muted-note">Use names such as A1, A2, A3. A single name creates one group. Saving again replaces this course's current groups.</p>
+            </div>
+            <button type="submit" class="primary-btn">Save Grouping Preference</button>
+        </form>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head"><h2>Downloads</h2></div>
+        <p class="muted-note">Download the full paid-student roster or a single selected group.</p>
+        <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="primary-btn small" download>Download All Paid Students</a>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>Current Groups</h2></div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Group</th><th>Method</th><th>Department</th><th>Students</th><th></th></tr></thead>
+            <tbody>
+                {% for group in groups %}
+                <tr>
+                    <td>{{ group.name }}</td>
+                    <td>{{ group.get_grouping_method_display }}</td>
+                    <td>{{ group.department.name|default:"-" }}</td>
+                    <td>{{ group.student_total }}</td>
+                    <td class="actions-cell">
+                        <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}?group={{ group.id }}" class="ghost-btn small" download>Download Group</a>
+                        <form method="post">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="delete-group">
+                            <input type="hidden" name="group_id" value="{{ group.id }}">
+                            <button type="submit" class="danger-btn small">Delete Group</button>
+                        </form>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="5">No groups have been created for this course yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+<script>
+    (() => {
+        const toggle = document.getElementById('id_enable_grouping');
+        const options = document.getElementById('grouping-options');
+        const sync = () => { options.hidden = !toggle.checked; };
+        toggle.addEventListener('change', sync);
+        sync();
+    })();
+</script>
+{% endblock %}

@@ -26,7 +26,18 @@
                 <p><strong>Payment completed.</strong></p>
                 <p>{{ departmental_payment.association_summary }}</p>
                 <p>Reference: {{ departmental_payment.paystack_reference }}</p>
-                <a href="{% url 'portal:download-exam-card' departmental_payment.id %}" class="primary-btn small">Download Exam Card PDF</a>
+                <a href="{% url 'portal:download-exam-card' departmental_payment.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View Exam Card</a>
+                <a href="{% url 'portal:download-exam-card' departmental_payment.id %}?download=1" class="ghost-btn small file-action-btn">Download Exam Card</a>
+                <form method="post" enctype="multipart/form-data" class="stack-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="add-documents">
+                    <label>
+                        Add other documents
+                        {{ additional_document_form.additional_documents }}
+                        {{ additional_document_form.additional_documents.errors }}
+                    </label>
+                    <button type="submit" class="ghost-btn small">Upload Documents</button>
+                </form>
             </div>
         {% else %}
             <form method="post" enctype="multipart/form-data" class="stack-form departmental-student-form" data-departmental-form>
@@ -45,7 +56,7 @@
                     {{ departmental_form.school_receipt.errors }}
                 </label>
                 <label>
-                    Supporting Documents
+                    Medical fitness
                     {{ departmental_form.supporting_documents }}
                     {{ departmental_form.supporting_documents.errors }}
                 </label>
@@ -127,7 +138,8 @@
                             <td>{{ payment.paid_at|date:"M d, Y H:i"|default:"-" }}</td>
                             <td>
                                 {% if payment.is_paid %}
-                                    <a href="{% url 'portal:download-exam-card' payment.id %}" class="ghost-btn small">Download</a>
+                                    <a href="{% url 'portal:download-exam-card' payment.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                    <a href="{% url 'portal:download-exam-card' payment.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                                 {% else %}
                                     -
                                 {% endif %}

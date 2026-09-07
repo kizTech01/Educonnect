@@ -61,7 +61,8 @@
                             </td>
                             <td class="actions-cell">
                                 {% if course.file %}
-                                    <a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small">Download</a>
+                                    <a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                    <a href="{% url 'portal:download-course-file' course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                                 {% endif %}
                                 {% if not course.is_free %}
                                     <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Paid IDs</a>
@@ -81,7 +82,6 @@
     <div class="panel-card">
         <div class="panel-head">
             <h2>Course File Uploads</h2>
-            <a href="{% url 'portal:lecturer-courses' %}" class="ghost-btn small">View Courses</a>
         </div>
         <p class="muted-note">Upload course files directly from course management. Students can download free files immediately or pay before downloading paid files.</p>
     </div>

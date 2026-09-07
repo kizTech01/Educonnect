@@ -1,14 +1,8 @@
 <svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="160" height="160" rx="36" fill="url(#paint0_linear)"/>
+  <rect width="160" height="160" rx="36" fill="white"/>
   <path d="M80 34L126 54V62C126 93.5 106.6 122.3 80 130C53.4 122.3 34 93.5 34 62V54L80 34Z" fill="white" fill-opacity="0.18"/>
   <path d="M80 45L113 58V64.5C113 86.4 99.3 106.2 80 112C60.7 106.2 47 86.4 47 64.5V58L80 45Z" fill="white"/>
   <path d="M62 72H98" stroke="#0F172A" stroke-width="8" stroke-linecap="round"/>
   <path d="M80 58V93" stroke="#0F172A" stroke-width="8" stroke-linecap="round"/>
   <circle cx="80" cy="102" r="10" fill="#F59E0B"/>
-  <defs>
-    <linearGradient id="paint0_linear" x1="17" y1="15" x2="143" y2="143" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#0EA5A4"/>
-      <stop offset="1" stop-color="#F59E0B"/>
-    </linearGradient>
-  </defs>
 </svg>

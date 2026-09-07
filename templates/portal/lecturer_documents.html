@@ -54,11 +54,48 @@
                         <td>{{ item.get_semester_display }}</td>
                         <td>{{ item.level|default:"-" }}</td>
                         <td>{{ item.title }}</td>
-                        <td><a href="{% url 'portal:download-document' 'timetable' item.id %}" class="ghost-btn small">Download</a></td>
+                        <td><a href="{% url 'portal:download-document' 'timetable' item.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a> <a href="{% url 'portal:download-document' 'timetable' item.id %}?download=1" class="ghost-btn small file-action-btn">Download</a></td>
                     </tr>
                 {% empty %}
                     <tr>
                         <td colspan="5">No timetable documents uploaded.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Handbooks</h2>
+    </div>
+    <form method="get" class="stack-form filter-grid">
+        <label>Department {{ handbook_filter_form.department }}</label>
+        <label>Search {{ handbook_filter_form.search }}</label>
+        <button type="submit" class="primary-btn">Filter Handbooks</button>
+    </form>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Department</th>
+                    <th>Title</th>
+                    <th>Session</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in handbooks %}
+                    <tr>
+                        <td>{{ item.department.name }}</td>
+                        <td>{{ item.title }}</td>
+                        <td>{{ item.academic_session }}</td>
+                        <td><a href="{% url 'portal:download-document' 'handbook' item.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a> <a href="{% url 'portal:download-document' 'handbook' item.id %}?download=1" class="ghost-btn small file-action-btn">Download</a></td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="4">No handbook uploaded yet.</td>
                     </tr>
                 {% endfor %}
             </tbody>

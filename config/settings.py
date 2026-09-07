@@ -98,7 +98,8 @@ TEMPLATES = [
             "context_processors": [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
-                "django.contrib.messages.context_processors.messages",
+            "django.contrib.messages.context_processors.messages",
+            "portal.context_processors.institution",
             ],
         },
     },
@@ -109,7 +110,11 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 
 # Database
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Keep local development isolated from a production DATABASE_URL that may be
+# present in .env. Render does not set this flag, so it continues to use its
+# managed PostgreSQL database in production.
+USE_LOCAL_SQLITE = os.getenv("DJANGO_USE_LOCAL_SQLITE", "False").lower() == "true"
+DATABASE_URL = None if USE_LOCAL_SQLITE else os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
     import dj_database_url
@@ -231,6 +236,8 @@ STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
     },
+
+
     "staticfiles": {
         "BACKEND": (
             "django.contrib.staticfiles.storage.StaticFilesStorage"
@@ -276,6 +283,13 @@ DEFAULT_FROM_EMAIL = os.getenv(
 )
 
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
+
+# Optional OpenAI-powered structured extraction for handbook and departmental
+# import files. The portal keeps a local parser as a fallback when this is blank.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_AUTOMATION_MODEL = os.getenv("OPENAI_AUTOMATION_MODEL", "gpt-4.1-mini").strip()
+OPENAI_LOGO_LOOKUP_MODEL = os.getenv("OPENAI_LOGO_LOOKUP_MODEL", "gpt-5").strip()
+OPENAI_LOGO_PROCESSING_MODEL = os.getenv("OPENAI_LOGO_PROCESSING_MODEL", "gpt-image-2").strip()
 
 
 # Optional bootstrap administrator

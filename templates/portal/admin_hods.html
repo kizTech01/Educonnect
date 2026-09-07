@@ -1,0 +1,61 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Heads of Department | Educonnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head"><h2>Departments</h2></div>
+        <form method="get" class="stack-form">
+            <label>Search Department
+                <input type="text" name="search" value="{{ department_search }}" class="input-field" placeholder="Department name or code">
+            </label>
+            <button type="submit" class="primary-btn">Search</button>
+        </form>
+        <div class="message-list association-list">
+            {% for department in departments %}
+                <a href="{% url 'portal:admin-hods' %}?department={{ department.id }}{% if department_search %}&search={{ department_search }}{% endif %}" class="message-item shell">
+                    <div>
+                        <strong>{{ department.name }}</strong>
+                        <span>{{ department.code }} · {% if department.head_of_department %}HOD: {{ department.head_of_department.full_name }}{% else %}No HOD assigned{% endif %}</span>
+                    </div>
+                </a>
+            {% empty %}
+                <p class="empty-text">No departments found.</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head"><h2>{% if selected_department %}{{ selected_department.name }} Lecturers{% else %}Select a Department{% endif %}</h2></div>
+        {% if selected_department %}
+            <p class="muted-note">Choose an approved lecturer to make them HOD. The HOD can manage only this department's payment API and fees.</p>
+            <div class="message-list association-list">
+                {% for lecturer in lecturers %}
+                    <div class="message-item shell">
+                        <div>
+                            <strong>{{ lecturer.full_name }}</strong>
+                            <span>{{ lecturer.id_number|default:lecturer.username }}{% if selected_department.head_of_department_id == lecturer.id %} · Current HOD{% endif %}</span>
+                        </div>
+                        {% if selected_department.head_of_department_id == lecturer.id %}
+                            <span class="status-pill success">HOD</span>
+                        {% else %}
+                            <form method="post">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="assign-hod">
+                                <input type="hidden" name="department_id" value="{{ selected_department.id }}">
+                                <input type="hidden" name="lecturer_id" value="{{ lecturer.id }}">
+                                <button type="submit" class="primary-btn small">Assign HOD</button>
+                            </form>
+                        {% endif %}
+                    </div>
+                {% empty %}
+                    <p class="empty-text">No approved lecturers are assigned to this department yet.</p>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="muted-note">Select a department to see its lecturers and assign its HOD.</p>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

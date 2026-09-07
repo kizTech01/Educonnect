@@ -56,7 +56,8 @@
                                         <button type="submit" class="primary-btn small">Payment {{ row.display_amount }}</button>
                                     </form>
                                 {% elif row.can_download %}
-                                    <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small">Download</a>
+                                    <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                    <a href="{% url 'portal:download-course-file' row.registration.course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                                 {% else %}
                                     <span class="status-pill success">{% if row.registration.course.is_free %}Free{% else %}Paid {{ row.display_amount }}{% endif %}</span>
                                 {% endif %}

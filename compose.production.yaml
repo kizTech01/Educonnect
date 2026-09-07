@@ -1,0 +1,79 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+      python manage.py collectstatic --noinput &&
+      gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 60 --access-logfile - --error-logfile -"
+    expose:
+      - "8000"
+    volumes:
+      - static_files:/app/staticfiles
+      - media_files:/app/media
+
+  reminders:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    depends_on:
+      db:
+        condition: service_healthy
+      web:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        until python manage.py send_due_course_reminders; do sleep 10; done
+        while true; do
+          sleep 60
+          python manage.py send_due_course_reminders
+        done
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN}
+      CADDY_EMAIL: ${CADDY_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - static_files:/srv/static:ro
+      - media_files:/srv/media:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  static_files:
+  media_files:
+  caddy_data:
+  caddy_config:

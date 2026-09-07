@@ -4,19 +4,27 @@ from .models import (
     AcademicSession,
     Course,
     CoursePayment,
+    CourseStudentGroup,
+    CourseStudentGroupMembership,
     CoursePaymentGateway,
     CourseMaterial,
     Department,
+    DepartmentLecturerUpload,
+    CourseAllocationUpload,
     DepartmentPaymentGateway,
+    DepartmentCoursePaymentGateway,
     DepartmentalAssociation,
     DepartmentalFee,
     DepartmentalPayment,
     DepartmentalPaymentDocument,
     DepartmentalPaymentItem,
     Handbook,
+    Faculty,
+    InstitutionProfile,
     LecturerCourseRegistration,
     MaterialAccess,
     Notification,
+    NotificationAttachment,
     NotificationRecipient,
     StudentCourseRegistration,
     Timetable,
@@ -33,8 +41,42 @@ class UserAdmin(admin.ModelAdmin):
 
 @admin.register(Department)
 class DepartmentAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "faculty", "created_at")
+    list_filter = ("faculty",)
+    search_fields = ("name", "code", "faculty__name")
+
+
+@admin.register(DepartmentCoursePaymentGateway)
+class DepartmentCoursePaymentGatewayAdmin(admin.ModelAdmin):
+    list_display = ("department", "paystack_public_key", "updated_at")
+    search_fields = ("department__name", "department__code")
+
+
+@admin.register(Faculty)
+class FacultyAdmin(admin.ModelAdmin):
     list_display = ("name", "code", "created_at")
     search_fields = ("name", "code")
+
+
+@admin.register(InstitutionProfile)
+class InstitutionProfileAdmin(admin.ModelAdmin):
+    list_display = ("name", "website", "email", "updated_at")
+
+
+@admin.register(NotificationAttachment)
+class NotificationAttachmentAdmin(admin.ModelAdmin):
+    list_display = ("notification", "file", "created_at")
+    search_fields = ("notification__subject", "file")
+
+
+@admin.register(DepartmentLecturerUpload)
+class DepartmentLecturerUploadAdmin(admin.ModelAdmin):
+    list_display = ("department", "file", "uploaded_by", "created_at")
+
+
+@admin.register(CourseAllocationUpload)
+class CourseAllocationUploadAdmin(admin.ModelAdmin):
+    list_display = ("department", "file", "uploaded_by", "created_at")
 
 
 @admin.register(Course)
@@ -60,9 +102,22 @@ class LecturerCourseRegistrationAdmin(admin.ModelAdmin):
 
 @admin.register(CoursePayment)
 class CoursePaymentAdmin(admin.ModelAdmin):
-    list_display = ("student", "course", "amount", "status", "paystack_reference", "paid_at", "created_at")
+    list_display = ("student", "course", "session", "enrollment_sequence", "amount", "status", "is_active_for_registration", "paid_at")
     list_filter = ("status", "course__department")
     search_fields = ("student__username", "student__id_number", "course__code", "paystack_reference")
+
+
+@admin.register(CourseStudentGroup)
+class CourseStudentGroupAdmin(admin.ModelAdmin):
+    list_display = ("course", "name", "session", "grouping_method", "department", "lecturer")
+    list_filter = ("grouping_method", "session", "course__department")
+    search_fields = ("course__code", "name", "lecturer__username")
+
+
+@admin.register(CourseStudentGroupMembership)
+class CourseStudentGroupMembershipAdmin(admin.ModelAdmin):
+    list_display = ("group", "student", "created_at")
+    search_fields = ("group__course__code", "group__name", "student__username", "student__id_number")
 
 
 @admin.register(CoursePaymentGateway)

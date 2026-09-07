@@ -1,0 +1,28 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Manage Faculties | Educonnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head"><h2>Add Faculty</h2></div>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            {{ form.as_p }}
+            <button type="submit" class="primary-btn">Create Faculty</button>
+        </form>
+    </div>
+    <div class="panel-card">
+        <div class="panel-head"><h2>How it works</h2></div>
+        <p class="muted-note">Each department belongs to one faculty. Create a faculty first, then select it when adding departments, students, or lecturers.</p>
+        <a href="{% url 'portal:admin-departments' %}" class="ghost-btn">Manage Departments</a>
+    </div>
+</section>
+<section class="panel-card">
+    <div class="panel-head"><h2>Faculties</h2></div>
+    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Code</th><th>Departments</th></tr></thead><tbody>
+        {% for faculty in faculties %}<tr><td>{{ faculty.name }}</td><td>{{ faculty.code }}</td><td>{{ faculty.department_total }}</td></tr>
+        {% empty %}<tr><td colspan="3">No faculties created yet.</td></tr>{% endfor %}
+    </tbody></table></div>
+</section>
+{% endblock %}

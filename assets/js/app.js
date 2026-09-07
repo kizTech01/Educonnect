@@ -32,6 +32,14 @@ if (dashboardLayout) {
     const backdrop = dashboardLayout.querySelector("[data-dashboard-backdrop]");
     const desktopQuery = window.matchMedia("(min-width: 1200px)");
 
+    // Keep the navigation limited to real portal destinations. This also
+    // removes stale View/Share links left by an older cached script.
+    dashboardLayout.querySelectorAll(".sidebar-menu a, .sidebar-submenu a").forEach((link) => {
+        if (["view", "share"].includes(link.textContent.trim().toLowerCase())) {
+            link.remove();
+        }
+    });
+
     const isDrawerOpen = () => dashboardLayout.classList.contains("is-sidebar-open");
 
     const setDrawerState = (open) => {

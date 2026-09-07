@@ -100,6 +100,13 @@ img {
 .sidebar-brand img {
     width: 48px;
     height: 48px;
+    padding: 2px;
+    border-radius: 14px;
+    object-fit: cover;
+    object-position: center 34%;
+    background: #ffffff;
+    border: 1px solid rgba(24, 119, 214, 0.22);
+    box-shadow: 0 5px 16px rgba(15, 23, 42, 0.16);
 }
 
 .brand-mark strong,
@@ -452,6 +459,29 @@ textarea {
     margin: 0;
 }
 
+.institution-logo-preview {
+    display: grid;
+    place-items: center;
+    width: min(100%, 180px);
+    min-height: 150px;
+    margin-top: 0.35rem;
+    padding: 1rem;
+    border: 1px solid #d8e1eb;
+    border-radius: 16px;
+    background-color: #f8fafc;
+    background-image: linear-gradient(45deg, #e6edf5 25%, transparent 25%), linear-gradient(-45deg, #e6edf5 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e6edf5 75%), linear-gradient(-45deg, transparent 75%, #e6edf5 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
+.institution-logo-preview img {
+    display: block;
+    width: 100%;
+    max-width: 140px;
+    max-height: 120px;
+    object-fit: contain;
+}
+
 .stack-form input[type="checkbox"],
 .stack-form input[type="radio"] {
     width: auto;
@@ -636,10 +666,28 @@ textarea {
 }
 
 .sidebar-menu a {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 0.95rem 1rem;
     border-radius: 18px;
     color: rgba(255, 255, 255, 0.82);
+}
+
+.sidebar-notification-counter {
+    display: inline-grid;
+    min-width: 1.3rem;
+    height: 1.3rem;
+    padding: 0 0.3rem;
+    place-items: center;
+    border-radius: 999px;
+    border: 2px solid rgba(20, 33, 48, 0.65);
+    background: #df2935;
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 800;
+    line-height: 1;
+    box-shadow: 0 3px 8px rgba(223, 41, 53, 0.35);
 }
 
 .sidebar-dropdown summary {
@@ -996,7 +1044,66 @@ th {
 }
 
 .site-footer {
-    padding: 2rem 0 3rem;
+    padding: 2.25rem 0 3rem;
+}
+
+.footer-credit {
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    min-height: 4.25rem;
+    padding: 1rem 1.5rem;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.82);
+    background:
+        radial-gradient(circle at 13% 10%, rgba(86, 180, 255, 0.32), transparent 27%),
+        radial-gradient(circle at 88% 100%, rgba(33, 112, 213, 0.5), transparent 34%),
+        linear-gradient(110deg, #061d3c 0%, #0a3970 52%, #075caa 100%);
+    border: 1px solid rgba(145, 205, 255, 0.28);
+    border-radius: 18px;
+    box-shadow: 0 16px 36px rgba(6, 29, 60, 0.2);
+}
+
+.footer-credit::before {
+    content: "";
+    position: absolute;
+    inset: 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: 13px;
+    pointer-events: none;
+}
+
+.footer-credit p {
+    position: relative;
+    z-index: 1;
+    margin: 0;
+    font-family: "Outfit", sans-serif;
+    font-size: 0.9rem;
+    font-weight: 500;
+    letter-spacing: 0.035em;
+}
+
+.footer-divider {
+    margin: 0 0.45rem;
+    color: #80caff;
+}
+
+.footer-credit strong {
+    color: #ffffff;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+}
+
+@media (max-width: 560px) {
+    .footer-credit {
+        min-height: 4rem;
+        padding: 0.9rem 1rem;
+    }
+
+    .footer-credit p {
+        font-size: 0.8rem;
+    }
 }
 
 .scroll-top-btn {
@@ -2643,12 +2750,87 @@ body.dashboard-page {
     margin: 0;
 }
 
+
+@media (max-width: 1199px) {
+    /* Keep alerts readable when the responsive sidebar drawer is open. */
+    body.dashboard-drawer-open > .flash-stack {
+        position: relative;
+        z-index: 56;
+    }
+}
+
+.dashboard-page .table-wrap .compact-course-actions {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.35rem;
+    min-width: max-content;
+}
+
+.dashboard-page .table-wrap .compact-course-actions > .primary-btn.small,
+.dashboard-page .table-wrap .compact-course-actions > .ghost-btn.small,
+.dashboard-page .table-wrap .course-actions-menu > summary.ghost-btn.small {
+    min-height: 2rem;
+    padding: 0.42rem 0.65rem;
+    font-size: 0.72rem;
+    line-height: 1.1;
+    white-space: nowrap;
+}
+
+.dashboard-page .table-wrap .course-actions-menu {
+    min-width: 0;
+}
+
+.dashboard-page .table-wrap .course-actions-menu > summary {
+    list-style: none;
+}
+
+.dashboard-page .table-wrap .course-actions-menu > summary::-webkit-details-marker {
+    display: none;
+}
+
+.dashboard-page .table-wrap .course-actions-menu .less-label {
+    display: none;
+}
+
+.dashboard-page .table-wrap .course-actions-menu[open] .more-label {
+    display: none;
+}
+
+.dashboard-page .table-wrap .course-actions-menu[open] .less-label {
+    display: inline;
+}
+
+.dashboard-page .table-wrap .course-action-menu-items {
+    display: none;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+}
+
+.dashboard-page .table-wrap .course-actions-menu[open] .course-action-menu-items {
+    display: grid;
+}
+
+.dashboard-page .table-wrap .course-action-menu-items .ghost-btn.small,
+.dashboard-page .table-wrap .course-action-menu-items .danger-btn.small {
+    justify-content: flex-start;
+    min-height: 2rem;
+    padding: 0.42rem 0.65rem;
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
 .dashboard-page .table-wrap .ghost-btn.small,
 .dashboard-page .table-wrap .primary-btn.small,
 .dashboard-page .table-wrap .danger-btn.small {
     padding: 0.62rem 0.9rem;
     border-radius: 999px;
     box-shadow: none;
+}
+
+.dashboard-page .file-action-btn.small {
+    min-height: 1.9rem;
+    padding: 0.38rem 0.64rem;
+    font-size: 0.74rem;
 }
 
 .dashboard-page .table-wrap .status-pill {
@@ -2948,6 +3130,17 @@ body {
         padding-left: calc(var(--dashboard-shell-padding) + var(--dashboard-sidebar-width) + var(--dashboard-shell-gap));
     }
 
+    /* Flash messages live outside the dashboard layout, so align them with
+       the main column instead of allowing the fixed sidebar to cover them. */
+    body.dashboard-page > .flash-stack.container {
+        width: auto;
+        max-width: none;
+        margin-right: var(--dashboard-shell-padding);
+        margin-left: calc(
+            var(--dashboard-shell-padding) + var(--dashboard-sidebar-width) + var(--dashboard-shell-gap)
+        );
+    }
+
     .dashboard-page .dashboard-sidebar {
         top: calc(var(--site-header-height) + var(--dashboard-shell-padding));
         left: var(--dashboard-shell-padding);
@@ -3123,5 +3316,85 @@ body {
 
     .dashboard-page .table-wrap thead th {
         font-size: 0.62rem;
+    }
+}
+
+/* Sent-message history is card-based so the complete message remains readable
+   without requiring horizontal scrolling on narrow screens. */
+.dashboard-page .sent-message {
+    display: grid;
+    gap: 0.65rem;
+    min-width: 0;
+}
+
+.dashboard-page .sent-message-heading,
+.dashboard-page .sent-message-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.45rem 0.9rem;
+    min-width: 0;
+}
+
+.dashboard-page .sent-message-heading h3 {
+    margin: 0;
+    font-size: clamp(0.95rem, 0.55vw + 0.82rem, 1.15rem);
+    overflow-wrap: anywhere;
+}
+
+.dashboard-page .sent-message-body {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.dashboard-page .sent-message-meta {
+    justify-content: flex-start;
+    color: var(--muted);
+    font-size: 0.84rem;
+}
+
+@media (max-width: 767px) {
+    .dashboard-page .dashboard-topbar h1 {
+        font-size: clamp(1.1rem, 4.4vw, 1.38rem);
+        line-height: 1.15;
+    }
+
+    .dashboard-page .panel-head h2,
+    .dashboard-page .panel-head h3,
+    .dashboard-page .sent-message-heading h3 {
+        font-size: clamp(0.98rem, 4vw, 1.12rem);
+        line-height: 1.2;
+    }
+
+    .dashboard-page .dashboard-topbar-summary,
+    .dashboard-page .sent-message-body {
+        font-size: 0.8rem;
+        line-height: 1.45;
+    }
+
+    .dashboard-page .sent-message,
+    .dashboard-page .message-item {
+        padding: 0.75rem;
+    }
+
+    .dashboard-page .sent-message-heading,
+    .dashboard-page .sent-message-meta {
+        display: grid;
+        gap: 0.35rem;
+    }
+
+    .dashboard-page .sent-message-meta {
+        font-size: 0.75rem;
+    }
+
+    /* Preserve every table column through touch scrolling instead of clipping it. */
+    .dashboard-page .table-wrap {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .dashboard-page .table-wrap table {
+        min-width: 560px;
     }
 }

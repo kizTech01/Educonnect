@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% load static %}
+{% static 'images/kiz-tech-logo.png' as fallback_logo %}
 
 {% block body_class %}dashboard-page{% endblock %}
 
@@ -7,9 +8,13 @@
 <main class="dashboard-layout" data-dashboard-layout>
     <aside class="dashboard-sidebar" id="dashboard-sidebar" data-dashboard-sidebar aria-label="Dashboard navigation">
         <div class="sidebar-brand">
-            <img src="{% static 'images/sch-logo.png' %}" alt="MAU EduConnect logo">
+            {% if institution.logo %}
+                <img src="{{ institution.logo.url }}" alt="{{ institution.name }} logo" onerror="this.onerror=null;this.src='{{ fallback_logo }}';">
+            {% else %}
+                <img src="{{ fallback_logo }}" alt="{{ institution.name }} logo">
+            {% endif %}
             <div>
-                <h3>MAU EduConnect</h3>
+                <h3>Educonnect</h3>
                 <p>{{ request.user.full_name }}</p>
                 {% if request.user.department %}
                     <small>{{ request.user.department.name }}</small>
@@ -27,12 +32,17 @@
                             <summary class="{% if item.active %}active{% endif %}">{{ item.label }}</summary>
                             <div class="sidebar-submenu">
                                 {% for child in item.children %}
-                                    <a href="{{ child.url }}" class="{% if child.active %}active{% endif %}">{{ child.label }}</a>
+                                    {% if child.label != "View" and child.label != "Share" %}
+                                        <a href="{{ child.url }}" class="{% if child.active %}active{% endif %}">{{ child.label }}</a>
+                                    {% endif %}
                                 {% endfor %}
                             </div>
                         </details>
                     {% else %}
-                        <a href="{{ item.url }}" class="{% if item.active %}active{% endif %}">{{ item.label }}</a>
+                        <a href="{{ item.url }}" class="{% if item.active %}active{% endif %}">
+                            <span>{{ item.label }}</span>
+                            {% if item.badge_count %}<span class="sidebar-notification-counter" aria-label="{{ item.badge_count }} unread message{{ item.badge_count|pluralize }}">{{ item.badge_count }}</span>{% endif %}
+                        </a>
                     {% endif %}
                 </li>
             {% endfor %}
@@ -70,7 +80,7 @@
                     <span class="dashboard-sidebar-toggle-icon" aria-hidden="true">&#9776;</span>
                 </button>
                 <div class="dashboard-title-block">
-                    <p class="eyebrow">MAU EduConnect Workspace</p>
+                    <p class="eyebrow">Educonnect Workspace</p>
                     <h1>{{ section_title }}</h1>
                     <p class="dashboard-topbar-summary">
                         {% if request.user.role == "student" %}

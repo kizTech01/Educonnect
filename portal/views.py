@@ -9,9 +9,10 @@ from django.contrib import messages
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.forms import PasswordResetForm
+from django.core.files.base import ContentFile
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, Max
 from django.db.models import Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -24,14 +25,20 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .forms import (
-    AcademicSessionForm,
     CourseForm,
     CourseDetailsForm,
     CourseBrowseFilterForm,
+    CourseStudentGroupForm,
     CourseMaterialBatchForm,
-    CoursePaymentGatewayForm,
+    AcademicSessionForm,
     DepartmentForm,
+    DepartmentLecturerUploadForm,
+    CourseAllocationUploadForm,
+    FacultyForm,
+    InstitutionProfileForm,
     DepartmentPaymentGatewayForm,
+    DepartmentCoursePaymentGatewayForm,
+    DepartmentalAdditionalDocumentForm,
     DepartmentalAssociationForm,
     DepartmentalSearchForm,
     DepartmentalStudentPaymentForm,
@@ -57,7 +64,12 @@ from .models import (
     CoursePaymentGateway,
     CourseMaterial,
     Department,
+    DepartmentLecturerUpload,
+    CourseAllocationUpload,
+    Faculty,
+    InstitutionProfile,
     DepartmentPaymentGateway,
+    DepartmentCoursePaymentGateway,
     DepartmentalAssociation,
     DepartmentalFee,
     DepartmentalPayment,
@@ -65,14 +77,18 @@ from .models import (
     DepartmentalPaymentItem,
     Handbook,
     CoursePayment,
+    CourseStudentGroup,
+    CourseStudentGroupMembership,
     MaterialAccess,
     Notification,
+    NotificationAttachment,
     NotificationRecipient,
     LecturerCourseRegistration,
     StudentCourseRegistration,
     Timetable,
     User,
     UserAlert,
+    curriculum_for_department,
 )
 from .services import (
     DEFAULT_PAYSTACK_PUBLIC_KEY,
@@ -86,6 +102,8 @@ from .services import (
     verify_paystack_transaction,
 )
 from .pdf import build_exam_card_pdf, build_pdf_document
+from .automation import import_course_allocations, import_department_lecturers, import_handbook_courses
+from .branding import LogoLookupError, get_institution_logo
 
 LOGIN_ROLES = {User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN}
 
@@ -220,22 +238,38 @@ def course_payment_gateway():
     return gateway
 
 
+def course_payment_gateway_for_department(department):
+    """Return the HOD-managed API for paid courses in one department."""
+    if not department:
+        return None
+    return DepartmentCoursePaymentGateway.objects.filter(department=department).first()
+
+
 def sidebar_links(request):
     current = request.resolver_match.url_name if request.resolver_match else ""
+    unread_message_count = 0
+    if request.user.is_authenticated and request.user.role == User.Role.STUDENT:
+        unread_message_count = NotificationRecipient.objects.filter(
+            student=request.user,
+            is_deleted=False,
+            is_read=False,
+        ).count()
     if request.user.is_superuser or request.user.role == User.Role.ADMIN:
         links = [
             {"label": "Dashboard", "url_name": "portal:admin-dashboard"},
             {
                 "label": "Departmental",
                 "children": [
-                    {"label": "Manage APIs", "url_name": "portal:admin-departmental-apis"},
-                    {"label": "Set Fees", "url_name": "portal:admin-departmental-fees"},
+                    {"label": "View APIs", "url_name": "portal:admin-departmental-apis"},
+                    {"label": "View Fees", "url_name": "portal:admin-departmental-fees"},
                     {"label": "Students", "url_name": "portal:admin-departmental-download"},
                 ],
             },
             {"label": "Departments", "url_name": "portal:admin-departments"},
+            {"label": "HODs", "url_name": "portal:admin-hods"},
+            {"label": "Faculty", "url_name": "portal:admin-faculties"},
+            {"label": "About", "url_name": "portal:admin-about"},
             {"label": "Courses", "url_name": "portal:admin-courses"},
-            {"label": "Course API", "url_name": "portal:admin-course-api"},
             {
                 "label": "Paid Courses",
                 "url": f'{reverse("portal:admin-courses")}?fee_type=paid',
@@ -245,6 +279,18 @@ def sidebar_links(request):
             {"label": "Users", "url_name": "portal:admin-users"},
         ]
     elif request.user.role == User.Role.LECTURER:
+        is_hod = Department.objects.filter(
+            head_of_department=request.user,
+            pk=request.user.department_id,
+        ).exists()
+        departmental_links = [
+            {"label": "Students", "url_name": "portal:lecturer-departmental-download"},
+        ]
+        if is_hod:
+            departmental_links.extend([
+                {"label": "API and Document", "url_name": "portal:hod-api-and-document"},
+                {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
+            ])
         links = [
             {"label": "Dashboard", "url_name": "portal:lecturer-dashboard"},
             {
@@ -254,12 +300,9 @@ def sidebar_links(request):
             },
             {
                 "label": "Departmental",
-                "children": [
-                    {"label": "Students", "url_name": "portal:lecturer-departmental-download"},
-                ],
+                "children": departmental_links,
             },
             {"label": "Register Courses", "url_name": "portal:lecturer-courses"},
-            {"label": "View Courses", "url_name": "portal:lecturer-courses"},
             {"label": "Messages", "url_name": "portal:lecturer-messages"},
             {"label": "Timetable and Handbook", "url_name": "portal:lecturer-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
@@ -269,7 +312,7 @@ def sidebar_links(request):
             {"label": "Dashboard", "url_name": "portal:student-dashboard"},
             {"label": "Departmental", "url_name": "portal:student-departmental"},
             {"label": "Course Registration", "url_name": "portal:student-courses"},
-            {"label": "Messages", "url_name": "portal:student-messages"},
+            {"label": "Messages", "url_name": "portal:student-messages", "badge_count": unread_message_count},
             {"label": "Timetable and Handbook", "url_name": "portal:student-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
@@ -288,12 +331,20 @@ def sidebar_links(request):
             active = item.get("active")
             if active is None:
                 active = current == item["url_name"].split(":")[1]
-            resolved_links.append({"label": item["label"], "url": url, "active": active})
+            resolved_links.append({
+                "label": item["label"],
+                "url": url,
+                "active": active,
+                "badge_count": item.get("badge_count", 0),
+            })
     return resolved_links
 
 
 def dashboard_context(request, title, **extra):
-    context = {"section_title": title, "sidebar_links": sidebar_links(request)}
+    context = {
+        "section_title": title,
+        "sidebar_links": sidebar_links(request),
+    }
     context.update(extra)
     return context
 
@@ -403,6 +454,9 @@ def _configured_paystack_webhook_secrets():
     secrets.update(
         DepartmentPaymentGateway.objects.exclude(paystack_secret_key="").values_list("paystack_secret_key", flat=True)
     )
+    secrets.update(
+        DepartmentCoursePaymentGateway.objects.exclude(paystack_secret_key="").values_list("paystack_secret_key", flat=True)
+    )
     # Keep in-flight payments verifiable if an admin rotates a gateway key before
     # Paystack delivers the final webhook.
     secrets.update(
@@ -455,17 +509,23 @@ def _mark_payment_paid_from_paystack(reference, amount, *, signing_secret):
 
 def _finalize_course_payment(payment):
     with transaction.atomic():
-        payment = CoursePayment.objects.select_for_update().select_related("student", "course").get(pk=payment.pk)
+        payment = CoursePayment.objects.select_for_update().select_related("student", "course", "session").get(pk=payment.pk)
         if not payment.is_paid:
             payment.status = CoursePayment.Status.PAID
             payment.save(update_fields=["status", "paid_at", "updated_at"])
+        # A level change can invalidate an in-flight checkout. Keep its audit
+        # record as paid, but never let it restore the cleared registration.
+        if not payment.is_active_for_registration:
+            return
         registration, created = StudentCourseRegistration.objects.get_or_create(
             student=payment.student,
             course=payment.course,
+            session=payment.session,
             defaults={"registered_by": payment.student},
         )
         if created:
             sync_material_access_for_registration(registration)
+        _assign_student_to_existing_course_group(payment.student, payment.course, payment.session)
         _sync_course_material_access_for_paid_course(payment.student, payment.course)
 
 
@@ -502,8 +562,16 @@ def ensure_departmental_defaults():
     for code, name in DEPARTMENTAL_CONSTANTS:
         DepartmentalAssociation.objects.get_or_create(
             code=code,
+            department=None,
             defaults={"name": name, "is_constant": True},
         )
+
+
+def departmental_associations_for_department(department):
+    """Return the shared defaults plus associations created for one department."""
+    if not department:
+        return DepartmentalAssociation.objects.none()
+    return DepartmentalAssociation.objects.filter(Q(department__isnull=True) | Q(department=department))
 
 
 def current_departmental_session():
@@ -513,7 +581,7 @@ def current_departmental_session():
         return session
     created_session = AcademicSession.objects.create(name=f"{timezone.now().year}/{timezone.now().year + 1}", is_current=True)
     for department in Department.objects.all():
-        for association in DepartmentalAssociation.objects.all():
+        for association in departmental_associations_for_department(department):
             DepartmentalFee.objects.get_or_create(
                 session=created_session,
                 department=department,
@@ -521,6 +589,14 @@ def current_departmental_session():
                 defaults={"amount": Decimal("0.00")},
             )
     return created_session
+
+
+def reset_lecturer_course_registrations():
+    """Clear teaching assignments so a new session starts with fresh allocations."""
+    registration_count = LecturerCourseRegistration.objects.count()
+    LecturerCourseRegistration.objects.all().delete()
+    Course.objects.exclude(lecturer__isnull=True).update(lecturer=None)
+    return registration_count
 
 
 def current_departmental_semester_label(reference_time=None):
@@ -532,7 +608,7 @@ def current_departmental_semester_label(reference_time=None):
 def fee_map_for_session(session, department):
     ensure_departmental_defaults()
     fee_map = {}
-    associations = DepartmentalAssociation.objects.all()
+    associations = departmental_associations_for_department(department)
     for association in associations:
         fee, _ = DepartmentalFee.objects.get_or_create(
             session=session,
@@ -547,7 +623,7 @@ def fee_map_for_session(session, department):
 def ensure_departmental_fees_for_department(department):
     ensure_departmental_defaults()
     for session in AcademicSession.objects.all():
-        for association in DepartmentalAssociation.objects.all():
+        for association in departmental_associations_for_department(department):
             DepartmentalFee.objects.get_or_create(
                 session=session,
                 department=department,
@@ -564,12 +640,100 @@ def departmental_payment_queryset():
     )
 
 
+def current_course_payment_queryset():
+    """Course payments made for the academic session currently in progress."""
+    return CoursePayment.objects.filter(
+        session=current_departmental_session(),
+        is_active_for_registration=True,
+    )
+
+
+def _active_course_payment(student, course, session):
+    return (
+        CoursePayment.objects.filter(
+            student=student,
+            course=course,
+            session=session,
+            is_active_for_registration=True,
+        )
+        .order_by("-enrollment_sequence", "-created_at")
+        .first()
+    )
+
+
+def _next_course_payment_sequence(student, course, session):
+    latest_sequence = CoursePayment.objects.filter(
+        student=student,
+        course=course,
+        session=session,
+    ).aggregate(latest=Max("enrollment_sequence"))["latest"]
+    return (latest_sequence or 0) + 1
+
+
+def paid_course_students_queryset(course, session):
+    """Current-session enrolled students with an active paid course payment."""
+    return (
+        CoursePayment.objects.filter(
+            course=course,
+            session=session,
+            status=CoursePayment.Status.PAID,
+            is_active_for_registration=True,
+            student__student_registrations__course=course,
+            student__student_registrations__session=session,
+        )
+        .select_related("student", "student__department", "session")
+        .order_by("student__id_number", "student__username")
+        .distinct()
+    )
+
+
+def _assign_student_to_existing_course_group(student, course, session):
+    """Add a newly paid student to an enabled course grouping, when one exists."""
+    if CourseStudentGroupMembership.objects.filter(
+        student=student,
+        group__course=course,
+        group__session=session,
+    ).exists():
+        return
+
+    groups = CourseStudentGroup.objects.filter(course=course, session=session)
+    grouping_method = groups.values_list("grouping_method", flat=True).first()
+    if not grouping_method:
+        return
+
+    if grouping_method == CourseStudentGroup.GroupingMethod.DEPARTMENT:
+        target_group = groups.filter(department=student.department).first()
+        if target_group is None:
+            department = student.department
+            base_name = department.name if department else "No department"
+            group_name = base_name
+            if groups.filter(name=group_name).exists():
+                group_name = f"{base_name} ({department.code})" if department else "No department (new)"
+            target_group = CourseStudentGroup.objects.create(
+                course=course,
+                lecturer=course.lecturer,
+                session=session,
+                name=group_name,
+                grouping_method=grouping_method,
+                department=department,
+            )
+    else:
+        target_group = groups.annotate(student_total=Count("memberships")).order_by("student_total", "name").first()
+
+    CourseStudentGroupMembership.objects.get_or_create(group=target_group, student=student)
+
+
 def departmental_download_context(request, scope="admin"):
     search_form = DepartmentalSearchForm(request.GET or None)
-    payments = departmental_payment_queryset()
+    current_session = current_departmental_session()
+    # Keep the overview focused on the active session. Selecting a student
+    # below loads that student's complete paid departmental history.
+    payments = departmental_payment_queryset().filter(session=current_session)
     if scope == "lecturer" and request.user.department_id:
         payments = payments.filter(department=request.user.department)
     selected_payment = None
+    selected_student = None
+    selected_student_payments = DepartmentalPayment.objects.none()
     selected_payment_id = request.GET.get("payment")
     if selected_payment_id:
         selected_payment = payments.filter(pk=selected_payment_id).first()
@@ -586,6 +750,11 @@ def departmental_download_context(request, scope="admin"):
         if not selected_payment:
             exact_match = payments.filter(student__id_number=student_id).first() if student_id else None
             selected_payment = exact_match or payments.first()
+    if selected_payment:
+        selected_student = selected_payment.student
+        selected_student_payments = departmental_payment_queryset().filter(student=selected_student)
+        if scope == "lecturer" and request.user.department_id:
+            selected_student_payments = selected_student_payments.filter(department=request.user.department)
     department_totals = (
         payments.values("department__id", "department__name")
         .annotate(total=Count("id"))
@@ -599,21 +768,60 @@ def departmental_download_context(request, scope="admin"):
     return {
         "departmental_search_form": search_form,
         "departmental_selected_payment": selected_payment,
+        "departmental_selected_student": selected_student,
+        "departmental_selected_student_payments": selected_student_payments,
         "departmental_completed_payments": payments[:50],
         "departmental_department_totals": department_totals,
         "departmental_level_totals": level_totals,
         "departmental_download_scope": scope,
+        "departmental_current_session": current_session,
     }
 
 
 def _course_catalog_queryset(user=None):
-    queryset = Course.objects.select_related("department", "lecturer")
+    current_session = current_departmental_session()
+    queryset = Course.objects.select_related("department", "lecturer").filter(
+        Q(academic_session=current_session) | Q(academic_session__isnull=True)
+    )
     if user and user.role == User.Role.LECTURER:
         queryset = queryset.filter(Q(lecturer__isnull=True) | Q(lecturer=user))
     return queryset
 
 
-def _student_course_row_context(registration, payment):
+def _student_curriculum(user):
+    """Get the curriculum fixed to a student's entry cohort.
+
+    Existing accounts are assigned once on their first course visit, preserving
+    the curriculum that was active at deployment. New accounts are assigned at
+    signup, before they can register a course.
+    """
+    if not user.department_id:
+        return None
+    if user.curriculum_id and user.curriculum.department_id == user.department_id:
+        return user.curriculum
+    curriculum = curriculum_for_department(user.department, current_departmental_session())
+    if curriculum:
+        user.curriculum = curriculum
+        user.save(update_fields=["curriculum"])
+    return curriculum
+
+
+def _student_course_catalog_queryset(student):
+    curriculum = _student_curriculum(student)
+    if not curriculum:
+        return Course.objects.none()
+    queryset = Course.objects.select_related("department", "lecturer", "curriculum").filter(
+        department=student.department,
+        curriculum=curriculum,
+    )
+    # A student moves through the same curriculum as their level changes. Old
+    # records that predate a stored level remain browsable for compatibility.
+    if student.level:
+        queryset = queryset.filter(level=student.level)
+    return queryset
+
+
+def _student_course_row_context(registration, payment, group_name=None):
     course = registration.course
     is_paid = course.is_free or bool(payment and payment.is_paid)
     display_amount = payment.amount if payment else course.amount
@@ -624,7 +832,16 @@ def _student_course_row_context(registration, payment):
         "is_paid": is_paid,
         "needs_payment": not is_paid,
         "can_download": bool(course.file) and is_paid,
+        "group_name": group_name,
     }
+
+
+def _student_group_names_by_course(student, session):
+    memberships = CourseStudentGroupMembership.objects.filter(
+        student=student,
+        group__session=session,
+    ).select_related("group", "group__course")
+    return {membership.group.course_id: membership.group.name for membership in memberships}
 
 
 def _lecturer_student_scope(request):
@@ -747,6 +964,11 @@ def student_signup(request):
     form = StudentSignupForm(request.POST)
     if form.is_valid():
         user = form.save()
+        user.curriculum = curriculum_for_department(
+            user.department,
+            current_departmental_session(),
+        )
+        user.save(update_fields=["curriculum"])
         authenticated_user = authenticate(
             request,
             username=form.cleaned_data["username"],
@@ -827,9 +1049,38 @@ def profile(request):
     form_class = LecturerProfileForm if request.user.role == User.Role.LECTURER else StudentProfileForm
     form = form_class(instance=request.user)
     if request.method == "POST":
+        previous_level = request.user.level
+        previous_department_id = request.user.department_id
         form = form_class(request.POST, request.FILES, instance=request.user)
         if form.is_valid():
             form.save()
+            if request.user.role == User.Role.STUDENT and request.user.department_id != previous_department_id:
+                request.user.curriculum = curriculum_for_department(
+                    request.user.department,
+                    current_departmental_session(),
+                )
+                request.user.save(update_fields=["curriculum"])
+            if (
+                request.user.role == User.Role.STUDENT
+                and request.user.level != previous_level
+            ):
+                current_session = current_departmental_session()
+                current_registrations = StudentCourseRegistration.objects.filter(
+                    student=request.user,
+                    session=current_session,
+                )
+                paid_course_ids = current_registrations.filter(course__is_free=False).values_list("course_id", flat=True)
+                CoursePayment.objects.filter(
+                    student=request.user,
+                    course_id__in=paid_course_ids,
+                    session=current_session,
+                    is_active_for_registration=True,
+                ).update(is_active_for_registration=False, updated_at=timezone.now())
+                current_registrations.delete()
+                messages.info(
+                    request,
+                    "Your level changed, so your previous course registrations were cleared. Paid courses require a new payment before you register again.",
+                )
             messages.success(request, "Your profile information has been updated.")
             return redirect("portal:profile")
     return render(
@@ -868,7 +1119,7 @@ def send_profile_password_reset(request):
 
 
 def lecturer_registered_courses_queryset(user):
-    return Course.objects.filter(lecturer=user).select_related("department", "lecturer")
+    return Course.objects.filter(lecturer_registrations__lecturer=user).select_related("department", "lecturer").distinct()
 
 
 def _create_course_materials_from_upload(form, *, lecturer):
@@ -935,14 +1186,23 @@ def _filtered_handbooks(request, prefix="hb"):
 
 @role_required(User.Role.STUDENT)
 def student_dashboard(request):
-    registrations = StudentCourseRegistration.objects.filter(student=request.user).select_related("course", "course__lecturer")
+    current_session = current_departmental_session()
+    registrations = StudentCourseRegistration.objects.filter(
+        student=request.user,
+        session=current_session,
+    ).select_related("course", "course__lecturer")
     messages_qs = NotificationRecipient.objects.filter(student=request.user, is_deleted=False)
     payments = {
         payment.course_id: payment
-        for payment in CoursePayment.objects.filter(student=request.user)
+        for payment in current_course_payment_queryset().filter(student=request.user)
     }
+    group_names = _student_group_names_by_course(request.user, current_session)
     registration_rows = [
-        _student_course_row_context(registration, payments.get(registration.course_id))
+        _student_course_row_context(
+            registration,
+            payments.get(registration.course_id),
+            group_names.get(registration.course_id),
+        )
         for registration in registrations
     ]
     downloadable_course_files = registrations.filter(course__file__gt="").count()
@@ -982,8 +1242,26 @@ def student_departmental(request):
     )
     existing_payment = history.filter(session=session).first()
     form = DepartmentalStudentPaymentForm(session=session, fee_map=fee_map)
+    additional_document_form = DepartmentalAdditionalDocumentForm()
 
-    if request.method == "POST":
+    if request.method == "POST" and request.POST.get("action") == "add-documents":
+        additional_document_form = DepartmentalAdditionalDocumentForm(request.POST, request.FILES)
+        if not existing_payment or not existing_payment.is_paid:
+            messages.error(request, "Complete departmental payment before adding extra documents.")
+        elif additional_document_form.is_valid():
+            for uploaded_file in additional_document_form.cleaned_data["additional_documents"]:
+                DepartmentalPaymentDocument.objects.create(
+                    payment=existing_payment,
+                    category=DepartmentalPaymentDocument.Category.ADDITIONAL,
+                    title=uploaded_file.name,
+                    file=uploaded_file,
+                )
+            messages.success(request, "Additional departmental document(s) uploaded.")
+            return redirect("portal:student-departmental")
+        else:
+            messages.error(request, "Choose at least one document to upload.")
+
+    if request.method == "POST" and request.POST.get("action") != "add-documents":
         form = DepartmentalStudentPaymentForm(request.POST, request.FILES, session=session, fee_map=fee_map)
         gateway = department_payment_gateway_for_payment(request.user.department)
         if not request.user.department_id:
@@ -1039,7 +1317,7 @@ def student_departmental(request):
                 for uploaded_file in supporting_documents:
                     DepartmentalPaymentDocument.objects.create(
                         payment=payment,
-                        category=DepartmentalPaymentDocument.Category.SUPPORTING,
+                        category=DepartmentalPaymentDocument.Category.MEDICAL_FITNESS,
                         title=uploaded_file.name,
                         file=uploaded_file,
                     )
@@ -1101,6 +1379,7 @@ def student_departmental(request):
         current_semester=current_departmental_semester_label(),
         fee_map=fee_map,
         departmental_form=form,
+        additional_document_form=additional_document_form,
         departmental_payment=existing_payment,
         departmental_history=history,
     )
@@ -1109,56 +1388,69 @@ def student_departmental(request):
 
 @role_required(User.Role.STUDENT)
 def student_courses(request):
+    current_session = current_departmental_session()
     filter_form = StudentCourseFilterForm(request.GET or None)
     if request.user.department_id:
-        filter_form.fields["department"].queryset = Department.objects.all()
+        filter_form.fields["department"].queryset = Department.objects.filter(pk=request.user.department_id)
 
-    available_courses = _course_catalog_queryset()
+    available_courses = _student_course_catalog_queryset(request.user)
+    catalog_is_filtered = False
     if filter_form.is_valid():
         department = filter_form.cleaned_data.get("department")
         level = filter_form.cleaned_data.get("level")
         search = filter_form.cleaned_data.get("search")
+        catalog_is_filtered = bool(department or level or search)
         if department:
             available_courses = available_courses.filter(department=department)
         if level:
             available_courses = available_courses.filter(level=level)
         available_courses = _search_filter(available_courses, search, "code", "title", "department__name", "lecturer__username")
 
-    available_courses = available_courses.distinct()
-    registrations = StudentCourseRegistration.objects.filter(student=request.user).select_related("course", "course__lecturer")
+    available_courses = available_courses.distinct() if catalog_is_filtered else Course.objects.none()
+    registrations = StudentCourseRegistration.objects.filter(
+        student=request.user,
+        session=current_session,
+    ).select_related("course", "course__lecturer")
     registered_course_ids = set(registrations.values_list("course_id", flat=True))
     payments = {
         payment.course_id: payment
-        for payment in CoursePayment.objects.filter(student=request.user)
+        for payment in current_course_payment_queryset().filter(student=request.user)
     }
+    group_names = _student_group_names_by_course(request.user, current_session)
     paid_course_ids = {course_id for course_id, payment in payments.items() if payment.is_paid}
     registration_rows = [
-        _student_course_row_context(registration, payments.get(registration.course_id))
+        _student_course_row_context(
+            registration,
+            payments.get(registration.course_id),
+            group_names.get(registration.course_id),
+        )
         for registration in registrations
     ]
 
     if request.method == "POST":
         action = request.POST.get("action")
-        course = get_object_or_404(Course.objects.select_related("department", "lecturer"), pk=request.POST.get("course_id"))
+        course = get_object_or_404(_student_course_catalog_queryset(request.user), pk=request.POST.get("course_id"))
 
         if action == "pay-course":
             if course.is_free:
                 messages.info(request, "This course does not require payment.")
             else:
-                gateway = course_payment_gateway()
-                if not gateway.is_configured:
-                    messages.error(request, "The course payment gateway has not been configured by the admin yet.")
+                gateway = course_payment_gateway_for_department(course.department)
+                if not gateway or not gateway.is_configured:
+                    messages.error(request, f"The HOD has not configured a paid-course API for {course.department.name} yet.")
                     return redirect(_redirect_with_query(request, "portal:student-courses"))
-                payment, _ = CoursePayment.objects.get_or_create(
-                    student=request.user,
-                    course=course,
-                    defaults={
-                        "amount": course.amount,
-                        "status": CoursePayment.Status.PENDING,
-                        "paystack_public_key_used": gateway.paystack_public_key,
-                        "paystack_secret_key_used": gateway.paystack_secret_key,
-                    },
-                )
+                payment = _active_course_payment(request.user, course, current_session)
+                if payment is None:
+                    payment = CoursePayment.objects.create(
+                        student=request.user,
+                        course=course,
+                        session=current_session,
+                        enrollment_sequence=_next_course_payment_sequence(request.user, course, current_session),
+                        amount=course.amount,
+                        status=CoursePayment.Status.PENDING,
+                        paystack_public_key_used=gateway.paystack_public_key,
+                        paystack_secret_key_used=gateway.paystack_secret_key,
+                    )
                 if payment.is_paid:
                     messages.info(request, f"{course.code} has already been paid.")
                     return redirect(_redirect_with_query(request, "portal:student-courses"))
@@ -1214,13 +1506,14 @@ def student_courses(request):
             return redirect(_redirect_with_query(request, "portal:student-courses"))
 
         if action == "register-course":
-            payment = payments.get(course.id) or CoursePayment.objects.filter(student=request.user, course=course).first()
+            payment = payments.get(course.id) or _active_course_payment(request.user, course, current_session)
             if not course.is_free and not (payment and payment.is_paid):
                 messages.error(request, "Please complete the course payment before registering this course.")
                 return redirect(_redirect_with_query(request, "portal:student-courses"))
             registration, created = StudentCourseRegistration.objects.get_or_create(
                 student=request.user,
                 course=course,
+                session=current_session,
                 defaults={"registered_by": request.user},
             )
             if created:
@@ -1228,6 +1521,8 @@ def student_courses(request):
                 messages.success(request, f"{course.code} registered successfully.")
             else:
                 messages.info(request, f"{course.code} is already registered.")
+            if not course.is_free:
+                _assign_student_to_existing_course_group(request.user, course, current_session)
             return redirect(_redirect_with_query(request, "portal:student-courses"))
 
     context = dashboard_context(
@@ -1237,6 +1532,7 @@ def student_courses(request):
         registration_rows=registration_rows,
         registered_course_ids=registered_course_ids,
         available_courses=available_courses,
+        catalog_is_filtered=catalog_is_filtered,
         paid_course_ids=paid_course_ids,
     )
     return render(request, "portal/student_courses.html", context)
@@ -1318,7 +1614,12 @@ def course_payment_callback(request, payment_id):
 
 @role_required(User.Role.STUDENT)
 def student_unregister_course(request, registration_id):
-    registration = get_object_or_404(StudentCourseRegistration, pk=registration_id, student=request.user)
+    registration = get_object_or_404(
+        StudentCourseRegistration,
+        pk=registration_id,
+        student=request.user,
+        session=current_departmental_session(),
+    )
     if request.method == "POST":
         registration.delete()
         messages.success(request, "Course registration removed.")
@@ -1329,14 +1630,14 @@ def student_unregister_course(request, registration_id):
 def student_materials(request):
     search = request.GET.get("search", "").strip()
     registrations = (
-        StudentCourseRegistration.objects.filter(student=request.user)
+        StudentCourseRegistration.objects.filter(student=request.user, session=current_departmental_session())
         .select_related("course", "course__lecturer", "course__department")
     )
     registrations = _search_filter(registrations, search, "course__title", "course__code", "course__lecturer__username", "course__department__name")
     course_ids = list(registrations.values_list("course_id", flat=True))
     payments = {
         payment.course_id: payment
-        for payment in CoursePayment.objects.filter(student=request.user, course_id__in=course_ids)
+        for payment in current_course_payment_queryset().filter(student=request.user, course_id__in=course_ids)
     }
     materials = (
         CourseMaterial.objects.filter(course_id__in=course_ids)
@@ -1372,7 +1673,7 @@ def student_messages(request):
     recipients = NotificationRecipient.objects.filter(student=request.user, is_deleted=False).select_related(
         "notification",
         "notification__sender",
-    )
+    ).prefetch_related("notification__attachments")
     selected_message = None
     recipient_id = request.GET.get("open")
     if recipient_id:
@@ -1511,18 +1812,20 @@ def lecturer_departmental(request):
 @role_required(User.Role.LECTURER)
 def lecturer_courses(request):
     filter_form = LecturerCourseFilterForm(request.GET or None)
-    available_courses = Course.objects.select_related("department", "lecturer").filter(lecturer__isnull=True)
+    available_courses = _course_catalog_queryset().filter(lecturer__isnull=True)
     paid_courses_only = request.GET.get("fee_type") == "paid"
+    catalog_is_filtered = False
     if filter_form.is_valid():
         department = filter_form.cleaned_data.get("department")
         level = filter_form.cleaned_data.get("level")
         search = filter_form.cleaned_data.get("search")
+        catalog_is_filtered = bool(department or level or search)
         if department:
             available_courses = available_courses.filter(department=department)
         if level:
             available_courses = available_courses.filter(level=level)
         available_courses = _search_filter(available_courses, search, "code", "title", "department__name")
-    available_courses = available_courses.distinct()
+    available_courses = available_courses.distinct() if catalog_is_filtered else Course.objects.none()
 
     registered_courses = lecturer_registered_courses_queryset(request.user)
     if paid_courses_only:
@@ -1531,7 +1834,10 @@ def lecturer_courses(request):
     if request.method == "POST":
         action = request.POST.get("action")
         if action == "register-course":
-            course = get_object_or_404(available_courses, pk=request.POST.get("course_id"))
+            course = get_object_or_404(
+                _course_catalog_queryset().filter(lecturer__isnull=True),
+                pk=request.POST.get("course_id"),
+            )
             course.lecturer = request.user
             course.save(update_fields=["lecturer", "updated_at"])
             registration, created = LecturerCourseRegistration.objects.get_or_create(lecturer=request.user, course=course)
@@ -1569,12 +1875,114 @@ def lecturer_courses(request):
         section_title,
         filter_form=filter_form,
         available_courses=available_courses,
+        catalog_is_filtered=catalog_is_filtered,
         registered_courses=registered_courses,
         edit_course=edit_course,
         edit_form=edit_form,
         paid_courses_only=paid_courses_only,
     )
     return render(request, "portal/lecturer_courses.html", context)
+
+
+@role_required(User.Role.LECTURER)
+def lecturer_paid_course_student_search(request, course_id):
+    course = get_object_or_404(
+        lecturer_registered_courses_queryset(request.user),
+        pk=course_id,
+        is_free=False,
+    )
+    current_session = current_departmental_session()
+    student_id = request.GET.get("student_id", "").strip()
+    payments = paid_course_students_queryset(course, current_session)
+    if student_id:
+        payments = payments.filter(student__id_number__icontains=student_id)
+    context = dashboard_context(
+        request,
+        f"Paid Students: {course.code}",
+        course=course,
+        student_id_search=student_id,
+        paid_student_payments=payments,
+        current_academic_session=current_session,
+    )
+    return render(request, "portal/lecturer_paid_course_students.html", context)
+
+
+@role_required(User.Role.LECTURER)
+def lecturer_course_groups(request, course_id):
+    course = get_object_or_404(lecturer_registered_courses_queryset(request.user), pk=course_id, is_free=False)
+    current_session = current_departmental_session()
+    form = CourseStudentGroupForm(initial={
+        "enable_grouping": CourseStudentGroup.objects.filter(course=course, session=current_session).exists(),
+    })
+    paid_payments = paid_course_students_queryset(course, current_session)
+
+    if request.method == "POST":
+        if request.POST.get("action") == "delete-group":
+            group = get_object_or_404(
+                CourseStudentGroup,
+                pk=request.POST.get("group_id"),
+                course=course,
+                session=current_session,
+                lecturer=request.user,
+            )
+            group_name = group.name
+            group.delete()
+            messages.success(request, f"{group_name} was deleted.")
+            return redirect("portal:lecturer-course-groups", course_id=course.id)
+
+        form = CourseStudentGroupForm(request.POST)
+        if form.is_valid():
+            with transaction.atomic():
+                existing_groups = CourseStudentGroup.objects.filter(course=course, session=current_session)
+                CourseStudentGroupMembership.objects.filter(group__in=existing_groups).delete()
+                existing_groups.delete()
+                if not form.cleaned_data["enable_grouping"]:
+                    messages.success(request, "Student grouping is off. You can still download all paid student IDs.")
+                    return redirect("portal:lecturer-course-groups", course_id=course.id)
+                grouping_method = form.cleaned_data["grouping_method"]
+                students = [payment.student for payment in paid_payments]
+                groups = []
+                if grouping_method == CourseStudentGroup.GroupingMethod.DEPARTMENT:
+                    departments = {}
+                    for student in students:
+                        departments.setdefault(student.department_id, []).append(student)
+                    for department_id, members in departments.items():
+                        department = members[0].department if department_id else None
+                        group = CourseStudentGroup.objects.create(
+                            course=course, lecturer=request.user, session=current_session,
+                            name=department.name if department else "No department",
+                            grouping_method=grouping_method, department=department,
+                        )
+                        groups.append((group, members))
+                else:
+                    groups = [
+                        (CourseStudentGroup.objects.create(
+                            course=course, lecturer=request.user, session=current_session,
+                            name=name, grouping_method=grouping_method,
+                        ), [])
+                        for name in form.cleaned_data["group_names"]
+                    ]
+                    import random
+                    random.SystemRandom().shuffle(students)
+                    for index, student in enumerate(students):
+                        groups[index % len(groups)][1].append(student)
+                CourseStudentGroupMembership.objects.bulk_create([
+                    CourseStudentGroupMembership(group=group, student=student)
+                    for group, members in groups for student in members
+                ])
+            messages.success(request, f"{len(groups)} student group(s) created from {len(students)} paid student(s).")
+            return redirect("portal:lecturer-course-groups", course_id=course.id)
+
+    groups = (
+        CourseStudentGroup.objects.filter(course=course, session=current_session)
+        .select_related("department")
+        .annotate(student_total=Count("memberships"))
+    )
+    return render(request, "portal/lecturer_course_groups.html", dashboard_context(
+        request, f"Student Groups: {course.code}", course=course,
+        current_academic_session=current_session, form=form, groups=groups,
+        paid_student_total=paid_payments.count(),
+    ))
 
 
 @role_required(User.Role.LECTURER)
@@ -1629,7 +2037,7 @@ def lecturer_students(request):
 
 @role_required(User.Role.LECTURER)
 def lecturer_students_pdf(request):
-    payments = departmental_payment_queryset()
+    payments = departmental_payment_queryset().filter(session=current_departmental_session())
     if request.user.department_id:
         payments = payments.filter(department=request.user.department)
     search_form = DepartmentalSearchForm(request.GET or None)
@@ -1690,14 +2098,22 @@ def lecturer_update_material_access(request, access_id, status):
 @role_required(User.Role.LECTURER)
 def lecturer_messages(request):
     form = NotificationForm(user=request.user)
-    sent_notifications = Notification.objects.filter(sender=request.user).annotate(recipient_total=Count("recipients"))
+    sent_notifications = (
+        Notification.objects.filter(sender=request.user)
+        .annotate(recipient_total=Count("recipients"))
+        .prefetch_related("departments", "courses", "attachments")
+    )
     if request.method == "POST":
-        form = NotificationForm(request.POST, user=request.user)
+        form = NotificationForm(request.POST, request.FILES, user=request.user)
         if form.is_valid():
             notification = form.save(commit=False)
             notification.sender = request.user
             notification.save()
             form.save_m2m()
+            NotificationAttachment.objects.bulk_create([
+                NotificationAttachment(notification=notification, file=attachment)
+                for attachment in form.cleaned_data["attachments"]
+            ])
             deliver_notification(notification)
             messages.success(request, "Message sent to the selected students and departments.")
             return redirect(_redirect_with_query(request, "portal:lecturer-messages"))
@@ -1706,8 +2122,22 @@ def lecturer_messages(request):
 
 
 @role_required(User.Role.LECTURER)
+def lecturer_delete_message(request, notification_id):
+    notification = get_object_or_404(Notification, pk=notification_id, sender=request.user)
+    if request.method == "POST":
+        UserAlert.objects.filter(
+            alert_type=UserAlert.AlertType.MESSAGE,
+            dedupe_key__startswith=f"message:{notification.id}:",
+        ).delete()
+        notification.delete()
+        messages.success(request, "Sent message deleted.")
+    return redirect("portal:lecturer-messages")
+
+
+@role_required(User.Role.LECTURER)
 def lecturer_documents(request):
     timetable_filter_form, timetables = _filtered_timetables(request, prefix="tt")
+    handbook_filter_form, handbooks = _filtered_handbooks(request, prefix="hb")
     timetable_form = TimetableForm()
     if request.method == "POST" and request.POST.get("action") == "create-timetable":
         timetable_form = TimetableForm(request.POST, request.FILES)
@@ -1721,6 +2151,8 @@ def lecturer_documents(request):
         timetable_form=timetable_form,
         timetable_filter_form=timetable_filter_form,
         timetables=timetables,
+        handbook_filter_form=handbook_filter_form,
+        handbooks=handbooks,
     )
     return render(request, "portal/lecturer_documents.html", context)
 
@@ -1754,64 +2186,112 @@ def admin_departmental(request):
 
 @role_required(User.Role.ADMIN)
 def admin_departmental_apis(request):
-    ensure_all_department_gateways()
     search = request.GET.get("search", "").strip()
     departments = _search_filter(Department.objects.all(), search, "name", "code")
     selected_department = None
-    gateway_form = None
+    gateway = None
     department_id = request.GET.get("department")
     if department_id:
         selected_department = get_object_or_404(Department, pk=department_id)
-        gateway_form = DepartmentPaymentGatewayForm(instance=ensure_department_gateway_credentials(selected_department))
+        gateway = DepartmentPaymentGateway.objects.filter(department=selected_department).first()
 
-    if request.method == "POST" and request.POST.get("action") == "save-gateway":
-        selected_department = get_object_or_404(Department, pk=request.POST.get("department_id"))
-        gateway = ensure_department_gateway_credentials(selected_department)
-        gateway_form = DepartmentPaymentGatewayForm(request.POST, instance=gateway)
-        if gateway_form.is_valid():
-            gateway_form.save()
-            messages.success(request, f"Departmental Paystack settings updated for {selected_department.name}.")
-        else:
-            messages.error(request, "Please correct the departmental gateway details and try again.")
-        return redirect(f'{reverse("portal:admin-departmental-apis")}?department={selected_department.id}')
+    if request.method == "POST":
+        messages.error(request, "Departmental payment APIs can only be changed by the department's HOD.")
+        return redirect(_redirect_with_query(request, "portal:admin-departmental-apis"))
 
     context = dashboard_context(
         request,
-        "Manage Departmental Payment APIs",
+        "View Departmental Payment APIs",
         departments=departments,
         selected_department=selected_department,
-        gateway_form=gateway_form,
+        gateway=gateway,
         department_search=search,
     )
     return render(request, "portal/admin_departmental_apis.html", context)
 
 
-@role_required(User.Role.ADMIN)
-def admin_course_api(request):
-    gateway = course_payment_gateway()
-    form = CoursePaymentGatewayForm(instance=gateway)
-    if request.method == "POST" and request.POST.get("action") == "save-course-gateway":
-        form = CoursePaymentGatewayForm(request.POST, instance=gateway)
+def hod_department_for(request):
+    """Return the department the signed-in lecturer is allowed to manage as HOD."""
+    department = Department.objects.filter(
+        head_of_department=request.user,
+        pk=request.user.department_id,
+    ).first()
+    if department is None:
+        raise PermissionDenied
+    return department
+
+
+@role_required(User.Role.LECTURER)
+def hod_departmental_apis(request):
+    department = hod_department_for(request)
+    gateway = ensure_department_gateway_credentials(department)
+    form = DepartmentPaymentGatewayForm(instance=gateway)
+    course_gateway, _ = DepartmentCoursePaymentGateway.objects.get_or_create(department=department)
+    course_gateway_form = DepartmentCoursePaymentGatewayForm(instance=course_gateway)
+    allocation_form = CourseAllocationUploadForm()
+    handbook_form = HandbookForm(initial={"department": department})
+    if request.method == "POST" and request.POST.get("action") == "upload-allocations":
+        allocation_form = CourseAllocationUploadForm(request.POST, request.FILES)
+        if allocation_form.is_valid():
+            upload = allocation_form.save(commit=False)
+            upload.department = department
+            upload.uploaded_by = request.user
+            upload.save()
+            try:
+                upload.processing_summary = import_course_allocations(upload)
+                upload.save(update_fields=["processing_summary", "updated_at"])
+                messages.success(request, upload.processing_summary)
+            except ValueError as exc:
+                messages.error(request, str(exc))
+            return redirect("portal:hod-api-and-document")
+        messages.error(request, "Choose a valid course-allocation file.")
+    elif request.method == "POST" and request.POST.get("action") == "upload-handbook":
+        handbook_data = request.POST.copy()
+        handbook_data["department"] = str(department.id)
+        handbook_form = HandbookForm(handbook_data, request.FILES)
+        if handbook_form.is_valid():
+            handbook = handbook_form.save()
+            try:
+                messages.success(request, import_handbook_courses(handbook))
+            except ValueError as exc:
+                messages.warning(request, f"Handbook uploaded, but course automation could not run: {exc}")
+            return redirect("portal:hod-api-and-document")
+        messages.error(request, "Choose a valid handbook file.")
+    elif request.method == "POST" and request.POST.get("action") == "save-course-gateway":
+        course_gateway_form = DepartmentCoursePaymentGatewayForm(request.POST, instance=course_gateway)
+        if course_gateway_form.is_valid():
+            course_gateway_form.save()
+            messages.success(request, f"Paid-course Paystack settings updated for {department.name}.")
+            return redirect("portal:hod-api-and-document")
+        messages.error(request, "Please correct the paid-course gateway details and try again.")
+    elif request.method == "POST":
+        form = DepartmentPaymentGatewayForm(request.POST, instance=gateway)
         if form.is_valid():
             form.save()
-            messages.success(request, "Course Paystack API settings updated for all paid courses.")
-            return redirect("portal:admin-course-api")
-        messages.error(request, "Please correct the course gateway form and try again.")
+            messages.success(request, f"Departmental Paystack settings updated for {department.name}.")
+            return redirect("portal:hod-api-and-document")
+        messages.error(request, "Please correct the departmental gateway details and try again.")
 
-    context = dashboard_context(
+    return render(request, "portal/hod_departmental_apis.html", dashboard_context(
         request,
-        "Course API",
+        "API and Document",
+        department=department,
         gateway_form=form,
-    )
-    return render(request, "portal/admin_course_api.html", context)
+        course_gateway_form=course_gateway_form,
+        allocation_form=allocation_form,
+        handbook_form=handbook_form,
+    ))
+
+
+@role_required(User.Role.ADMIN)
+def admin_course_api(request):
+    messages.info(request, "Paid-course APIs are configured by each department's HOD.")
+    return redirect("portal:admin-dashboard")
 
 
 @role_required(User.Role.ADMIN)
 def admin_departmental_fees(request):
-    ensure_departmental_defaults()
-    current_session = current_departmental_session()
-    session_form = AcademicSessionForm()
-    association_form = DepartmentalAssociationForm()
+    current_session = AcademicSession.objects.filter(is_current=True).first()
     search = request.GET.get("search", "").strip()
     departments = _search_filter(Department.objects.all(), search, "name", "code")
     selected_department = None
@@ -1819,94 +2299,97 @@ def admin_departmental_fees(request):
     department_id = request.GET.get("department")
     if department_id:
         selected_department = get_object_or_404(Department, pk=department_id)
-        ensure_departmental_fees_for_department(selected_department)
-        session_list = AcademicSession.objects.prefetch_related("departmental_fees__association")
+        session_list = AcademicSession.objects.all()
         for session in session_list:
-            session_fee_rows.append({"session": session, "fee_map": fee_map_for_session(session, selected_department)})
+            session_fee_rows.append({
+                "session": session,
+                "fees": DepartmentalFee.objects.filter(
+                    session=session,
+                    department=selected_department,
+                ).select_related("association"),
+            })
 
     if request.method == "POST":
-        action = request.POST.get("action")
-        if action == "create-session":
-            session_form = AcademicSessionForm(request.POST)
-            if session_form.is_valid():
-                new_session = session_form.save(commit=False)
-                new_session.is_current = True
-                new_session.save()
-                for department in Department.objects.all():
-                    for association in DepartmentalAssociation.objects.all():
-                        DepartmentalFee.objects.get_or_create(
-                            session=new_session,
-                            department=department,
-                            association=association,
-                            defaults={"amount": Decimal("0.00")},
-                        )
-                messages.success(
-                    request,
-                    f"Academic session {new_session.name} created and set as the current session. Students must complete departmental payment again for the new session.",
-                )
-                redirect_url = reverse("portal:admin-departmental-fees")
-                if department_id:
-                    redirect_url = f"{redirect_url}?department={department_id}"
-                return redirect(redirect_url)
-        elif action == "create-association":
-            association_form = DepartmentalAssociationForm(request.POST)
-            if association_form.is_valid():
-                association = association_form.save(commit=False)
-                association.is_constant = False
-                association.save()
-                for department in Department.objects.all():
-                    for session in AcademicSession.objects.all():
-                        DepartmentalFee.objects.get_or_create(
-                            session=session,
-                            department=department,
-                            association=association,
-                            defaults={"amount": Decimal("0.00")},
-                        )
-                messages.success(request, f"{association.name} association created.")
-                redirect_url = reverse("portal:admin-departmental-fees")
-                if department_id:
-                    redirect_url = f"{redirect_url}?department={department_id}"
-                return redirect(redirect_url)
-        elif action == "delete-association":
-            association = get_object_or_404(DepartmentalAssociation, pk=request.POST.get("association_id"))
-            if association.is_constant:
-                messages.error(request, "Departmental Fee, ACF, and MSSN cannot be deleted.")
-            else:
-                association.delete()
-                messages.success(request, "Association deleted.")
-            redirect_url = reverse("portal:admin-departmental-fees")
-            if department_id:
-                redirect_url = f"{redirect_url}?department={department_id}"
-            return redirect(redirect_url)
-        elif action == "update-session-fees":
-            selected_department = get_object_or_404(Department, pk=request.POST.get("department_id"))
-            session = get_object_or_404(AcademicSession, pk=request.POST.get("session_id"))
-            for association in DepartmentalAssociation.objects.all():
-                amount = request.POST.get(f"fee_{association.id}", "0").strip() or "0"
-                fee, _ = DepartmentalFee.objects.get_or_create(session=session, department=selected_department, association=association)
-                try:
-                    fee.amount = Decimal(amount)
-                except InvalidOperation:
-                    fee.amount = Decimal("0.00")
-                fee.save(update_fields=["amount", "updated_at"])
-            if request.POST.get("make_current") == "on" and not session.is_current:
-                session.is_current = True
-                session.save(update_fields=["is_current", "updated_at"])
-            messages.success(request, f"Fees updated for {selected_department.name} in {session.name}.")
-            return redirect(f'{reverse("portal:admin-departmental-fees")}?department={selected_department.id}')
+        messages.error(request, "Departmental fees can only be changed by the department's HOD.")
+        return redirect(_redirect_with_query(request, "portal:admin-departmental-fees"))
 
     context = dashboard_context(
         request,
-        "Set Departmental Fee",
+        "View Departmental Fees",
         departments=departments,
         selected_department=selected_department,
-        session_form=session_form,
-        association_form=association_form,
         session_fee_rows=session_fee_rows,
-        association_list=DepartmentalAssociation.objects.all(),
         current_departmental_session=current_session,
     )
     return render(request, "portal/admin_departmental_fees.html", context)
+
+
+@role_required(User.Role.LECTURER)
+def hod_departmental_fees(request):
+    department = hod_department_for(request)
+    ensure_departmental_defaults()
+    session = current_departmental_session()
+    fee_map = fee_map_for_session(session, department)
+
+    association_form = DepartmentalAssociationForm(department=department)
+    if request.method == "POST" and request.POST.get("action") == "delete-association":
+        association = get_object_or_404(
+            DepartmentalAssociation,
+            pk=request.POST.get("association_id"),
+            department=department,
+            is_constant=False,
+        )
+        if DepartmentalPaymentItem.objects.filter(association=association).exists():
+            messages.error(request, f"{association.name} cannot be deleted because students have already paid it.")
+        else:
+            association.delete()
+            messages.success(request, f"{association.name} was deleted from {department.name}.")
+        return redirect("portal:hod-departmental-fees")
+    elif request.method == "POST" and request.POST.get("action") == "create-association":
+        association_form = DepartmentalAssociationForm(request.POST, department=department)
+        if association_form.is_valid():
+            association = association_form.save(commit=False)
+            association.department = department
+            association.is_constant = False
+            association.save()
+            for academic_session in AcademicSession.objects.all():
+                DepartmentalFee.objects.get_or_create(
+                    session=academic_session,
+                    department=department,
+                    association=association,
+                    defaults={"amount": Decimal("0")},
+                )
+            messages.success(request, f"{association.name} is ready to price for {department.name}.")
+            return redirect("portal:hod-departmental-fees")
+    elif request.method == "POST":
+        fees_by_association_id = {fee.association_id: fee for fee in fee_map.values()}
+        updates = {}
+        for association in departmental_associations_for_department(department):
+            amount = request.POST.get(f"fee_{association.id}", "").strip()
+            try:
+                value = Decimal(amount)
+                if value < 0:
+                    raise InvalidOperation
+            except InvalidOperation:
+                messages.error(request, f"Enter a valid non-negative amount for {association.name}.")
+                return redirect("portal:hod-departmental-fees")
+            updates[association.id] = value
+        with transaction.atomic():
+            for association_id, amount in updates.items():
+                fee = fees_by_association_id[association_id]
+                fee.amount = amount
+                fee.save(update_fields=["amount", "updated_at"])
+        messages.success(request, f"Fees updated for {department.name} in {session.name}.")
+        return redirect("portal:hod-departmental-fees")
+
+    return render(request, "portal/hod_departmental_fees.html", dashboard_context(
+        request,
+        "Set Departmental Fees",
+        department=department,
+        current_academic_session=session,
+        fee_map=fee_map,
+        association_form=association_form,
+    ))
 
 
 @role_required(User.Role.ADMIN)
@@ -1920,19 +2403,79 @@ def admin_departmental_download(request):
 
 
 @role_required(User.Role.ADMIN)
+def admin_hods(request):
+    search = request.GET.get("search", "").strip()
+    departments = Department.objects.select_related("faculty", "head_of_department")
+    departments = _search_filter(departments, search, "name", "code")
+    selected_department = None
+    lecturers = User.objects.none()
+    department_id = request.GET.get("department")
+    if department_id:
+        selected_department = get_object_or_404(Department, pk=department_id)
+        lecturers = User.objects.filter(
+            role=User.Role.LECTURER,
+            department=selected_department,
+            is_approved=True,
+        ).order_by("first_name", "last_name", "username")
+
+    if request.method == "POST" and request.POST.get("action") == "assign-hod":
+        selected_department = get_object_or_404(Department, pk=request.POST.get("department_id"))
+        lecturer = get_object_or_404(
+            User.objects.filter(
+                role=User.Role.LECTURER,
+                department=selected_department,
+                is_approved=True,
+            ),
+            pk=request.POST.get("lecturer_id"),
+        )
+        selected_department.head_of_department = lecturer
+        selected_department.save(update_fields=["head_of_department", "updated_at"])
+        messages.success(request, f"{lecturer.full_name} is now HOD of {selected_department.name}.")
+        return redirect(f'{reverse("portal:admin-hods")}?department={selected_department.id}')
+
+    return render(request, "portal/admin_hods.html", dashboard_context(
+        request,
+        "Heads of Department",
+        departments=departments,
+        selected_department=selected_department,
+        lecturers=lecturers,
+        department_search=search,
+    ))
+
+
+@role_required(User.Role.ADMIN)
 def admin_departments(request):
     form = DepartmentForm()
     search = request.GET.get("search", "").strip()
-    departments = Department.objects.annotate(course_total=Count("courses"))
+    departments = Department.objects.select_related("faculty").annotate(course_total=Count("courses"))
     departments = _search_filter(departments, search, "name", "code", "description")
     if request.method == "POST":
-        form = DepartmentForm(request.POST)
-        if form.is_valid():
-            department = form.save()
-            ensure_department_gateway_credentials(department)
-            ensure_departmental_fees_for_department(department)
-            messages.success(request, "Department created.")
-            return redirect(_redirect_with_query(request, "portal:admin-departments"))
+        action = request.POST.get("action", "create-department")
+        if action == "create-department":
+            form = DepartmentForm(request.POST)
+            if form.is_valid():
+                department = form.save()
+                ensure_department_gateway_credentials(department)
+                ensure_departmental_fees_for_department(department)
+                messages.success(request, "Department created.")
+                return redirect(_redirect_with_query(request, "portal:admin-departments"))
+        elif action == "upload-lecturers":
+            department = get_object_or_404(Department, pk=request.POST.get("department_id"))
+            upload_form = DepartmentLecturerUploadForm(request.POST, request.FILES)
+            if upload_form.is_valid():
+                upload = upload_form.save(commit=False)
+                upload.department, upload.uploaded_by = department, request.user
+                upload.save()
+                try:
+                    upload.processing_summary = import_department_lecturers(upload)
+                    upload.save(update_fields=["processing_summary", "updated_at"])
+                    messages.success(request, upload.processing_summary)
+                except ValueError as exc:
+                    upload.processing_summary = str(exc)
+                    upload.save(update_fields=["processing_summary", "updated_at"])
+                    messages.error(request, str(exc))
+                return redirect(_redirect_with_query(request, "portal:admin-departments"))
+            messages.error(request, "Choose a valid department-lecturers file.")
     context = dashboard_context(
         request,
         "Manage Departments",
@@ -1940,6 +2483,84 @@ def admin_departments(request):
         departments=departments,
     )
     return render(request, "portal/admin_departments.html", context)
+
+
+@role_required(User.Role.ADMIN)
+def admin_faculties(request):
+    form = FacultyForm()
+    faculties = Faculty.objects.annotate(department_total=Count("departments"))
+    if request.method == "POST":
+        form = FacultyForm(request.POST)
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Faculty created. You can now create departments under it.")
+            return redirect("portal:admin-faculties")
+    return render(request, "portal/admin_faculties.html", dashboard_context(request, "Manage Faculties", form=form, faculties=faculties))
+
+
+@role_required(User.Role.ADMIN)
+def admin_about(request):
+    institution = InstitutionProfile.objects.first()
+    if institution is None:
+        institution = InstitutionProfile.objects.create(name="Educonnect")
+    form = InstitutionProfileForm(instance=institution)
+    session_form = AcademicSessionForm(initial={"is_current": True})
+    if request.method == "POST":
+        if request.POST.get("action") == "create-academic-session":
+            session_form = AcademicSessionForm(request.POST)
+            if session_form.is_valid():
+                session = session_form.save()
+                for department in Department.objects.all():
+                    ensure_departmental_fees_for_department(department)
+                reset_count = reset_lecturer_course_registrations() if session.is_current else 0
+                messages.success(
+                    request,
+                    f"Academic session {session.name} created"
+                    + (
+                        f" and set as current. {reset_count} lecturer course registration(s) were cleared; "
+                        "students start this session with no registered courses."
+                        if session.is_current else "."
+                    ),
+                )
+                return redirect("portal:admin-about")
+        else:
+            form = InstitutionProfileForm(request.POST, instance=institution)
+            if form.is_valid():
+                updated_institution = form.save(commit=False)
+                if updated_institution.name:
+                    try:
+                        logo_bytes, extension = get_institution_logo(updated_institution.name)
+                    except LogoLookupError as exc:
+                        updated_institution.save()
+                        messages.warning(
+                            request,
+                            f"Institution name saved, but an official logo could not be verified: {exc}",
+                        )
+                    else:
+                        updated_institution.logo.save(
+                            f"institution-logo.{extension}",
+                            ContentFile(logo_bytes),
+                            save=False,
+                        )
+                        updated_institution.save()
+                        messages.success(request, "Institution name and verified official logo saved.")
+                else:
+                    updated_institution.save()
+                    messages.success(request, "Institution name saved.")
+                return redirect("portal:admin-about")
+    return render(
+        request,
+        "portal/admin_about.html",
+        dashboard_context(
+            request,
+            "About Your Institution",
+            form=form,
+            institution=institution,
+            session_form=session_form,
+            current_session=AcademicSession.objects.filter(is_current=True).first(),
+            past_sessions=AcademicSession.objects.filter(is_current=False),
+        ),
+    )
 
 
 @role_required(User.Role.ADMIN)
@@ -2029,8 +2650,11 @@ def admin_documents(request):
         elif action == "create-handbook":
             handbook_form = HandbookForm(request.POST, request.FILES)
             if handbook_form.is_valid():
-                handbook_form.save()
-                messages.success(request, "Handbook uploaded.")
+                handbook = handbook_form.save()
+                try:
+                    messages.success(request, import_handbook_courses(handbook))
+                except ValueError as exc:
+                    messages.warning(request, f"Handbook uploaded, but course automation could not run: {exc}")
                 return redirect(_append_querystring(reverse("portal:admin-documents"), request))
     context = dashboard_context(
         request,
@@ -2130,6 +2754,16 @@ def admin_approve_lecturer(request, user_id):
 
 
 @role_required(User.Role.ADMIN)
+def admin_reset_user_password(request, user_id):
+    user = get_object_or_404(User, pk=user_id)
+    if request.method == "POST" and not user.is_superuser:
+        user.set_password("educonnect")
+        user.save(update_fields=["password"])
+        messages.success(request, f"{user.full_name}'s password was reset to the temporary password 'educonnect'.")
+    return redirect(_redirect_with_query(request, "portal:admin-users"))
+
+
+@role_required(User.Role.ADMIN)
 def admin_delete_user(request, user_id):
     user = get_object_or_404(User, pk=user_id)
     if request.method == "POST" and not user.is_superuser:
@@ -2146,7 +2780,7 @@ def download_departmental_document(request, document_id):
     )
     if request.user.role == User.Role.STUDENT and document.payment.student_id != request.user.id:
         raise PermissionDenied
-    return FileResponse(document.file.open("rb"), as_attachment=True, filename=document.file.name.rsplit("/", 1)[-1])
+    return FileResponse(document.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=document.file.name.rsplit("/", 1)[-1])
 
 
 @role_required(User.Role.STUDENT, User.Role.ADMIN)
@@ -2160,10 +2794,13 @@ def download_exam_card(request, payment_id):
         raise PermissionDenied
     registered_courses = [
         f"{registration.course.code} - {registration.course.title}"
-        for registration in StudentCourseRegistration.objects.filter(student=payment.student).select_related("course").order_by("course__code")
+        for registration in StudentCourseRegistration.objects.filter(
+            student=payment.student,
+            session=payment.session,
+        ).select_related("course").order_by("course__code")
     ]
     pdf_bytes = build_exam_card_pdf(
-        school_name="Modibbo Adama University Yola",
+        school_name=InstitutionProfile.objects.first().name if InstitutionProfile.objects.exists() else "Educonnect",
         card_title="Departmental Examination Clearance Card",
         session_label=payment.session.name,
         fields=[
@@ -2179,13 +2816,14 @@ def download_exam_card(request, payment_id):
     )
     session_slug = payment.session.name.replace("/", "-")
     response = HttpResponse(pdf_bytes, content_type="application/pdf")
-    response["Content-Disposition"] = f'attachment; filename="exam-card-{payment.student.id_number or payment.student.username}-{session_slug}.pdf"'
+    disposition = "attachment" if request.GET.get("download") == "1" else "inline"
+    response["Content-Disposition"] = f'{disposition}; filename="exam-card-{payment.student.id_number or payment.student.username}-{session_slug}.pdf"'
     return response
 
 
 @role_required(User.Role.ADMIN, User.Role.LECTURER)
 def departmental_student_ids_pdf(request):
-    payments = departmental_payment_queryset()
+    payments = departmental_payment_queryset().filter(session=current_departmental_session())
     if request.user.role == User.Role.LECTURER and request.user.department_id:
         payments = payments.filter(department=request.user.department)
     department_id = request.GET.get("department")
@@ -2218,15 +2856,23 @@ def download_course_file(request, course_id):
     if not course.file:
         raise Http404
     if request.user.role == User.Role.STUDENT:
-        registration = StudentCourseRegistration.objects.filter(student=request.user, course=course).first()
+        registration = StudentCourseRegistration.objects.filter(
+            student=request.user,
+            course=course,
+            session=current_departmental_session(),
+        ).first()
         if not registration:
             raise PermissionDenied
         if not course.is_free:
-            payment = CoursePayment.objects.filter(student=request.user, course=course, status=CoursePayment.Status.PAID).first()
+            payment = current_course_payment_queryset().filter(
+                student=request.user,
+                course=course,
+                status=CoursePayment.Status.PAID,
+            ).first()
             if not payment:
                 messages.error(request, "Payment is required before downloading this course file.")
                 return redirect("portal:student-courses")
-    return FileResponse(course.file.open("rb"), as_attachment=True, filename=course.file.name.rsplit("/", 1)[-1])
+    return FileResponse(course.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=course.file.name.rsplit("/", 1)[-1])
 
 
 @role_required(User.Role.LECTURER)
@@ -2235,18 +2881,27 @@ def lecturer_paid_course_students_pdf(request, course_id):
     if course.is_free:
         messages.info(request, "This course is free, so there is no paid student list to download.")
         return redirect("portal:lecturer-courses")
-    student_ids = list(
-        CoursePayment.objects.filter(course=course, status=CoursePayment.Status.PAID)
-        .order_by("student__id_number", "student__username")
-        .values_list("student__id_number", flat=True)
-    )
+    current_session = current_departmental_session()
+    selected_group_id = request.GET.get("group")
+    payments = paid_course_students_queryset(course, current_session)
+    selected_group = None
+    if selected_group_id:
+        selected_group = get_object_or_404(
+            CourseStudentGroup.objects.filter(course=course, session=current_session), pk=selected_group_id,
+        )
+        payments = payments.filter(student__course_group_memberships__group=selected_group)
+    student_lines = [
+        f"{payment.student.full_name} | {payment.student.id_number or 'No ID'} | {payment.student.department.name if payment.student.department else 'No department'}"
+        for payment in payments
+    ]
     pdf_bytes = build_pdf_document(
         f"Paid Students - {course.code}",
-        student_ids or ["No paid students found for this course yet."],
-        subtitle=f"{course.title} | {course.department.name}",
+        student_lines or ["No matching paid students found for this course yet."],
+        subtitle=f"{course.title} | {course.department.name} | {selected_group.name if selected_group else 'All paid students'}",
     )
     response = HttpResponse(pdf_bytes, content_type="application/pdf")
-    response["Content-Disposition"] = f'attachment; filename="{course.code.lower()}-paid-students.pdf"'
+    group_suffix = f"-{selected_group.name.lower().replace(' ', '-')}" if selected_group else ""
+    response["Content-Disposition"] = f'attachment; filename="{course.code.lower()}-paid-students{group_suffix}.pdf"'
     return response
 
 
@@ -2254,10 +2909,14 @@ def lecturer_paid_course_students_pdf(request, course_id):
 def download_material(request, material_id):
     material = get_object_or_404(CourseMaterial.objects.select_related("course", "lecturer"), pk=material_id)
     if request.user.is_superuser or request.user.role in {User.Role.ADMIN, User.Role.LECTURER}:
-        return FileResponse(material.file.open("rb"), as_attachment=True, filename=material.file.name.rsplit("/", 1)[-1])
+        return FileResponse(material.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=material.file.name.rsplit("/", 1)[-1])
     if request.user.role != User.Role.STUDENT:
         raise PermissionDenied
-    registration = StudentCourseRegistration.objects.filter(student=request.user, course=material.course).first()
+    registration = StudentCourseRegistration.objects.filter(
+        student=request.user,
+        course=material.course,
+        session=current_departmental_session(),
+    ).first()
     if not registration:
         raise PermissionDenied
     access = MaterialAccess.objects.filter(material=material, student=request.user).first()
@@ -2265,7 +2924,11 @@ def download_material(request, material_id):
         messages.error(request, "You do not currently have access to download this material.")
         return redirect("portal:student-materials")
     if not material.course.is_free:
-        payment = CoursePayment.objects.filter(student=request.user, course=material.course, status=CoursePayment.Status.PAID).first()
+        payment = current_course_payment_queryset().filter(
+            student=request.user,
+            course=material.course,
+            status=CoursePayment.Status.PAID,
+        ).first()
         if not payment:
             if not access or access.status == MaterialAccess.Status.BLOCKED or not access.can_download:
                 messages.error(request, "You do not currently have access to download this material.")
@@ -2285,7 +2948,48 @@ def download_material(request, material_id):
             student=request.user,
             defaults={"status": MaterialAccess.Status.AVAILABLE},
         )
-    return FileResponse(material.file.open("rb"), as_attachment=True, filename=material.file.name.rsplit("/", 1)[-1])
+    return FileResponse(material.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=material.file.name.rsplit("/", 1)[-1])
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
+def download_message_attachment(request, notification_id):
+    notification = get_object_or_404(
+        Notification.objects.select_related("sender").prefetch_related("recipients"),
+        pk=notification_id,
+    )
+    if not notification.attachment:
+        raise Http404
+    if request.user.role == User.Role.STUDENT:
+        if not notification.recipients.filter(student=request.user, is_deleted=False).exists():
+            raise PermissionDenied
+    elif request.user.role == User.Role.LECTURER and notification.sender_id != request.user.id:
+        raise PermissionDenied
+    return FileResponse(
+        notification.attachment.open("rb"),
+        as_attachment=request.GET.get("download") == "1",
+        filename=notification.attachment.name.rsplit("/", 1)[-1],
+    )
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
+def download_notification_attachment(request, attachment_id):
+    attachment = get_object_or_404(
+        NotificationAttachment.objects.select_related("notification", "notification__sender").prefetch_related(
+            "notification__recipients"
+        ),
+        pk=attachment_id,
+    )
+    notification = attachment.notification
+    if request.user.role == User.Role.STUDENT:
+        if not notification.recipients.filter(student=request.user, is_deleted=False).exists():
+            raise PermissionDenied
+    elif request.user.role == User.Role.LECTURER and notification.sender_id != request.user.id:
+        raise PermissionDenied
+    return FileResponse(
+        attachment.file.open("rb"),
+        as_attachment=request.GET.get("download") == "1",
+        filename=attachment.file.name.rsplit("/", 1)[-1],
+    )
 
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
@@ -2296,4 +3000,4 @@ def download_document(request, kind, document_id):
         raise PermissionDenied
     if not document.file:
         raise Http404
-    return FileResponse(document.file.open("rb"), as_attachment=True, filename=document.file.name.rsplit("/", 1)[-1])
+    return FileResponse(document.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=document.file.name.rsplit("/", 1)[-1])

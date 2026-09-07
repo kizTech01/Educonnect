@@ -2,6 +2,7 @@ from decimal import Decimal
 from datetime import date
 
 from django import forms
+from django.db.models import Q
 from django.utils.text import slugify
 
 from .models import (
@@ -10,11 +11,17 @@ from .models import (
     CoursePaymentGateway,
     CourseMaterial,
     Department,
+    DepartmentLecturerUpload,
+    CourseAllocationUpload,
+    AcademicSession,
     DepartmentPaymentGateway,
+    DepartmentCoursePaymentGateway,
     DepartmentalAssociation,
     DepartmentalFee,
     DepartmentalPaymentDocument,
     Handbook,
+    Faculty,
+    InstitutionProfile,
     LecturerCourseRegistration,
     Notification,
     StudentCourseRegistration,
@@ -86,7 +93,7 @@ class MultipleFileField(forms.FileField):
 class DepartmentForm(StyledModelForm):
     class Meta:
         model = Department
-        fields = ["name"]
+        fields = ["faculty", "name", "description"]
 
     def save(self, commit=True):
         department = super().save(commit=False)
@@ -101,6 +108,45 @@ class DepartmentForm(StyledModelForm):
         if commit:
             department.save()
         return department
+
+
+class FacultyForm(StyledModelForm):
+    class Meta:
+        model = Faculty
+        fields = ["name", "description"]
+
+    def save(self, commit=True):
+        faculty = super().save(commit=False)
+        base_code = slugify(faculty.name).upper().replace("-", "")[:20] or "FACULTY"
+        code, suffix = base_code, 1
+        while Faculty.objects.exclude(pk=faculty.pk).filter(code=code).exists():
+            suffix += 1
+            code = f"{base_code[:max(1, 20-len(str(suffix)))]}{suffix}"
+        faculty.code = code
+        if commit:
+            faculty.save()
+        return faculty
+
+
+class InstitutionProfileForm(StyledModelForm):
+    class Meta:
+        model = InstitutionProfile
+        fields = ["name"]
+        labels = {
+            "name": "University or institution name",
+        }
+
+
+class DepartmentLecturerUploadForm(StyledModelForm):
+    class Meta:
+        model = DepartmentLecturerUpload
+        fields = ["file"]
+
+
+class CourseAllocationUploadForm(StyledModelForm):
+    class Meta:
+        model = CourseAllocationUpload
+        fields = ["file"]
 
 
 class CourseForm(CoursePricingMixin, StyledModelForm):
@@ -157,6 +203,44 @@ class StudentCourseFilterForm(forms.Form):
         for field in self.fields.values():
             if not isinstance(field.widget, forms.HiddenInput):
                 field.widget.attrs["class"] = "input-field"
+
+
+class CourseStudentGroupForm(forms.Form):
+    enable_grouping = forms.BooleanField(
+        required=False,
+        label="Enable student grouping",
+        help_text="Leave this off when you only need to download paid student IDs.",
+    )
+    grouping_method = forms.ChoiceField(
+        choices=(("department", "By department"), ("random", "Random")),
+        widget=forms.RadioSelect,
+        initial="department",
+        required=False,
+    )
+    group_names = forms.CharField(
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 2, "placeholder": "A1, A2, A3"}),
+        help_text="Required for random grouping. Separate group names with commas or new lines.",
+    )
+
+    def clean_group_names(self):
+        names = self.cleaned_data["group_names"]
+        names = [name.strip() for name in names.replace("\n", ",").split(",") if name.strip()]
+        if len({name.casefold() for name in names}) != len(names):
+            raise forms.ValidationError("Each random group name must be unique.")
+        return names
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if cleaned_data.get("enable_grouping") and not cleaned_data.get("grouping_method"):
+            self.add_error("grouping_method", "Choose how students should be grouped.")
+        if (
+            cleaned_data.get("enable_grouping")
+            and cleaned_data.get("grouping_method") == "random"
+            and not cleaned_data.get("group_names")
+        ):
+            self.add_error("group_names", "Enter at least one group name for random grouping.")
+        return cleaned_data
 
 
 class CourseBrowseFilterForm(forms.Form):
@@ -241,8 +325,14 @@ class HandbookForm(StyledModelForm):
     def save(self, commit=True):
         handbook = super().save(commit=False)
         handbook.title = f"{handbook.department.name} Handbook"
-        year = date.today().year
-        handbook.academic_session = f"{year}/{year + 1}"
+        session = AcademicSession.objects.filter(is_current=True).first()
+        if session is None:
+            year = date.today().year
+            session, _ = AcademicSession.objects.get_or_create(
+                name=f"{year}/{year + 1}",
+                defaults={"is_current": True},
+            )
+        handbook.academic_session = session.name
         handbook.semester = ""
         handbook.description = ""
         if commit:
@@ -263,7 +353,9 @@ class CourseMaterialForm(StyledModelForm):
         super().__init__(*args, **kwargs)
         queryset = Course.objects.all()
         if user and not allow_all_courses:
-            queryset = Course.objects.filter(lecturer=user)
+            queryset = Course.objects.filter(
+                Q(lecturer_registrations__lecturer=user) | Q(lecturer=user)
+            ).distinct()
         self.fields["course"].queryset = queryset.select_related("department")
 
     def clean(self):
@@ -290,7 +382,9 @@ class CourseMaterialBatchForm(forms.Form):
         super().__init__(*args, **kwargs)
         queryset = Course.objects.all()
         if user and not allow_all_courses:
-            queryset = Course.objects.filter(lecturer=user)
+            queryset = Course.objects.filter(
+                Q(lecturer_registrations__lecturer=user) | Q(lecturer=user)
+            ).distinct()
         self.fields["course"].queryset = queryset.select_related("department", "lecturer")
         for field in self.fields.values():
             if isinstance(field.widget, (forms.CheckboxInput, forms.CheckboxSelectMultiple, forms.ClearableFileInput)):
@@ -309,6 +403,12 @@ class CourseMaterialBatchForm(forms.Form):
 
 
 class NotificationForm(StyledModelForm):
+    attachments = MultipleFileField(
+        required=False,
+        label="Attach files",
+        help_text="You can select more than one file.",
+        widget=MultipleFileInput(),
+    )
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
     departments = forms.ModelMultipleChoiceField(
         queryset=Department.objects.all(),
@@ -363,6 +463,7 @@ class LecturerProfileForm(BaseProfileForm):
 
 
 class BaseUserForm(StyledModelForm):
+    faculty = forms.ModelChoiceField(queryset=Faculty.objects.all(), required=False)
     password1 = forms.CharField(widget=forms.PasswordInput)
     password2 = forms.CharField(widget=forms.PasswordInput)
 
@@ -383,6 +484,15 @@ class BaseUserForm(StyledModelForm):
         cleaned_data = super().clean()
         if cleaned_data.get("password1") != cleaned_data.get("password2"):
             self.add_error("password2", "Passwords do not match.")
+        faculty = cleaned_data.get("faculty")
+        department = cleaned_data.get("department")
+        if department and not faculty:
+            # The department is authoritative; this preserves older signup
+            # links while keeping every account within the department's faculty.
+            faculty = department.faculty
+            cleaned_data["faculty"] = faculty
+        if faculty and department and department.faculty_id != faculty.id:
+            self.add_error("department", "Choose a department under the selected faculty.")
         return cleaned_data
 
     def save(self, commit=True):
@@ -465,6 +575,15 @@ class DepartmentPaymentGatewayForm(StyledModelForm):
         }
 
 
+class DepartmentCoursePaymentGatewayForm(StyledModelForm):
+    class Meta:
+        model = DepartmentCoursePaymentGateway
+        fields = ["paystack_public_key", "paystack_secret_key"]
+        widgets = {
+            "paystack_secret_key": forms.PasswordInput(render_value=True),
+        }
+
+
 class CoursePaymentGatewayForm(StyledModelForm):
     class Meta:
         model = CoursePaymentGateway
@@ -484,6 +603,16 @@ class DepartmentalAssociationForm(StyledModelForm):
     class Meta:
         model = DepartmentalAssociation
         fields = ["name"]
+
+    def __init__(self, *args, department=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.department = department
+
+    def clean_name(self):
+        name = self.cleaned_data["name"]
+        if self.department and DepartmentalAssociation.objects.filter(department=self.department, name__iexact=name).exists():
+            raise forms.ValidationError("This department already has an association with that name.")
+        return name
 
 
 class DepartmentalStudentPaymentForm(forms.Form):
@@ -531,6 +660,12 @@ class DepartmentalStudentPaymentForm(forms.Form):
             if isinstance(widget, (forms.RadioSelect, forms.CheckboxSelectMultiple)):
                 continue
             widget.attrs["class"] = f'{widget.attrs.get("class", "")} input-field'.strip()
+
+
+class DepartmentalAdditionalDocumentForm(forms.Form):
+    additional_documents = MultipleFileField(
+        widget=MultipleFileInput(attrs={"class": "input-field"}),
+    )
 
 
 class DepartmentalSearchForm(forms.Form):

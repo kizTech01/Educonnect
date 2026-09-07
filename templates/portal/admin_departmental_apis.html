@@ -1,13 +1,11 @@
 {% extends 'portal/dashboard_base.html' %}
 
-{% block title %}Manage Departmental APIs | MAU EduConnect{% endblock %}
+{% block title %}View Departmental APIs | Educonnect{% endblock %}
 
 {% block dashboard_content %}
 <section class="split-layout">
     <div class="panel-card">
-        <div class="panel-head">
-            <h2>Departments</h2>
-        </div>
+        <div class="panel-head"><h2>Departments</h2></div>
         <form method="get" class="stack-form">
             <label>Search Department
                 <input type="text" name="search" value="{{ department_search }}" class="input-field" placeholder="Department name or code">
@@ -16,41 +14,19 @@
         </form>
         <div class="message-list association-list">
             {% for department in departments %}
-                <a href="{% url 'portal:admin-departmental-apis' %}?department={{ department.id }}{% if department_search %}&search={{ department_search }}{% endif %}" class="message-item shell">
-                    <div>
-                        <strong>{{ department.name }}</strong>
-                        <span>{{ department.code }}</span>
-                    </div>
-                </a>
-            {% empty %}
-                <p class="empty-text">No departments found.</p>
-            {% endfor %}
+                <a href="{% url 'portal:admin-departmental-apis' %}?department={{ department.id }}{% if department_search %}&search={{ department_search }}{% endif %}" class="message-item shell"><div><strong>{{ department.name }}</strong><span>{{ department.code }}</span></div></a>
+            {% empty %}<p class="empty-text">No departments found.</p>{% endfor %}
         </div>
     </div>
-
     <div class="panel-card">
-        <div class="panel-head">
-            <h2>{% if selected_department %}{{ selected_department.name }} Gateway Setup{% else %}Select a Department{% endif %}</h2>
-        </div>
+        <div class="panel-head"><h2>{% if selected_department %}{{ selected_department.name }} Payment API{% else %}Select a Department{% endif %}</h2></div>
         {% if selected_department %}
-            <form method="post" class="stack-form">
-                {% csrf_token %}
-                <input type="hidden" name="action" value="save-gateway">
-                <input type="hidden" name="department_id" value="{{ selected_department.id }}">
-                <p class="muted-note">These Paystack keys power the departmental payment button for {{ selected_department.name }} students. Students are redirected to Paystack and then returned to this site after payment.</p>
-                <label>Public key
-                    {{ gateway_form.paystack_public_key }}
-                    {{ gateway_form.paystack_public_key.errors }}
-                </label>
-                <label>Secret key
-                    {{ gateway_form.paystack_secret_key }}
-                    {{ gateway_form.paystack_secret_key.errors }}
-                </label>
-                <button type="submit" class="primary-btn">Save Department Gateway</button>
-            </form>
-        {% else %}
-            <p class="muted-note">Choose a department from the list to manage the Paystack public key and secret key used for its departmental payments.</p>
-        {% endif %}
+            <p class="muted-note">Only the assigned HOD can edit this department's payment API.</p>
+            <div class="message-list association-list">
+                <div class="message-item shell"><div><strong>Public key</strong><span>{{ gateway.paystack_public_key|default:"Not configured" }}</span></div></div>
+                <div class="message-item shell"><div><strong>Secret key</strong><span>{% if gateway.paystack_secret_key %}Configured (hidden){% else %}Not configured{% endif %}</span></div></div>
+            </div>
+        {% else %}<p class="muted-note">Choose a department to view its departmental payment API status.</p>{% endif %}
     </div>
 </section>
 {% endblock %}

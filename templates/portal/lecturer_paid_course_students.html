@@ -1,0 +1,61 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Paid Students | Educonnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head">
+        <div>
+            <h2>{{ course.code }} - {{ course.title }}</h2>
+            <p class="muted-note">Search payments in the current session, {{ current_academic_session.name }}.</p>
+        </div>
+        <a href="{% url 'portal:lecturer-courses' %}?fee_type=paid" class="ghost-btn small">Back to Paid Courses</a>
+    </div>
+
+    <form method="get" class="stack-form">
+        <label>Student ID
+            <input type="search" name="student_id" value="{{ student_id_search }}" class="input-field" placeholder="Enter student ID">
+        </label>
+        <button type="submit" class="primary-btn small">Search Student</button>
+    </form>
+</section>
+
+{% if student_id_search %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Search Results</h2>
+        <span class="muted-note">{{ paid_student_payments|length }} paid student{{ paid_student_payments|length|pluralize }}</span>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Student</th>
+                    <th>Student ID</th>
+                    <th>Department</th>
+                    <th>Level</th>
+                    <th>Contact</th>
+                    <th>Amount Paid</th>
+                    <th>Paid At</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for payment in paid_student_payments %}
+                <tr>
+                    <td>{{ payment.student.full_name }}</td>
+                    <td>{{ payment.student.id_number|default:"-" }}</td>
+                    <td>{{ payment.student.department.name|default:"-" }}</td>
+                    <td>{{ payment.student.level|default:"-" }}</td>
+                    <td>{{ payment.student.email|default:payment.student.phone_number|default:"-" }}</td>
+                    <td><span class="status-pill success">{{ payment.amount }}</span></td>
+                    <td>{{ payment.paid_at|date:"M d, Y H:i"|default:"-" }}</td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="7">No paid student was found with that ID for this course in the current session.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+{% endblock %}

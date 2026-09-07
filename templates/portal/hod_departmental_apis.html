@@ -1,0 +1,49 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}API and Document | Educonnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+<section class="panel-card">
+    <div class="panel-head"><h2>{{ department.name }} Gateway Setup</h2></div>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        <p class="muted-note">These Paystack keys are used only for departmental payments made by {{ department.name }} students.</p>
+        <label>Public key {{ gateway_form.paystack_public_key }} {{ gateway_form.paystack_public_key.errors }}</label>
+        <label>Secret key {{ gateway_form.paystack_secret_key }} {{ gateway_form.paystack_secret_key.errors }}</label>
+        <button type="submit" class="primary-btn">Save Department Gateway</button>
+    </form>
+</section>
+<section class="panel-card">
+    <div class="panel-head"><h2>Paid Course API</h2></div>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="save-course-gateway">
+        <p class="muted-note">These Paystack keys apply to every paid course in {{ department.name }}. Free courses never use this API.</p>
+        <label>Public key {{ course_gateway_form.paystack_public_key }} {{ course_gateway_form.paystack_public_key.errors }}</label>
+        <label>Secret key {{ course_gateway_form.paystack_secret_key }} {{ course_gateway_form.paystack_secret_key.errors }}</label>
+        <button type="submit" class="primary-btn">Save Paid Course API</button>
+    </form>
+</section>
+<section class="panel-card">
+    <div class="panel-head"><h2>Course Allocation Document</h2></div>
+    <form method="post" enctype="multipart/form-data" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="upload-allocations">
+        <p class="muted-note">Upload a course-allocation file for {{ department.name }}. Only the HOD of this department can add it.</p>
+        <label>{{ allocation_form.file.label }} {{ allocation_form.file }} {{ allocation_form.file.errors }}</label>
+        <button type="submit" class="primary-btn">Add Course Allocation</button>
+    </form>
+</section>
+<section class="panel-card">
+    <div class="panel-head"><h2>Department Handbook</h2></div>
+    <form method="post" enctype="multipart/form-data" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="upload-handbook">
+        <p class="muted-note">Upload a handbook for {{ department.name }}. It is available only to students in this department.</p>
+        <label>{{ handbook_form.file.label }} {{ handbook_form.file }} {{ handbook_form.file.errors }}</label>
+        <button type="submit" class="primary-btn">Upload Handbook</button>
+    </form>
+</section>
+</section>
+{% endblock %}

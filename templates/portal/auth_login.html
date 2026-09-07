@@ -42,6 +42,7 @@
                 </form>
                 <div class="auth-links">
                     <a href="{% url 'portal:home' %}" class="ghost-btn small">Back to Home</a>
+                    {% if auth_role == 'student' or auth_role == 'lecturer' %}<a href="{% url 'portal:password-reset' %}" class="ghost-btn small">Forgot Password?</a>{% endif %}
                     {% if signup_available %}
                         {% if is_student %}
                             <a href="{% url 'portal:student-signup' %}" class="ghost-btn small">{{ signup_toggle_label }}</a>

@@ -1,6 +1,6 @@
 {% extends 'portal/dashboard_base.html' %}
 
-{% block title %}Student Downloads | MAU EduConnect{% endblock %}
+{% block title %}Student Downloads | Educonnect{% endblock %}
 
 {% block dashboard_content %}
 <section class="panel-card">
@@ -58,7 +58,8 @@
                                 <strong>Main Course File</strong>
                                 <span>{{ row.registration.course.file.name|slice:"-60:" }}</span>
                             </div>
-                            <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small">Download</a>
+                            <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                            <a href="{% url 'portal:download-course-file' row.registration.course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                         </div>
                     {% endif %}
 
@@ -77,7 +78,8 @@
                             {% if item.access and item.access.status == "blocked" %}
                                 <span class="status-pill danger">Blocked</span>
                             {% else %}
-                                <a href="{% url 'portal:download-material' item.material.id %}" class="ghost-btn small">Download</a>
+                                <a href="{% url 'portal:download-material' item.material.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                <a href="{% url 'portal:download-material' item.material.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                             {% endif %}
                         </div>
                     {% empty %}

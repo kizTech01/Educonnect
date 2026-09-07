@@ -3,12 +3,12 @@
         <div>
             <h2>
                 {% if departmental_download_scope == 'lecturer' %}
-                    Paid Courses Students
+                    Paid Departmental Students
                 {% else %}
                     Paid Departmental Students
                 {% endif %}
             </h2>
-            <p class="muted-note">Filter by student ID, department, or level, then open a student to inspect the uploaded payment documents.</p>
+            <p class="muted-note">Current session: {{ departmental_current_session.name }}. Filter by student ID, department, or level, then open a student to inspect every paid session and its uploaded documents.</p>
         </div>
         <a href="{% url 'portal:departmental-student-ids-pdf' %}" class="ghost-btn small">Download All IDs</a>
     </div>
@@ -56,30 +56,40 @@
         </div>
 
         <div class="panel-card">
-            {% if departmental_selected_payment %}
+            {% if departmental_selected_student %}
                 <div class="panel-head">
-                    <h3>{{ departmental_selected_payment.student.full_name }}</h3>
-                    <span class="status-pill success">{{ departmental_selected_payment.session.name }}</span>
+                    <h3>{{ departmental_selected_student.full_name }}</h3>
+                    <span class="muted-note">All paid departmental sessions</span>
                 </div>
                 <div class="detail-grid">
-                    <p><strong>Student ID:</strong> {{ departmental_selected_payment.student.id_number }}</p>
-                    <p><strong>Department:</strong> {{ departmental_selected_payment.department.name }}</p>
-                    <p><strong>Level:</strong> {{ departmental_selected_payment.student.level }}</p>
-                    <p><strong>Reference:</strong> {{ departmental_selected_payment.paystack_reference }}</p>
-                    <p><strong>Amount:</strong> {{ departmental_selected_payment.total_amount }}</p>
-                    <p><strong>Paid At:</strong> {{ departmental_selected_payment.paid_at|date:"M d, Y H:i"|default:"-" }}</p>
+                    <p><strong>Student ID:</strong> {{ departmental_selected_student.id_number }}</p>
+                    <p><strong>Current department:</strong> {{ departmental_selected_student.department.name|default:"Not assigned" }}</p>
+                    <p><strong>Level:</strong> {{ departmental_selected_student.level }}</p>
                 </div>
                 <div class="message-list">
-                    {% for document in departmental_selected_payment.documents.all %}
-                        <div class="message-item shell">
+                    {% for payment in departmental_selected_student_payments %}
+                        <div class="detail-card">
                             <div>
-                                <strong>{{ document.get_category_display }}</strong>
-                                <span>{{ document.title }}</span>
+                                <strong>{{ payment.session.name }}</strong>
+                                <span>{{ payment.department.name }} | {{ payment.association_summary }} | {{ payment.total_amount }} | {{ payment.paid_at|date:"M d, Y H:i"|default:"-" }}</span>
                             </div>
-                            <a href="{% url 'portal:download-departmental-document' document.id %}" class="ghost-btn small">Download</a>
+                            <div class="message-list">
+                                {% for document in payment.documents.all %}
+                                    <div class="message-item shell">
+                                        <div>
+                                            <strong>{{ document.get_category_display }}</strong>
+                                            <span>{{ document.title }}</span>
+                                        </div>
+                                        <a href="{% url 'portal:download-departmental-document' document.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                        <a href="{% url 'portal:download-departmental-document' document.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
+                                    </div>
+                                {% empty %}
+                                    <p class="empty-text">No documents uploaded for this session.</p>
+                                {% endfor %}
+                            </div>
                         </div>
                     {% empty %}
-                        <p class="empty-text">No uploaded documents found for this student.</p>
+                        <p class="empty-text">No paid departmental sessions found for this student.</p>
                     {% endfor %}
                 </div>
             {% else %}

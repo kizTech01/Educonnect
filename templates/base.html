@@ -1,10 +1,11 @@
 {% load static %}
+{% static 'images/kiz-tech-logo.png' as fallback_logo %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}MAU EduConnect{% endblock %}</title>
+    <title>{% block title %}Educonnect{% endblock %}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -14,10 +15,14 @@
     <header class="site-header">
         <div class="container nav-shell">
             <a href="{% url 'portal:home' %}" class="brand-mark">
-                <img src="{% static 'images/sch-logo.png' %}" alt="MAU EduConnect logo">
+                {% if institution.logo %}
+                    <img src="{{ institution.logo.url }}" alt="{{ institution.name }} logo" onerror="this.onerror=null;this.src='{{ fallback_logo }}';">
+                {% else %}
+                    <img src="{{ fallback_logo }}" alt="{{ institution.name }} logo">
+                {% endif %}
                 <span>
-                    <strong>Modibbo Adama University</strong>
-                    <small>MAU EduConnect</small>
+                    <strong>{{ institution.name }}</strong>
+                    <small>Educonnect</small>
                 </span>
             </a>
             {% if request.user.is_authenticated %}
@@ -46,26 +51,12 @@
         <span class="scroll-top-icon" aria-hidden="true">&#8593;</span>
     </button>
 
-    <!-- <footer class="site-footer">
-        <div class="container footer-grid">
-            <div>
-                <h4>MAU EduConnect</h4>
-                <p>Built for universities to manage lecturers, course materials, student communication, and department resources from one place.</p>
-            </div>
-            <div>
-                <h4>Portal Areas</h4>
-                <p>Student dashboard, lecturer workspace, and admin management center.</p>
-            </div>
-            <div>
-                <h4>Design Direction</h4>
-                <p>Inspired by modern e-learning experiences with a brighter academic identity for EduConnect.</p>
-                {% if request.user.is_authenticated %}
-                    <p>Use the dashboard button in the header to return to your role workspace, or log out when you're done.</p>
-                {% endif %}
-            </div>
+    <footer class="site-footer" aria-label="Site credit">
+        <div class="container footer-credit">
+            <p>Educonnect <span class="footer-divider" aria-hidden="true">&mdash;</span> Designed by <strong>Kiz Tech</strong></p>
         </div>
-    </footer> -->
+    </footer>
 
-    <script src="{% static 'js/app.js' %}"></script>
+    <script src="{% static 'js/app.js' %}?v=20260831"></script>
 </body>
 </html>

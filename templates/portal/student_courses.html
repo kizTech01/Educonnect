@@ -8,6 +8,7 @@
         <div class="panel-head">
             <h2>Search Courses</h2>
         </div>
+        <p class="muted-note">Choose a department or level, or enter a search term, to view courses.</p>
         <form method="get" class="stack-form">
             <label>Department {{ filter_form.department }}</label>
             <label>Level {{ filter_form.level }}</label>
@@ -28,6 +29,7 @@
                     <th>Lecturer</th>
                     <th>Department</th>
                     <th>Level</th>
+                    <th>Group</th>
                     <th>Payment</th>
                     <th></th>
                 </tr>
@@ -42,6 +44,13 @@
                             <td>{{ row.registration.course.lecturer.full_name|default:"Pending assignment" }}</td>
                             <td>{{ row.registration.course.department.name }}</td>
                             <td>{{ row.registration.course.level }}</td>
+                            <td>
+                                {% if row.group_name %}
+                                    <span class="status-pill success">{{ row.group_name }}</span>
+                                {% else %}
+                                    <span class="muted-note">Not grouped</span>
+                                {% endif %}
+                            </td>
                             <td>
                                 {% if row.registration.course.is_free %}
                                     <span class="status-pill success">Free</span>
@@ -60,7 +69,8 @@
                                         <button type="submit" class="primary-btn small">Payment {{ row.display_amount }}</button>
                                     </form>
                                 {% elif row.can_download %}
-                                    <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small">Download</a>
+                                    <a href="{% url 'portal:download-course-file' row.registration.course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                    <a href="{% url 'portal:download-course-file' row.registration.course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                                 {% else %}
                                     <span class="status-pill success">{% if row.registration.course.is_free %}Free{% else %}Paid{% endif %}</span>
                                 {% endif %}
@@ -72,7 +82,7 @@
                         </tr>
                     {% empty %}
                         <tr>
-                            <td colspan="6">You have not registered any courses.</td>
+                            <td colspan="7">You have not registered any courses.</td>
                         </tr>
                     {% endfor %}
                 </tbody>
@@ -148,7 +158,7 @@
                     </tr>
                 {% empty %}
                     <tr>
-                        <td colspan="7">No courses match your current filters.</td>
+                        <td colspan="7">{% if catalog_is_filtered %}No courses match your current filters.{% else %}Use a filter or search to view available courses.{% endif %}</td>
                     </tr>
                 {% endfor %}
             </tbody>

@@ -1,0 +1,42 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}About Institution | Educonnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>Institution Details</h2></div>
+    <p class="muted-note">Save the institution name to refresh the verified official logo shown throughout the portal.</p>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        <label>{{ form.name.label }} {{ form.name }} {{ form.name.errors }}</label>
+        <button type="submit" class="primary-btn">Save Name and Refresh Official Logo</button>
+    </form>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Academic Sessions</h2>
+        {% if current_session %}<span class="status-pill success">Current: {{ current_session.name }}</span>{% endif %}
+    </div>
+    <p class="muted-note">Create a new session for departmental fees and student payments. Marking it current moves the existing current session to the past sessions list.</p>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="create-academic-session">
+        <label>{{ session_form.name.label }} {{ session_form.name }} {{ session_form.name.errors }}</label>
+        <label class="option-row">{{ session_form.is_current }} <span>Make this the current academic session</span></label>
+        {{ session_form.is_current.errors }}
+        <button type="submit" class="primary-btn">Create Academic Session</button>
+    </form>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>Past Sessions</h2></div>
+    <div class="message-list">
+        {% for session in past_sessions %}
+            <div class="message-item shell"><div><strong>{{ session.name }}</strong><span>Past academic session</span></div></div>
+        {% empty %}
+            <p class="empty-text">No past academic sessions yet.</p>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

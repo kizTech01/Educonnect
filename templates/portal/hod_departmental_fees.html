@@ -1,0 +1,51 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Set Departmental Fees | Educonnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>{{ department.name }} Fee Setup</h2>
+        <span class="status-pill success">{{ current_academic_session.name }}</span>
+    </div>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="create-association">
+        <p class="muted-note">Create an association that only students in {{ department.name }} will pay.</p>
+        <label>{{ association_form.name.label }} {{ association_form.name }} {{ association_form.name.errors }}</label>
+        <button type="submit" class="ghost-btn">Create New Association</button>
+    </form>
+    <div class="message-list association-list">
+        {% for code, fee in fee_map.items %}
+            {% if fee.association.department_id == department.id and not fee.association.is_constant %}
+                <div class="message-item shell">
+                    <div>
+                        <strong>{{ fee.association.name }}</strong>
+                        <span>Custom association for {{ department.name }}</span>
+                    </div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="action" value="delete-association">
+                        <input type="hidden" name="association_id" value="{{ fee.association.id }}">
+                        <button type="submit" class="danger-btn small">Delete Association</button>
+                    </form>
+                </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="update-fees">
+        <p class="muted-note">Set the fees students in {{ department.name }} pay for the current academic session.</p>
+        <div class="fee-grid">
+            {% for code, fee in fee_map.items %}
+                <label>
+                    {{ fee.association.name }}
+                    <input type="number" step="0.01" min="0" name="fee_{{ fee.association.id }}" value="{{ fee.amount }}" class="input-field">
+                </label>
+            {% endfor %}
+        </div>
+        <button type="submit" class="primary-btn">Save {{ current_academic_session.name }} Fees</button>
+    </form>
+</section>
+{% endblock %}

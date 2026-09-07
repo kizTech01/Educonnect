@@ -1,6 +1,6 @@
 {% extends 'portal/dashboard_base.html' %}
 
-{% block title %}{% if paid_courses_only %}Paid Courses{% else %}Register Courses{% endif %} | MAU EduConnect{% endblock %}
+{% block title %}{% if paid_courses_only %}Paid Courses{% else %}Register Courses{% endif %} | Educonnect{% endblock %}
 
 {% block dashboard_content %}
 {% if paid_courses_only %}
@@ -37,20 +37,30 @@
                         </td>
                         <td>
                             {% if course.file %}
-                                <a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small">Download</a>
+                                <a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                <a href="{% url 'portal:download-course-file' course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                             {% else %}
                                 <span class="table-cell-muted">No file uploaded</span>
                             {% endif %}
-                        </td>
+                            </td>
                             <td class="actions-cell">
-                                <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
-                                <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
-                                <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
-                                    {% csrf_token %}
-                                    <input type="hidden" name="action" value="remove-course">
-                                    <input type="hidden" name="course_id" value="{{ course.id }}">
-                                    <button type="submit" class="danger-btn small">Remove</button>
-                                </form>
+                                <div class="compact-course-actions">
+                                    <a href="{% url 'portal:lecturer-paid-course-student-search' course.id %}" class="primary-btn small">Students</a>
+                                    <details class="course-actions-menu">
+                                        <summary class="ghost-btn small"><span class="more-label">More</span><span class="less-label">Less</span></summary>
+                                        <div class="course-action-menu-items">
+                                            <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
+                                            <a href="{% url 'portal:lecturer-course-groups' course.id %}" class="ghost-btn small">Student Grouping</a>
+                                            <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit Course</a>
+                                            <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                                {% csrf_token %}
+                                                <input type="hidden" name="action" value="remove-course">
+                                                <input type="hidden" name="course_id" value="{{ course.id }}">
+                                                <button type="submit" class="danger-btn small">Remove Course</button>
+                                            </form>
+                                        </div>
+                                    </details>
+                                </div>
                             </td>
                     </tr>
                 {% empty %}
@@ -68,6 +78,7 @@
         <div class="panel-head">
             <h2>Search Course Catalog</h2>
         </div>
+        <p class="muted-note">Choose a department or level, or enter a search term, to view unassigned courses.</p>
         <form method="get" class="stack-form">
             <label>Department {{ filter_form.department }}</label>
             <label>Level {{ filter_form.level }}</label>
@@ -112,22 +123,34 @@
                             </td>
                             <td>
                                 {% if course.file %}
-                                    <a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small">Download</a>
+                                    <a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                                    <a href="{% url 'portal:download-course-file' course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                                 {% else %}
                                     <span class="table-cell-muted">No file uploaded</span>
                                 {% endif %}
                             </td>
                             <td class="actions-cell">
-                                {% if not course.is_free %}
-                                    <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
-                                {% endif %}
-                                <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
-                                <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
-                                    {% csrf_token %}
-                                    <input type="hidden" name="action" value="remove-course">
-                                    <input type="hidden" name="course_id" value="{{ course.id }}">
-                                    <button type="submit" class="danger-btn small">Remove</button>
-                                </form>
+                                <div class="compact-course-actions">
+                                    {% if not course.is_free %}
+                                        <a href="{% url 'portal:lecturer-paid-course-student-search' course.id %}" class="primary-btn small">Students</a>
+                                    {% endif %}
+                                    <details class="course-actions-menu">
+                                        <summary class="ghost-btn small"><span class="more-label">More</span><span class="less-label">Less</span></summary>
+                                        <div class="course-action-menu-items">
+                                            {% if not course.is_free %}
+                                                <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
+                                                <a href="{% url 'portal:lecturer-course-groups' course.id %}" class="ghost-btn small">Student Grouping</a>
+                                            {% endif %}
+                                            <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit Course</a>
+                                            <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                                {% csrf_token %}
+                                                <input type="hidden" name="action" value="remove-course">
+                                                <input type="hidden" name="course_id" value="{{ course.id }}">
+                                                <button type="submit" class="danger-btn small">Remove Course</button>
+                                            </form>
+                                        </div>
+                                    </details>
+                                </div>
                             </td>
                         </tr>
                     {% empty %}
@@ -185,7 +208,7 @@
                     </tr>
                 {% empty %}
                     <tr>
-                        <td colspan="6">No courses match your current filters.</td>
+                        <td colspan="6">{% if catalog_is_filtered %}No courses match your current filters.{% else %}Use a filter or search to view available courses.{% endif %}</td>
                     </tr>
                 {% endfor %}
             </tbody>

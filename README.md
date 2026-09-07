@@ -38,11 +38,34 @@ python manage.py migrate
 python manage.py runserver
 ```
 
+## Run with Docker (Windows)
+
+Install and open Docker Desktop first. From this project folder, run:
+
+```powershell
+docker compose up --build
+```
+
+When the command reports that Django is running, open
+`http://localhost:8000` in your browser.
+
+Docker runs database migrations automatically each time the app starts. Your
+project files, uploaded media, and local `db.sqlite3` database remain on your
+computer, so they are not lost when the container stops.
+
+To stop the app, return to the PowerShell window and press `Ctrl+C`. To start
+it again later, use:
+
+```powershell
+docker compose up
+```
+
 To create the first administrator, set `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` to strong, unique values before the first request. The portal never creates an administrator when either value is missing. The bootstrap password is only applied when that account is first created, so later password changes are preserved.
 
 ## Database notes
 
 - Leave `DB_ENGINE` unset to use SQLite locally.
+- If your local `.env` also contains a Render `DATABASE_URL`, set `DJANGO_USE_LOCAL_SQLITE=True` so local commands and tests keep using `db.sqlite3`.
 - Set `DB_ENGINE=mysql` to use MySQL.
 - `PyMySQL` is wired in through `config/__init__.py` so the project can connect to MySQL without extra adapter code.
 

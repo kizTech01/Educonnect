@@ -35,6 +35,20 @@
                 <h3>{{ selected_message.notification.subject }}</h3>
                 <p class="muted-note">From {{ selected_message.notification.sender.full_name }}</p>
                 <div class="reader-body">{{ selected_message.notification.body|linebreaks }}</div>
+                {% if selected_message.notification.attachment or selected_message.notification.attachments.all %}
+                    <div class="sent-message-meta">
+                        {% if selected_message.notification.attachment %}
+                            <span><strong>Attachment:</strong> {{ selected_message.notification.attachment.name|slice:"-60:" }}</span>
+                            <a href="{% url 'portal:download-message-attachment' selected_message.notification.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                            <a href="{% url 'portal:download-message-attachment' selected_message.notification.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
+                        {% endif %}
+                        {% for attachment in selected_message.notification.attachments.all %}
+                            <span><strong>Attachment:</strong> {{ attachment.file.name|slice:"-60:" }}</span>
+                            <a href="{% url 'portal:download-notification-attachment' attachment.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                            <a href="{% url 'portal:download-notification-attachment' attachment.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
+                        {% endfor %}
+                    </div>
+                {% endif %}
             </div>
         {% else %}
             <p class="empty-text">Select a message from your inbox to view it here.</p>

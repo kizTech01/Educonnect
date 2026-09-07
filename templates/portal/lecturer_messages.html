@@ -8,7 +8,7 @@
         <div class="panel-head">
             <h2>Send Message</h2>
         </div>
-        <form method="post" class="stack-form">
+        <form method="post" enctype="multipart/form-data" class="stack-form">
             {% csrf_token %}
             {{ form.as_p }}
             <button type="submit" class="primary-btn">Send Notification</button>
@@ -30,32 +30,50 @@
 <section class="panel-card">
     <div class="panel-head">
         <h2>Sent Messages</h2>
+        <span class="muted-note">Every message you have sent is shown here.</span>
     </div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Subject</th>
-                    <th>Level</th>
-                    <th>Recipients</th>
-                    <th>Date</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for notification in sent_notifications %}
-                    <tr>
-                        <td>{{ notification.subject }}</td>
-                        <td>{{ notification.level|default:"All levels" }}</td>
-                        <td>{{ notification.recipient_total }}</td>
-                        <td>{{ notification.created_at|date:"M d, Y H:i" }}</td>
-                    </tr>
-                {% empty %}
-                    <tr>
-                        <td colspan="4">No messages have been sent yet.</td>
-                    </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+    <div class="message-list sent-message-list">
+        {% for notification in sent_notifications %}
+            <article class="message-item shell sent-message">
+                <div class="sent-message-heading">
+                    <h3>{{ notification.subject }}</h3>
+                    <span>{{ notification.created_at|date:"M d, Y H:i" }}</span>
+                </div>
+                <p class="sent-message-body">{{ notification.body|linebreaksbr }}</p>
+                {% if notification.attachment or notification.attachments.all %}
+                    <div class="sent-message-meta">
+                        {% if notification.attachment %}
+                            <span><strong>Attachment:</strong> {{ notification.attachment.name|slice:"-60:" }}</span>
+                            <a href="{% url 'portal:download-message-attachment' notification.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                            <a href="{% url 'portal:download-message-attachment' notification.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
+                        {% endif %}
+                        {% for attachment in notification.attachments.all %}
+                            <span><strong>Attachment:</strong> {{ attachment.file.name|slice:"-60:" }}</span>
+                            <a href="{% url 'portal:download-notification-attachment' attachment.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                            <a href="{% url 'portal:download-notification-attachment' attachment.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+                <div class="sent-message-meta">
+                    <span><strong>Recipients:</strong> {{ notification.recipient_total }}</span>
+                    <span><strong>Level:</strong> {{ notification.level|default:"All levels" }}</span>
+                    {% with departments=notification.departments.all courses=notification.courses.all %}
+                        {% if departments %}
+                            <span><strong>Departments:</strong> {% for department in departments %}{{ department.name }}{% if not forloop.last %}, {% endif %}{% endfor %}</span>
+                        {% endif %}
+                        {% if courses %}
+                            <span><strong>Courses:</strong> {% for course in courses %}{{ course.code }}{% if not forloop.last %}, {% endif %}{% endfor %}</span>
+                        {% endif %}
+                    {% endwith %}
+                </div>
+                <form method="post" action="{% url 'portal:lecturer-message-delete' notification.id %}">
+                    {% csrf_token %}
+                    <button type="submit" class="danger-btn small">Delete Message</button>
+                </form>
+            </article>
+        {% empty %}
+            <p class="empty-text">No messages have been sent yet.</p>
+        {% endfor %}
     </div>
 </section>
 {% endblock %}

@@ -31,6 +31,7 @@
                         {% endif %}
                         {{ signup_form.id_number }} {{ signup_form.id_number.errors }}
                     </label>
+                    <label>Faculty {{ signup_form.faculty }} {{ signup_form.faculty.errors }}</label>
                     <label>Department {{ signup_form.department }} {{ signup_form.department.errors }}</label>
                     {% if is_student %}
                         <label>Level {{ signup_form.level }} {{ signup_form.level.errors }}</label>

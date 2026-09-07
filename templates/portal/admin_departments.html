@@ -10,6 +10,7 @@
         </div>
         <form method="post" class="stack-form" action="{% url 'portal:admin-departments' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
             {% csrf_token %}
+            <input type="hidden" name="action" value="create-department">
             {{ form.as_p }}
             <button type="submit" class="primary-btn">Create Department</button>
         </form>
@@ -34,8 +35,10 @@
             <thead>
                 <tr>
                     <th>Name</th>
+                    <th>Faculty</th>
                     <th>Code</th>
                     <th>Courses</th>
+                    <th>Automation files</th>
                     <th></th>
                 </tr>
             </thead>
@@ -43,9 +46,14 @@
                 {% for department in departments %}
                     <tr>
                         <td>{{ department.name }}</td>
+                        <td>{{ department.faculty.name }}</td>
                         <td>{{ department.code }}</td>
                         <td>{{ department.course_total }}</td>
                         <td class="actions-cell">
+                            <form method="post" enctype="multipart/form-data" action="{% url 'portal:admin-departments' %}">
+                                {% csrf_token %}<input type="hidden" name="action" value="upload-lecturers"><input type="hidden" name="department_id" value="{{ department.id }}">
+                                <label class="ghost-btn small">Add Department Lecturers <input type="file" name="file" required hidden onchange="this.form.submit()"></label>
+                            </form>
                             <form method="post" action="{% url 'portal:admin-delete-department' department.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                 {% csrf_token %}
                                 <button type="submit" class="danger-btn small">Delete</button>
@@ -54,7 +62,7 @@
                     </tr>
                 {% empty %}
                     <tr>
-                        <td colspan="4">No departments created yet.</td>
+                        <td colspan="6">No departments created yet.</td>
                     </tr>
                 {% endfor %}
             </tbody>

@@ -26,8 +26,30 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
-class Department(TimeStampedModel):
-    name = models.CharField(max_length=150)
+class InstitutionProfile(TimeStampedModel):
+    """The single, administrator-managed identity shown throughout the portal."""
+
+    name = models.CharField(max_length=200, default="Educonnect")
+    logo = models.FileField(
+        upload_to="institution/%Y/%m/", blank=True,
+        validators=[FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "svg", "webp"])],
+    )
+    website = models.URLField(blank=True)
+    email = models.EmailField(blank=True)
+
+    def save(self, *args, **kwargs):
+        # Keep this model intentionally singleton without relying on a magic PK.
+        if not self.pk and InstitutionProfile.objects.exists():
+            existing = InstitutionProfile.objects.first()
+            self.pk = existing.pk
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+
+class Faculty(TimeStampedModel):
+    name = models.CharField(max_length=150, unique=True)
     code = models.CharField(max_length=20, unique=True)
     description = models.TextField(blank=True)
 
@@ -36,6 +58,57 @@ class Department(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.code})"
+
+
+class Department(TimeStampedModel):
+    faculty = models.ForeignKey(Faculty, on_delete=models.PROTECT, related_name="departments")
+    head_of_department = models.OneToOneField(
+        "User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="headed_department",
+    )
+    name = models.CharField(max_length=150)
+    code = models.CharField(max_length=20, unique=True)
+    description = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def save(self, *args, **kwargs):
+        # Legacy integrations that create a department directly still receive a
+        # valid faculty; the admin workflow always asks for a real faculty.
+        if not self.faculty_id:
+            faculty, _ = Faculty.objects.get_or_create(
+                code="UNASSIGNED",
+                defaults={"name": "Unassigned Faculty", "description": "Departments awaiting faculty assignment."},
+            )
+            self.faculty = faculty
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+
+class DepartmentLecturerUpload(TimeStampedModel):
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="lecturer_uploads")
+    file = models.FileField(upload_to="department_uploads/lecturers/%Y/%m/")
+    uploaded_by = models.ForeignKey("User", on_delete=models.SET_NULL, null=True, related_name="lecturer_uploads")
+    processing_summary = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class CourseAllocationUpload(TimeStampedModel):
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="course_allocation_uploads")
+    file = models.FileField(upload_to="department_uploads/course_allocations/%Y/%m/")
+    uploaded_by = models.ForeignKey("User", on_delete=models.SET_NULL, null=True, related_name="course_allocation_uploads")
+    processing_summary = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class User(AbstractUser):
@@ -51,6 +124,14 @@ class User(AbstractUser):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="users",
+    )
+    curriculum = models.ForeignKey(
+        "Curriculum",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="students",
+        help_text="The curriculum assigned when this student joined their department.",
     )
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES, blank=True)
     id_number = models.CharField(max_length=30, unique=True, null=True, blank=True)
@@ -95,6 +176,20 @@ class Course(TimeStampedModel):
         SATURDAY = "Saturday", "Saturday"
 
     department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="courses")
+    academic_session = models.ForeignKey(
+        "AcademicSession",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="courses",
+    )
+    curriculum = models.ForeignKey(
+        "Curriculum",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="courses",
+    )
     lecturer = models.ForeignKey(
         User,
         null=True,
@@ -103,7 +198,7 @@ class Course(TimeStampedModel):
         related_name="teaching_courses",
         limit_choices_to={"role": User.Role.LECTURER},
     )
-    code = models.CharField(max_length=20, unique=True)
+    code = models.CharField(max_length=20)
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES)
@@ -118,6 +213,12 @@ class Course(TimeStampedModel):
 
     class Meta:
         ordering = ["code"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["department", "code", "academic_session"],
+                name="unique_department_session_course",
+            )
+        ]
 
     def clean(self):
         if self.amount and self.amount > 0:
@@ -128,6 +229,12 @@ class Course(TimeStampedModel):
             raise ValidationError({"amount": "Paid courses must have an amount greater than zero."})
 
     def save(self, *args, **kwargs):
+        if not self.academic_session_id:
+            self.academic_session = AcademicSession.objects.filter(is_current=True).first()
+        if not self.curriculum_id and self.department_id:
+            session = self.academic_session or AcademicSession.objects.filter(is_current=True).first()
+            if session:
+                self.curriculum = curriculum_for_department(self.department, session)
         self.full_clean()
         super().save(*args, **kwargs)
 
@@ -143,6 +250,13 @@ class StudentCourseRegistration(TimeStampedModel):
         limit_choices_to={"role": User.Role.STUDENT},
     )
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="student_registrations")
+    session = models.ForeignKey(
+        "AcademicSession",
+        on_delete=models.PROTECT,
+        related_name="student_course_registrations",
+        null=True,
+        blank=True,
+    )
     registered_by = models.ForeignKey(
         User,
         null=True,
@@ -154,11 +268,16 @@ class StudentCourseRegistration(TimeStampedModel):
     class Meta:
         ordering = ["course__code"]
         constraints = [
-            models.UniqueConstraint(fields=["student", "course"], name="unique_student_course_registration")
+            models.UniqueConstraint(fields=["student", "course", "session"], name="unique_student_course_registration")
         ]
         indexes = [
-            models.Index(fields=["student", "course"]),
+            models.Index(fields=["student", "course", "session"]),
         ]
+
+    def save(self, *args, **kwargs):
+        if not self.session_id:
+            self.session = AcademicSession.objects.filter(is_current=True).first()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.student.full_name} - {self.course.code}"
@@ -176,8 +295,17 @@ class CoursePayment(TimeStampedModel):
         limit_choices_to={"role": User.Role.STUDENT},
     )
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="payments")
+    session = models.ForeignKey(
+        "AcademicSession",
+        on_delete=models.PROTECT,
+        related_name="course_payments",
+        null=True,
+        blank=True,
+    )
     amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    enrollment_sequence = models.PositiveIntegerField(default=1)
+    is_active_for_registration = models.BooleanField(default=True)
     paystack_reference = models.CharField(max_length=64, blank=True, default="")
     paystack_public_key_used = models.CharField(max_length=255, blank=True)
     paystack_secret_key_used = models.CharField(max_length=255, blank=True)
@@ -186,7 +314,10 @@ class CoursePayment(TimeStampedModel):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
-            models.UniqueConstraint(fields=["student", "course"], name="unique_course_payment"),
+            models.UniqueConstraint(
+                fields=["student", "course", "session", "enrollment_sequence"],
+                name="unique_course_payment",
+            ),
         ]
 
     def clean(self):
@@ -208,6 +339,10 @@ class CoursePayment(TimeStampedModel):
         return self.course.is_free or self.is_paid
 
     def save(self, *args, **kwargs):
+        if not self.session_id:
+            current_session = AcademicSession.objects.filter(is_current=True).first()
+            if current_session:
+                self.session = current_session
         if self.course.is_free:
             self.amount = Decimal("0.00")
             self.status = self.Status.PAID
@@ -222,6 +357,42 @@ class CoursePayment(TimeStampedModel):
         return f"{self.student.full_name} - {self.course.code}"
 
 
+class CourseStudentGroup(TimeStampedModel):
+    class GroupingMethod(models.TextChoices):
+        DEPARTMENT = "department", "By department"
+        RANDOM = "random", "Random"
+
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="student_groups")
+    lecturer = models.ForeignKey(User, on_delete=models.CASCADE, related_name="course_student_groups")
+    session = models.ForeignKey("AcademicSession", on_delete=models.PROTECT, related_name="course_student_groups")
+    name = models.CharField(max_length=80)
+    grouping_method = models.CharField(max_length=20, choices=GroupingMethod.choices)
+    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True, related_name="course_student_groups")
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(fields=["course", "session", "name"], name="unique_course_student_group_name"),
+        ]
+
+    def __str__(self):
+        return f"{self.course.code} - {self.name}"
+
+
+class CourseStudentGroupMembership(TimeStampedModel):
+    group = models.ForeignKey(CourseStudentGroup, on_delete=models.CASCADE, related_name="memberships")
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name="course_group_memberships")
+
+    class Meta:
+        ordering = ["student__last_name", "student__first_name", "student__username"]
+        constraints = [
+            models.UniqueConstraint(fields=["group", "student"], name="unique_course_group_member"),
+        ]
+
+    def __str__(self):
+        return f"{self.group} - {self.student.full_name}"
+
+
 class LecturerCourseRegistration(TimeStampedModel):
     lecturer = models.ForeignKey(
         User,
@@ -234,12 +405,8 @@ class LecturerCourseRegistration(TimeStampedModel):
     class Meta:
         ordering = ["course__code"]
         constraints = [
-            models.UniqueConstraint(fields=["course"], name="unique_lecturer_course_registration")
+            models.UniqueConstraint(fields=["lecturer", "course"], name="unique_lecturer_course_registration")
         ]
-
-    def clean(self):
-        if self.course.lecturer_id and self.course.lecturer_id != self.lecturer_id:
-            raise ValidationError("Only the lecturer assigned to a course can register it for management.")
 
     def __str__(self):
         return f"{self.lecturer.full_name} - {self.course.code}"
@@ -344,6 +511,7 @@ class Notification(TimeStampedModel):
     sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name="sent_notifications")
     subject = models.CharField(max_length=180)
     body = models.TextField()
+    attachment = models.FileField(upload_to="message_attachments/%Y/%m/", blank=True)
     departments = models.ManyToManyField(Department, blank=True, related_name="notifications")
     level = models.CharField(max_length=20, blank=True)
     courses = models.ManyToManyField(Course, blank=True, related_name="notifications")
@@ -353,6 +521,21 @@ class Notification(TimeStampedModel):
 
     def __str__(self):
         return self.subject
+
+
+class NotificationAttachment(TimeStampedModel):
+    notification = models.ForeignKey(
+        Notification,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+    )
+    file = models.FileField(upload_to="message_attachments/%Y/%m/")
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+    def __str__(self):
+        return self.file.name.rsplit("/", 1)[-1]
 
 
 class NotificationRecipient(TimeStampedModel):
@@ -413,6 +596,28 @@ class DepartmentPaymentGateway(TimeStampedModel):
         return bool(self.paystack_public_key and self.paystack_secret_key)
 
 
+class DepartmentCoursePaymentGateway(TimeStampedModel):
+    """Paystack credentials for paid courses belonging to one department."""
+
+    department = models.OneToOneField(
+        Department,
+        on_delete=models.CASCADE,
+        related_name="course_payment_gateway",
+    )
+    paystack_public_key = models.CharField(max_length=255, blank=True)
+    paystack_secret_key = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["department__name"]
+
+    def __str__(self):
+        return f"{self.department.name} Course Paystack Settings"
+
+    @property
+    def is_configured(self):
+        return bool(self.paystack_public_key and self.paystack_secret_key)
+
+
 class AcademicSession(TimeStampedModel):
     name = models.CharField(max_length=20, unique=True)
     is_current = models.BooleanField(default=False)
@@ -429,13 +634,86 @@ class AcademicSession(TimeStampedModel):
         return self.name
 
 
+class Curriculum(TimeStampedModel):
+    """A department's course version, introduced by a handbook for one session."""
+
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="curricula")
+    effective_session = models.ForeignKey(
+        AcademicSession,
+        on_delete=models.PROTECT,
+        related_name="curricula",
+    )
+
+    class Meta:
+        ordering = ["department__name", "-effective_session__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["department", "effective_session"],
+                name="unique_department_curriculum_session",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.department.code} curriculum ({self.effective_session.name})"
+
+
+def curriculum_for_department(department, session=None):
+    """Return the curriculum in force for a department in a given session.
+
+    A new academic session does not create a curriculum by itself.  The most
+    recent handbook curriculum remains in force until that department uploads
+    a replacement handbook.
+    """
+    if not department:
+        return None
+    session = session or AcademicSession.objects.filter(is_current=True).first()
+    if not session:
+        return None
+
+    curriculum = Curriculum.objects.filter(
+        department=department,
+        effective_session=session,
+    ).first()
+    if curriculum:
+        return curriculum
+
+    curriculum = Curriculum.objects.filter(
+        department=department,
+        effective_session__name__lte=session.name,
+    ).order_by("-effective_session__name", "-created_at").first()
+    if curriculum:
+        return curriculum
+
+    # This is the one-time compatibility path for a department that already
+    # has courses but has not uploaded its first handbook in the portal.
+    curriculum, _ = Curriculum.objects.get_or_create(
+        department=department,
+        effective_session=session,
+    )
+    Course.objects.filter(department=department, curriculum__isnull=True).update(curriculum=curriculum)
+    return curriculum
+
+
 class DepartmentalAssociation(TimeStampedModel):
-    name = models.CharField(max_length=120, unique=True)
-    code = models.SlugField(max_length=50, unique=True)
+    # Constant associations are shared (department is null); custom
+    # associations belong to exactly one department.
+    department = models.ForeignKey(
+        Department,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="departmental_associations",
+    )
+    name = models.CharField(max_length=120)
+    code = models.SlugField(max_length=50)
     is_constant = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["created_at", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["department", "name"], name="unique_department_association_name"),
+            models.UniqueConstraint(fields=["department", "code"], name="unique_department_association_code"),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.code:
@@ -530,7 +808,10 @@ class DepartmentalPaymentDocument(TimeStampedModel):
     class Category(models.TextChoices):
         WHITE_FORM = "white_form", "White Form"
         SCHOOL_RECEIPT = "school_receipt", "School Receipt"
-        SUPPORTING = "supporting", "Supporting Document"
+        # Keep the stored value stable so existing uploaded documents retain
+        # their category when the label is renamed.
+        MEDICAL_FITNESS = "supporting", "Medical fitness"
+        ADDITIONAL = "additional", "Additional Document"
 
     payment = models.ForeignKey(DepartmentalPayment, on_delete=models.CASCADE, related_name="documents")
     category = models.CharField(max_length=20, choices=Category.choices)

@@ -60,7 +60,8 @@
                         <td>{{ material.lecturer.full_name|default:"-" }}</td>
                         <td>{% if material.is_free %}Free{% else %}{{ material.amount }}{% endif %}</td>
                         <td class="actions-cell">
-                            <a href="{% url 'portal:download-material' material.id %}" class="ghost-btn small">Download</a>
+                            <a href="{% url 'portal:download-material' material.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
+                            <a href="{% url 'portal:download-material' material.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
                             <form method="post" action="{% url 'portal:admin-delete-material' material.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                 {% csrf_token %}
                                 <button type="submit" class="danger-btn small">Delete</button>

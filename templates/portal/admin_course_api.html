@@ -1,6 +1,6 @@
 {% extends 'portal/dashboard_base.html' %}
 
-{% block title %}Course API | MAU EduConnect{% endblock %}
+{% block title %}Course API | Educonnect{% endblock %}
 
 {% block dashboard_content %}
 <section class="panel-card">
@@ -10,7 +10,7 @@
     <form method="post" class="stack-form">
         {% csrf_token %}
         <input type="hidden" name="action" value="save-course-gateway">
-        <p class="muted-note">All paid courses use the Paystack keys saved here by an admin. If either key is blank, course payment checkout will stop until both are saved.</p>
+        <p class="muted-note">This is the site-wide fallback for paid courses. An HOD can set department-specific keys in API and Document; those keys take priority for paid courses in that department.</p>
         <label>Public key
             {{ gateway_form.paystack_public_key }}
             {{ gateway_form.paystack_public_key.errors }}

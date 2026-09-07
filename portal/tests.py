@@ -20,17 +20,25 @@ from django.utils.datastructures import MultiValueDict
 from .models import (
     AcademicSession,
     Course,
+    CourseAllocationUpload,
     CoursePayment,
     CoursePaymentGateway,
+    CourseStudentGroup,
+    CourseStudentGroupMembership,
     CourseReminderDispatch,
     CourseMaterial,
     Department,
+    DepartmentLecturerUpload,
     DepartmentPaymentGateway,
+    DepartmentCoursePaymentGateway,
     DepartmentalAssociation,
     DepartmentalFee,
     DepartmentalPayment,
+    Handbook,
+    InstitutionProfile,
     MaterialAccess,
     Notification,
+    NotificationAttachment,
     NotificationRecipient,
     LecturerCourseRegistration,
     StudentCourseRegistration,
@@ -44,6 +52,185 @@ from .services import (
     ensure_default_admin_user,
 )
 from .views import sidebar_links
+from .automation import import_course_allocations, import_department_lecturers
+
+
+class DepartmentAutomationTests(TestCase):
+    def setUp(self):
+        self.department = Department.objects.create(name="Computer Science", code="CSC")
+        self.course = Course.objects.create(
+            department=self.department,
+            code="CSC508",
+            title="Structured Programming",
+            level="500",
+            semester="second",
+        )
+        self.continuation_course = Course.objects.create(
+            department=self.department,
+            code="CSC510",
+            title="System Modelling",
+            level="500",
+            semester="second",
+        )
+
+    def test_allocation_upload_registers_the_matched_department_lecturer(self):
+        lecturer_upload = DepartmentLecturerUpload.objects.create(
+            department=self.department,
+            file=SimpleUploadedFile(
+                "lecturers.csv",
+                b"Lecturer ID,Lecturer Name,Phone Number\nLEC-CS-001,Prof. E. J. Garba,08030000001\nLEC-CS-002,Dr. K. O. Oluborode,08030000002\n",
+                content_type="text/csv",
+            ),
+        )
+
+        self.assertIn("2 accounts created", import_department_lecturers(lecturer_upload))
+        lecturer = User.objects.get(username="LEC-CS-001")
+        co_lecturer = User.objects.get(username="LEC-CS-002")
+        self.assertEqual(lecturer.department, self.department)
+
+        allocation_upload = CourseAllocationUpload.objects.create(
+            department=self.department,
+            file=SimpleUploadedFile(
+                "allocation.csv",
+                b"LECTURER,CODE,COURSE TITLE,UNIT\nE. J. Garba,CSC508(E),Structured Programming,3\n,CSC510,System Modelling,3\nDr. K. O. Oluborode,CSC508,Structured Programming,3\n,CSC424,Distributed Computing,3\n",
+                content_type="text/csv",
+            ),
+        )
+
+        self.assertIn("4 allocations assigned", import_course_allocations(allocation_upload))
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.lecturer, lecturer)
+
+
+        self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=lecturer, course=self.course).exists())
+        self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=lecturer, course=self.continuation_course).exists())
+        self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=co_lecturer, course=self.course).exists())
+        created_course = Course.objects.get(code="CSC424")
+        self.assertEqual(created_course.level, "400")
+        self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=co_lecturer, course=created_course).exists())
+
+    def test_scanned_allocation_uses_vision_records(self):
+        lecturer = User.objects.create_user(
+            username="LEC-CS-001",
+            password="password",
+            role=User.Role.LECTURER,
+            department=self.department,
+            first_name="Prof.",
+            last_name="E. J. Garba",
+        )
+        allocation_upload = CourseAllocationUpload.objects.create(
+            department=self.department,
+            file=SimpleUploadedFile("allocation.jpg", b"image-bytes", content_type="image/jpeg"),
+        )
+
+        with patch("portal.automation._ai_extract_image", return_value=[
+            {"lecturer_name": "Prof. E. J. Garba", "course_code": "CSC508"},
+        ]):
+            self.assertIn("1 allocations assigned", import_course_allocations(allocation_upload))
+
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.lecturer, lecturer)
+
+
+class CurriculumCohortTests(TestCase):
+    def setUp(self):
+        self.department = Department.objects.create(name="Computer Science", code="CSC")
+        self.old_session = AcademicSession.objects.create(name="2040/2041", is_current=True)
+
+    def upload_handbook(self, session, content):
+        handbook = Handbook.objects.create(
+            department=self.department,
+            title="Computer Science Handbook",
+            academic_session=session.name,
+            file=SimpleUploadedFile("handbook.txt", content, content_type="text/plain"),
+        )
+        from .automation import import_handbook_courses
+
+        import_handbook_courses(handbook)
+        return handbook
+
+    def create_student(self, username, curriculum=None):
+        return User.objects.create_user(
+            username=username,
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=self.department,
+            curriculum=curriculum,
+            level="100",
+            id_number=f"ID-{username}",
+            email=f"{username}@example.com",
+        )
+
+    def test_new_handbook_only_changes_curriculum_for_new_students(self):
+        self.upload_handbook(self.old_session, b"CSC101 Old Foundations 100 2 units")
+        old_curriculum = self.department.curricula.get(effective_session=self.old_session)
+        returning_student = self.create_student("returning", curriculum=old_curriculum)
+
+        new_session = AcademicSession.objects.create(name="2041/2042", is_current=True)
+        self.upload_handbook(new_session, b"CSC101 New Foundations 100 3 units")
+        new_curriculum = self.department.curricula.get(effective_session=new_session)
+        self.assertNotEqual(old_curriculum, new_curriculum)
+
+        response = self.client.post(
+            reverse("portal:student-signup"),
+            {
+                "username": "freshstudent",
+                "first_name": "Fresh",
+                "last_name": "Student",
+                "email": "freshstudent@example.com",
+                "id_number": "STU-FRESH",
+                "department": self.department.id,
+                "level": "100",
+                "phone_number": "08000000000",
+                "password1": "pass1234",
+                "password2": "pass1234",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        new_student = User.objects.get(username="freshstudent")
+        self.assertEqual(new_student.curriculum, new_curriculum)
+
+        self.client.force_login(returning_student)
+        returning_catalog = self.client.get(reverse("portal:student-courses"), {"search": "CSC101"})
+        self.assertContains(returning_catalog, "Old Foundations")
+        self.assertNotContains(returning_catalog, "New Foundations")
+
+        self.client.force_login(new_student)
+        new_catalog = self.client.get(reverse("portal:student-courses"), {"search": "CSC101"})
+        self.assertContains(new_catalog, "New Foundations")
+        self.assertNotContains(new_catalog, "Old Foundations")
+
+        old_course = old_curriculum.courses.get(code="CSC101")
+        blocked_registration = self.client.post(
+            reverse("portal:student-courses"),
+            {"action": "register-course", "course_id": old_course.id},
+        )
+        self.assertEqual(blocked_registration.status_code, 404)
+
+    def test_latest_handbook_stays_in_force_when_a_new_session_has_none(self):
+        self.upload_handbook(self.old_session, b"CSC102 Continuing Curriculum 100 2 units")
+        old_curriculum = self.department.curricula.get(effective_session=self.old_session)
+        AcademicSession.objects.create(name="2041/2042", is_current=True)
+
+        response = self.client.post(
+            reverse("portal:student-signup"),
+            {
+                "username": "newwithoutreplacement",
+                "first_name": "New",
+                "last_name": "Student",
+                "email": "newwithoutreplacement@example.com",
+                "id_number": "STU-CONTINUING",
+                "department": self.department.id,
+                "level": "100",
+                "phone_number": "08000000000",
+                "password1": "pass1234",
+                "password2": "pass1234",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        student = User.objects.get(username="newwithoutreplacement")
+        self.assertEqual(student.curriculum, old_curriculum)
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -99,6 +286,11 @@ class DashboardAndCourseFlowTests(TestCase):
         )
         CoursePaymentGateway.objects.create(
             slug="courses",
+            paystack_public_key="pk_test_course",
+            paystack_secret_key="sk_test_course",
+        )
+        DepartmentCoursePaymentGateway.objects.create(
+            department=self.department,
             paystack_public_key="pk_test_course",
             paystack_secret_key="sk_test_course",
         )
@@ -233,6 +425,101 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "White Form")
         self.assertContains(response, reverse("portal:download-departmental-document", args=[payment.documents.first().id]))
 
+    def test_staff_student_view_includes_all_paid_departmental_sessions_and_documents(self):
+        from .models import DepartmentalPaymentDocument
+
+        past_session = AcademicSession.objects.create(name="2025/2026", is_current=False)
+        past_payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=past_session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("3500.00"),
+            association_summary="Departmental Fee, ACF",
+        )
+        current_payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+            association_summary="Departmental Fee, MSSN",
+        )
+        past_document = DepartmentalPaymentDocument.objects.create(
+            payment=past_payment,
+            category=DepartmentalPaymentDocument.Category.MEDICAL_FITNESS,
+            title="medical-fitness.pdf",
+            file=SimpleUploadedFile("medical-fitness.pdf", b"medical", content_type="application/pdf"),
+        )
+        current_document = DepartmentalPaymentDocument.objects.create(
+            payment=current_payment,
+            category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="white.pdf",
+            file=SimpleUploadedFile("white.pdf", b"white", content_type="application/pdf"),
+        )
+
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("portal:admin-departmental-download"), {"payment": current_payment.id})
+
+        self.assertContains(response, past_session.name)
+        self.assertContains(response, self.session.name)
+        self.assertContains(response, "Medical fitness")
+        self.assertContains(response, reverse("portal:download-departmental-document", args=[past_document.id]))
+        self.assertContains(response, reverse("portal:download-departmental-document", args=[current_document.id]))
+
+        self.client.force_login(self.lecturer)
+        lecturer_response = self.client.get(reverse("portal:lecturer-departmental"), {"payment": current_payment.id})
+
+        self.assertContains(lecturer_response, past_session.name)
+        self.assertContains(lecturer_response, reverse("portal:download-departmental-document", args=[past_document.id]))
+
+    def test_paid_student_can_upload_additional_departmental_documents(self):
+        from .models import DepartmentalPaymentDocument
+
+        payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+            association_summary="Departmental Fee, ACF",
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.post(
+            reverse("portal:student-departmental"),
+            {
+                "action": "add-documents",
+                "additional_documents": [
+                    SimpleUploadedFile("extra-one.pdf", b"one", content_type="application/pdf"),
+                    SimpleUploadedFile("extra-two.pdf", b"two", content_type="application/pdf"),
+                ],
+            },
+        )
+
+        self.assertRedirects(response, reverse("portal:student-departmental"))
+        self.assertEqual(
+            DepartmentalPaymentDocument.objects.filter(
+                payment=payment,
+                category=DepartmentalPaymentDocument.Category.ADDITIONAL,
+            ).count(),
+            2,
+        )
+
+    def test_admin_cannot_create_a_departmental_association(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            f'{reverse("portal:admin-departmental-fees")}?department={self.department.id}',
+            {
+                "action": "create-association",
+                "department_id": self.department.id,
+                "name": "Computer Society Levy",
+            },
+        )
+
+        self.assertRedirects(response, f'{reverse("portal:admin-departmental-fees")}?department={self.department.id}')
+        self.assertFalse(DepartmentalAssociation.objects.filter(name="Computer Society Levy").exists())
+
     def test_registered_paid_course_without_payment_shows_pay_even_without_file(self):
         paid_course_without_file = Course.objects.create(
             department=self.department,
@@ -285,7 +572,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(remove_response.status_code, 302)
         self.assertFalse(StudentCourseRegistration.objects.filter(student=self.student, course=self.paid_course).exists())
 
-        page_response = self.client.get(reverse("portal:student-courses"))
+        page_response = self.client.get(reverse("portal:student-courses"), {"search": self.paid_course.code})
         self.assertContains(page_response, self.paid_course.code)
         self.assertContains(page_response, 'name="action" value="register-course"', html=False)
         self.assertNotContains(page_response, 'name="action" value="pay-course"', html=False)
@@ -430,7 +717,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertIsNone(self.paid_course.lecturer)
         self.assertFalse(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer, course=self.paid_course).exists())
 
-        page_response = self.client.get(reverse("portal:lecturer-courses"))
+        page_response = self.client.get(reverse("portal:lecturer-courses"), {"search": self.paid_course.code})
         self.assertContains(page_response, self.paid_course.code)
         self.assertContains(page_response, 'name="action" value="register-course"', html=False)
 
@@ -480,17 +767,209 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertNotIn("View Courses", labels)
 
-    def test_admin_menu_shows_course_api_label(self):
+    def test_admin_menu_does_not_show_course_api_label(self):
         request = self.factory.get(reverse("portal:admin-dashboard"))
         request.user = self.admin
         request.resolver_match = None
 
         labels = [item["label"] for item in sidebar_links(request)]
 
-        self.assertIn("Course API", labels)
+        self.assertNotIn("Course API", labels)
         self.assertIn("Departmental", labels)
         departmental_link = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
-        self.assertFalse(any(child["label"] == "Users" for child in departmental_link["children"]))
+        self.assertEqual(
+            [child["label"] for child in departmental_link["children"]],
+            ["View APIs", "View Fees", "Students"],
+        )
+
+    def test_admin_can_search_departments_and_assign_an_hod(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.get(
+            reverse("portal:admin-hods"),
+            {"search": "computer", "department": self.department.id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.department.name)
+        self.assertContains(response, self.lecturer.full_name)
+
+        response = self.client.post(
+            reverse("portal:admin-hods"),
+            {
+                "action": "assign-hod",
+                "department_id": self.department.id,
+                "lecturer_id": self.lecturer.id,
+            },
+        )
+
+        self.assertRedirects(response, f'{reverse("portal:admin-hods")}?department={self.department.id}')
+        self.department.refresh_from_db()
+        self.assertEqual(self.department.head_of_department, self.lecturer)
+
+        request = self.factory.get(reverse("portal:lecturer-dashboard"))
+        request.user = self.lecturer
+        request.resolver_match = None
+        departmental_link = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
+        labels = [child["label"] for child in departmental_link["children"]]
+        self.assertIn("API and Document", labels)
+        self.assertIn("Set Fee", labels)
+        self.assertNotIn("Payment API", labels)
+
+    def test_only_assigned_hod_can_update_its_departmental_api_and_fees(self):
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        first_fee = DepartmentalFee.objects.filter(
+            session=self.session,
+            department=self.department,
+        ).select_related("association").first()
+        self.client.force_login(self.lecturer)
+
+        api_response = self.client.post(
+            reverse("portal:hod-api-and-document"),
+            {"paystack_public_key": "pk_hod", "paystack_secret_key": "sk_hod"},
+        )
+        self.assertRedirects(api_response, reverse("portal:hod-api-and-document"))
+        gateway = DepartmentPaymentGateway.objects.get(department=self.department)
+        self.assertEqual(gateway.paystack_public_key, "pk_hod")
+        self.assertEqual(gateway.paystack_secret_key, "sk_hod")
+
+        api_and_document_response = self.client.get(reverse("portal:hod-api-and-document"))
+        self.assertContains(api_and_document_response, "Course Allocation Document")
+        self.assertContains(api_and_document_response, "Add Course Allocation")
+        self.assertContains(api_and_document_response, "Department Handbook")
+        self.assertContains(api_and_document_response, "Upload Handbook")
+
+        course_api_response = self.client.post(
+            reverse("portal:hod-api-and-document"),
+            {
+                "action": "save-course-gateway",
+                "paystack_public_key": "pk_course_hod",
+                "paystack_secret_key": "sk_course_hod",
+            },
+        )
+        self.assertRedirects(course_api_response, reverse("portal:hod-api-and-document"))
+        course_gateway = DepartmentCoursePaymentGateway.objects.get(department=self.department)
+        self.assertEqual(course_gateway.paystack_public_key, "pk_course_hod")
+        self.assertEqual(course_gateway.paystack_secret_key, "sk_course_hod")
+
+        allocation_response = self.client.post(
+            reverse("portal:hod-api-and-document"),
+            {
+                "action": "upload-allocations",
+                "file": SimpleUploadedFile(
+                    "allocation.csv",
+                    b"lecturer_name,course_code\nAda Lecturer,CSC101\n",
+                    content_type="text/csv",
+                ),
+            },
+        )
+        self.assertRedirects(allocation_response, reverse("portal:hod-api-and-document"))
+        self.assertTrue(
+            CourseAllocationUpload.objects.filter(
+                department=self.department,
+                uploaded_by=self.lecturer,
+            ).exists()
+        )
+
+        handbook_response = self.client.post(
+            reverse("portal:hod-api-and-document"),
+            {
+                "action": "upload-handbook",
+                "file": SimpleUploadedFile(
+                    "handbook.txt",
+                    b"CSC101 Introduction to Computing 100 2 units",
+                    content_type="text/plain",
+                ),
+            },
+        )
+        self.assertRedirects(handbook_response, reverse("portal:hod-api-and-document"))
+        self.assertTrue(Handbook.objects.filter(department=self.department).exists())
+
+        fee_response = self.client.post(
+            reverse("portal:hod-departmental-fees"),
+            {
+                f"fee_{fee.association_id}": "5500.00" if fee.pk == first_fee.pk else str(fee.amount)
+                for fee in DepartmentalFee.objects.filter(session=self.session, department=self.department)
+            },
+        )
+        self.assertRedirects(fee_response, reverse("portal:hod-departmental-fees"))
+        first_fee.refresh_from_db()
+        self.assertEqual(first_fee.amount, Decimal("5500.00"))
+
+        non_hod = User.objects.create_user(
+            username="non-hod",
+            password="pass1234",
+            role=User.Role.LECTURER,
+            department=self.department,
+            is_approved=True,
+        )
+        self.client.force_login(non_hod)
+        self.assertEqual(self.client.get(reverse("portal:hod-api-and-document")).status_code, 403)
+        self.assertEqual(self.client.get(reverse("portal:hod-departmental-fees")).status_code, 403)
+
+    def test_hod_can_create_a_department_specific_association_from_set_fees(self):
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        self.client.force_login(self.lecturer)
+
+        response = self.client.post(
+            reverse("portal:hod-departmental-fees"),
+            {"action": "create-association", "name": "Computer Society Levy"},
+        )
+
+        self.assertRedirects(response, reverse("portal:hod-departmental-fees"))
+        association = DepartmentalAssociation.objects.get(
+            department=self.department,
+            name="Computer Society Levy",
+        )
+        self.assertFalse(association.is_constant)
+        self.assertTrue(
+            DepartmentalFee.objects.filter(
+                session=self.session,
+                department=self.department,
+                association=association,
+            ).exists()
+        )
+
+        delete_response = self.client.post(
+            reverse("portal:hod-departmental-fees"),
+            {"action": "delete-association", "association_id": association.id},
+        )
+        self.assertRedirects(delete_response, reverse("portal:hod-departmental-fees"))
+        self.assertFalse(DepartmentalAssociation.objects.filter(pk=association.id).exists())
+
+    def test_lecturers_and_hods_can_download_handbooks(self):
+        handbook = Handbook.objects.create(
+            department=self.department,
+            title="Computer Science Handbook",
+            academic_session="2026/2027",
+            file=SimpleUploadedFile("handbook.pdf", b"handbook", content_type="application/pdf"),
+        )
+
+        self.client.force_login(self.lecturer)
+        lecturer_response = self.client.get(reverse("portal:lecturer-documents"))
+        handbook_url = reverse("portal:download-document", args=["handbook", handbook.id])
+        self.assertContains(lecturer_response, handbook_url)
+        self.assertEqual(self.client.get(f"{handbook_url}?download=1").status_code, 200)
+
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        hod_response = self.client.get(reverse("portal:lecturer-documents"))
+        self.assertContains(hod_response, handbook.title)
+
+    def test_admin_departmental_fee_post_is_read_only(self):
+        fee = DepartmentalFee.objects.filter(session=self.session, department=self.department).first()
+        self.client.force_login(self.admin)
+
+        response = self.client.post(
+            f'{reverse("portal:admin-departmental-fees")}?department={self.department.id}',
+            {"action": "update-session-fees", f"fee_{fee.association_id}": "9000.00"},
+        )
+
+        self.assertRedirects(response, f'{reverse("portal:admin-departmental-fees")}?department={self.department.id}')
+        fee.refresh_from_db()
+        self.assertNotEqual(fee.amount, Decimal("9000.00"))
 
     def test_admin_dashboard_shows_pending_lecturer_id(self):
         pending_lecturer = User.objects.create_user(
@@ -546,6 +1025,211 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertIn("paid-students.pdf", response["Content-Disposition"])
 
+    def test_lecturer_can_search_paid_course_student_by_id(self):
+        CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+
+        self.client.force_login(self.lecturer)
+        response = self.client.get(
+            reverse("portal:lecturer-paid-course-student-search", args=[self.paid_course.id]),
+            {"student_id": self.student.id_number},
+        )
+
+        self.assertContains(response, self.student.full_name)
+        self.assertContains(response, self.student.id_number)
+        self.assertContains(response, str(self.paid_course.amount))
+
+    def test_paid_course_search_starts_empty_for_a_new_session(self):
+        CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+        new_session = AcademicSession.objects.create(name="2027/2028", is_current=True)
+
+        self.client.force_login(self.lecturer)
+        response = self.client.get(
+            reverse("portal:lecturer-paid-course-student-search", args=[self.paid_course.id]),
+            {"student_id": self.student.id_number},
+        )
+
+        self.assertContains(response, new_session.name)
+        self.assertContains(response, "No paid student was found")
+        self.assertNotContains(response, self.student.full_name)
+
+    def test_updating_student_level_clears_course_registrations(self):
+        self.student.level = "100"
+        self.student.save(update_fields=["level"])
+        StudentCourseRegistration.objects.create(student=self.student, course=self.free_course, registered_by=self.student)
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+
+        self.client.force_login(self.student)
+        response = self.client.post(
+            reverse("portal:profile"),
+            {
+                "username": self.student.username,
+                "first_name": self.student.first_name,
+                "last_name": self.student.last_name,
+                "email": self.student.email,
+                "id_number": self.student.id_number,
+                "department": self.department.id,
+                "level": "200",
+                "phone_number": self.student.phone_number,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(StudentCourseRegistration.objects.filter(student=self.student).exists())
+
+    def test_level_change_requires_a_new_payment_before_paid_course_reregistration(self):
+        self.student.level = "100"
+        self.student.save(update_fields=["level"])
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        original_payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+
+        self.client.force_login(self.student)
+        self.client.post(
+            reverse("portal:profile"),
+            {
+                "username": self.student.username,
+                "first_name": self.student.first_name,
+                "last_name": self.student.last_name,
+                "email": self.student.email,
+                "id_number": self.student.id_number,
+                "department": self.department.id,
+                "level": "200",
+                "phone_number": self.student.phone_number,
+            },
+        )
+
+        original_payment.refresh_from_db()
+        self.assertFalse(original_payment.is_active_for_registration)
+        page_response = self.client.get(reverse("portal:student-courses"))
+        self.assertContains(page_response, 'name="action" value="pay-course"', html=False)
+
+    def test_new_academic_session_requires_payment_before_paid_course_reregistration(self):
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+        AcademicSession.objects.create(name="2027/2028", is_current=True)
+
+        self.client.force_login(self.student)
+        page_response = self.client.get(reverse("portal:student-courses"))
+
+        self.assertContains(page_response, 'name="action" value="pay-course"', html=False)
+        self.assertNotContains(page_response, "Already registered")
+
+    def test_lecturer_can_create_random_paid_student_groups_and_download_one_group(self):
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+
+        self.client.force_login(self.lecturer)
+        response = self.client.post(
+            reverse("portal:lecturer-course-groups", args=[self.paid_course.id]),
+            {"enable_grouping": "on", "grouping_method": "random", "group_names": "A1, A2"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        groups = CourseStudentGroup.objects.filter(course=self.paid_course, session=self.session)
+        self.assertEqual(set(groups.values_list("name", flat=True)), {"A1", "A2"})
+        membership = CourseStudentGroupMembership.objects.get(student=self.student)
+        self.client.force_login(self.student)
+        student_page = self.client.get(reverse("portal:student-courses"))
+        self.assertContains(student_page, membership.group.name)
+
+        later_student = User.objects.create_user(
+            username="later-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=self.department,
+            id_number="STU-002",
+        )
+        CoursePayment.objects.create(
+            student=later_student,
+            course=self.paid_course,
+            session=self.session,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+        self.client.force_login(later_student)
+        self.client.post(
+            reverse("portal:student-courses"),
+            {"action": "register-course", "course_id": self.paid_course.id},
+        )
+        later_membership = CourseStudentGroupMembership.objects.get(student=later_student)
+        later_student_page = self.client.get(reverse("portal:student-courses"))
+        self.assertContains(later_student_page, later_membership.group.name)
+
+        self.client.force_login(self.lecturer)
+        pdf_response = self.client.get(
+            reverse("portal:lecturer-paid-course-students-pdf", args=[self.paid_course.id]),
+            {"group": membership.group_id},
+        )
+        self.assertEqual(pdf_response.status_code, 200)
+        self.assertEqual(pdf_response["Content-Type"], "application/pdf")
+
+    def test_lecturer_can_leave_grouping_off_and_still_download_paid_student_ids(self):
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+        )
+
+        self.client.force_login(self.lecturer)
+        response = self.client.post(reverse("portal:lecturer-course-groups", args=[self.paid_course.id]), {})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(CourseStudentGroup.objects.filter(course=self.paid_course, session=self.session).exists())
+        pdf_response = self.client.get(reverse("portal:lecturer-paid-course-students-pdf", args=[self.paid_course.id]))
+        self.assertEqual(pdf_response.status_code, 200)
+
+    def test_lecturer_can_delete_a_saved_course_group(self):
+        group = CourseStudentGroup.objects.create(
+            course=self.paid_course,
+            lecturer=self.lecturer,
+            session=self.session,
+            name="A1",
+            grouping_method=CourseStudentGroup.GroupingMethod.RANDOM,
+        )
+        CourseStudentGroupMembership.objects.create(group=group, student=self.student)
+
+        self.client.force_login(self.lecturer)
+        response = self.client.post(
+            reverse("portal:lecturer-course-groups", args=[self.paid_course.id]),
+            {"action": "delete-group", "group_id": group.id},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(CourseStudentGroup.objects.filter(pk=group.id).exists())
+        self.assertFalse(CourseStudentGroupMembership.objects.filter(student=self.student).exists())
+
     @patch("portal.views.initialize_paystack_transaction")
     def test_course_payment_redirects_to_paystack_authorization_url(self, initialize_paystack_transaction):
         initialize_paystack_transaction.return_value = {"authorization_url": "https://checkout.paystack.com/mock-course"}
@@ -565,6 +1249,39 @@ class DashboardAndCourseFlowTests(TestCase):
             initialize_paystack_transaction.call_args.kwargs["metadata"]["student_id"],
             self.student.id_number,
         )
+
+    @patch("portal.views.initialize_paystack_transaction")
+    def test_paid_course_payment_prefers_its_department_course_api(self, initialize_paystack_transaction):
+        initialize_paystack_transaction.return_value = {"authorization_url": "https://checkout.paystack.com/department-course"}
+        DepartmentCoursePaymentGateway.objects.update_or_create(
+            department=self.department,
+            defaults={
+                "paystack_public_key": "pk_department_course",
+                "paystack_secret_key": "sk_department_course",
+            },
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.post(
+            reverse("portal:student-courses"),
+            {"action": "pay-course", "course_id": self.paid_course.id},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "https://checkout.paystack.com/department-course")
+        self.assertEqual(initialize_paystack_transaction.call_args.kwargs["secret_key"], "sk_department_course")
+
+    def test_paid_course_payment_requires_its_department_hod_api(self):
+        DepartmentCoursePaymentGateway.objects.filter(department=self.department).delete()
+        self.client.force_login(self.student)
+
+        response = self.client.post(
+            reverse("portal:student-courses"),
+            {"action": "pay-course", "course_id": self.paid_course.id},
+            follow=True,
+        )
+
+        self.assertContains(response, "The HOD has not configured a paid-course API")
 
     @patch("portal.views.initialize_paystack_transaction")
     def test_course_payment_starts_without_registration(self, initialize_paystack_transaction):
@@ -923,7 +1640,9 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(download.status_code, 200)
         self.assertEqual(download["Content-Type"], "application/pdf")
 
-    def test_admin_creating_session_makes_it_current(self):
+    def test_admin_cannot_create_an_academic_session_from_departmental_fees(self):
+        StudentCourseRegistration.objects.create(student=self.student, course=self.free_course, registered_by=self.student)
+        LecturerCourseRegistration.objects.create(lecturer=self.lecturer, course=self.paid_course)
         self.client.force_login(self.admin)
 
         response = self.client.post(
@@ -936,10 +1655,15 @@ class DashboardAndCourseFlowTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        new_session = AcademicSession.objects.get(name="2027/2028")
-        self.assertTrue(new_session.is_current)
+        self.assertFalse(AcademicSession.objects.filter(name="2027/2028").exists())
         self.session.refresh_from_db()
-        self.assertFalse(self.session.is_current)
+        self.assertTrue(self.session.is_current)
+        self.assertTrue(StudentCourseRegistration.objects.exists())
+        self.assertTrue(LecturerCourseRegistration.objects.exists())
+        self.free_course.refresh_from_db()
+        self.paid_course.refresh_from_db()
+        self.assertEqual(self.free_course.lecturer, self.lecturer)
+        self.assertEqual(self.paid_course.lecturer, self.lecturer)
 
     def test_course_material_batch_form_creates_multiple_files(self):
         from .forms import CourseMaterialBatchForm
@@ -1128,6 +1852,276 @@ class DashboardAndCourseFlowTests(TestCase):
                 title="Class update",
             ).exists()
         )
+
+    def test_course_catalogs_are_hidden_until_a_filter_or_search_is_supplied(self):
+        unassigned_course = Course.objects.create(
+            department=self.department,
+            code="CSC303",
+            title="Operating Systems",
+            level="300",
+        )
+
+        self.client.force_login(self.student)
+        student_response = self.client.get(reverse("portal:student-courses"))
+        self.assertEqual(student_response.context["available_courses"].count(), 0)
+        student_filtered_response = self.client.get(reverse("portal:student-courses"), {"search": self.free_course.code})
+        self.assertContains(student_filtered_response, self.free_course.code)
+
+        self.client.force_login(self.lecturer)
+        lecturer_response = self.client.get(reverse("portal:lecturer-courses"))
+        self.assertEqual(lecturer_response.context["available_courses"].count(), 0)
+        lecturer_filtered_response = self.client.get(reverse("portal:lecturer-courses"), {"search": unassigned_course.code})
+        self.assertContains(lecturer_filtered_response, unassigned_course.code)
+
+    def test_lecturer_can_send_multiple_attachments_that_a_recipient_can_download(self):
+        StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        first_attachment = SimpleUploadedFile("week-one.pdf", b"lecture handout", content_type="application/pdf")
+        second_attachment = SimpleUploadedFile("reading-list.pdf", b"reading list", content_type="application/pdf")
+
+        self.client.force_login(self.lecturer)
+        response = self.client.post(
+            reverse("portal:lecturer-messages"),
+            {
+                "subject": "Week one handout",
+                "body": "Please read the attached handout.",
+                "attachments": [first_attachment, second_attachment],
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        notification = Notification.objects.get(sender=self.lecturer, subject="Week one handout")
+        attachments = list(NotificationAttachment.objects.filter(notification=notification))
+        self.assertEqual(len(attachments), 2)
+        self.assertTrue(attachments[0].file.name.endswith(".pdf"))
+        self.assertTrue(attachments[1].file.name.endswith(".pdf"))
+        self.assertTrue(NotificationRecipient.objects.filter(notification=notification, student=self.student).exists())
+
+        self.client.force_login(self.student)
+        inbox_response = self.client.get(reverse("portal:student-messages"), {"open": notification.recipients.get(student=self.student).id})
+        attachment_url = reverse("portal:download-notification-attachment", args=[attachments[0].id])
+        self.assertContains(inbox_response, attachment_url)
+
+        view_response = self.client.get(attachment_url)
+        download_response = self.client.get(f"{attachment_url}?download=1")
+        self.assertTrue(view_response["Content-Disposition"].startswith("inline"))
+        self.assertTrue(download_response["Content-Disposition"].startswith("attachment"))
+
+    @patch("portal.views.get_institution_logo", return_value=(b"official-logo-image", "png"))
+    def test_admin_about_saves_the_institution_name_and_verified_official_logo(self, logo_lookup):
+        self.client.force_login(self.admin)
+
+        response = self.client.post(reverse("portal:admin-about"), {"name": "Example University"})
+
+        self.assertEqual(response.status_code, 302)
+        profile = InstitutionProfile.objects.get()
+        self.assertEqual(profile.name, "Example University")
+        self.assertTrue(profile.logo.name.endswith(".png"))
+        logo_lookup.assert_called_once_with("Example University")
+
+        page_response = self.client.get(reverse("portal:admin-about"))
+        self.assertContains(page_response, "University or institution name")
+        self.assertContains(page_response, profile.logo.url)
+        self.assertNotContains(page_response, "Upload institution logo")
+        self.assertNotContains(page_response, "multipart/form-data")
+
+    @patch("portal.views.get_institution_logo", return_value=(b"replacement-logo", "png"))
+    def test_admin_about_refreshes_the_official_logo_when_the_name_is_unchanged(self, logo_lookup):
+        profile = InstitutionProfile.objects.create(name="Example University")
+        profile.logo.save("old-logo.png", SimpleUploadedFile("old-logo.png", b"old"), save=True)
+        self.client.force_login(self.admin)
+
+        response = self.client.post(reverse("portal:admin-about"), {"name": "Example University"})
+
+        self.assertEqual(response.status_code, 302)
+        profile.refresh_from_db()
+        logo_lookup.assert_called_once_with("Example University")
+        self.assertEqual(profile.logo.read(), b"replacement-logo")
+
+    def test_admin_can_create_academic_session_from_about_and_see_past_sessions(self):
+        LecturerCourseRegistration.objects.create(lecturer=self.lecturer, course=self.paid_course)
+        self.paid_course.lecturer = self.lecturer
+        self.paid_course.save(update_fields=["lecturer", "updated_at"])
+        StudentCourseRegistration.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            registered_by=self.student,
+        )
+        self.client.force_login(self.admin)
+
+        response = self.client.post(
+            reverse("portal:admin-about"),
+            {"action": "create-academic-session", "name": "2027/2028", "is_current": "on"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        new_session = AcademicSession.objects.get(name="2027/2028")
+        self.assertTrue(new_session.is_current)
+        self.session.refresh_from_db()
+        self.assertFalse(self.session.is_current)
+        self.assertTrue(DepartmentalFee.objects.filter(session=new_session, department=self.department).exists())
+        self.assertFalse(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer).exists())
+        self.paid_course.refresh_from_db()
+        self.assertIsNone(self.paid_course.lecturer)
+        self.assertFalse(
+            StudentCourseRegistration.objects.filter(student=self.student, session=new_session).exists()
+        )
+
+        page_response = self.client.get(reverse("portal:admin-about"))
+        self.assertContains(page_response, "Create Academic Session")
+        self.assertContains(page_response, "Past Sessions")
+        self.assertContains(page_response, self.session.name)
+
+    def test_admin_departments_does_not_offer_course_allocation_uploads(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.get(reverse("portal:admin-departments"))
+
+        self.assertNotContains(response, "Add Course Allocation")
+        self.assertNotContains(response, 'value="upload-allocations"', html=False)
+
+    def test_hod_allocation_replaces_the_department_teaching_assignments(self):
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        LecturerCourseRegistration.objects.create(lecturer=self.lecturer, course=self.free_course)
+        self.free_course.lecturer = self.lecturer
+        self.free_course.save(update_fields=["lecturer", "updated_at"])
+        self.client.force_login(self.lecturer)
+
+        response = self.client.post(
+            reverse("portal:hod-api-and-document"),
+            {
+                "action": "upload-allocations",
+                "file": SimpleUploadedFile(
+                    "allocation.csv",
+                    b"lecturer_name,course_code\nAda Lecturer,CSC201\n",
+                    content_type="text/csv",
+                ),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.free_course.refresh_from_db()
+        self.paid_course.refresh_from_db()
+        self.assertIsNone(self.free_course.lecturer)
+        self.assertEqual(self.paid_course.lecturer, self.lecturer)
+        self.assertEqual(
+            list(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer).values_list("course_id", flat=True)),
+            [self.paid_course.id],
+        )
+
+    def test_current_handbook_creates_courses_only_for_its_session(self):
+        old_course = Course.objects.create(
+            department=self.department,
+            academic_session=self.session,
+            code="CSC901",
+            title="Previous Curriculum",
+            level="100",
+        )
+        new_session = AcademicSession.objects.create(name="2027/2028", is_current=True)
+        handbook = Handbook.objects.create(
+            department=self.department,
+            title="New Curriculum Handbook",
+            academic_session=new_session.name,
+            file=SimpleUploadedFile(
+                "handbook.txt",
+                b"CSC901 New Curriculum Course 100 2 units",
+                content_type="text/plain",
+            ),
+        )
+
+        from .automation import import_handbook_courses
+
+        import_handbook_courses(handbook)
+        new_course = Course.objects.get(
+            department=self.department,
+            academic_session=new_session,
+            code="CSC901",
+        )
+        self.assertNotEqual(new_course.pk, old_course.pk)
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("portal:student-courses"), {"search": "CSC901"})
+        self.assertContains(response, "New Curriculum Course")
+        self.assertNotContains(response, "Previous Curriculum")
+
+    def test_student_message_menu_counter_clears_when_message_is_opened(self):
+        notification = Notification.objects.create(
+            sender=self.lecturer,
+            subject="New announcement",
+            body="Please check the course page.",
+        )
+        recipient = NotificationRecipient.objects.create(notification=notification, student=self.student)
+
+        self.client.force_login(self.student)
+        dashboard_response = self.client.get(reverse("portal:student-dashboard"))
+        self.assertContains(dashboard_response, 'aria-label="1 unread message"', html=False)
+
+        message_response = self.client.get(reverse("portal:student-messages"), {"open": recipient.id})
+        recipient.refresh_from_db()
+        self.assertTrue(recipient.is_read)
+        self.assertNotContains(message_response, 'aria-label="1 unread message"', html=False)
+
+    def test_lecturer_can_view_all_of_their_sent_messages_with_content(self):
+        first_message = Notification.objects.create(
+            sender=self.lecturer,
+            subject="First class update",
+            body="Bring your notebook to class.",
+            level="100",
+        )
+        second_message = Notification.objects.create(
+            sender=self.lecturer,
+            subject="Second class update",
+            body="The assignment deadline is Friday.",
+        )
+        other_lecturer = User.objects.create_user(
+            username="lecturer2",
+            password="pass1234",
+            role=User.Role.LECTURER,
+            department=self.department,
+            is_approved=True,
+            email="lecturer2@example.com",
+        )
+        Notification.objects.create(
+            sender=other_lecturer,
+            subject="Another lecturer message",
+            body="This must not appear in the first lecturer's history.",
+        )
+        NotificationRecipient.objects.create(notification=first_message, student=self.student)
+        NotificationRecipient.objects.create(notification=second_message, student=self.student)
+
+        self.client.force_login(self.lecturer)
+        response = self.client.get(reverse("portal:lecturer-messages"))
+
+        self.assertContains(response, first_message.subject)
+        self.assertContains(response, first_message.body)
+        self.assertContains(response, second_message.subject)
+        self.assertContains(response, second_message.body)
+        self.assertContains(response, "Recipients:</strong> 1", html=False)
+        self.assertNotContains(response, "Another lecturer message")
+
+    def test_lecturer_can_delete_their_sent_message(self):
+        notification = Notification.objects.create(
+            sender=self.lecturer,
+            subject="Withdrawn announcement",
+            body="This message should be removed.",
+        )
+        NotificationRecipient.objects.create(notification=notification, student=self.student)
+        UserAlert.objects.create(
+            recipient=self.student,
+            alert_type=UserAlert.AlertType.MESSAGE,
+            title=notification.subject,
+            body=notification.body,
+            dedupe_key=f"message:{notification.id}:{self.student.id}",
+        )
+
+        self.client.force_login(self.lecturer)
+        response = self.client.post(reverse("portal:lecturer-message-delete", args=[notification.id]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Notification.objects.filter(pk=notification.id).exists())
+        self.assertFalse(NotificationRecipient.objects.filter(notification_id=notification.id).exists())
+        self.assertFalse(UserAlert.objects.filter(dedupe_key=f"message:{notification.id}:{self.student.id}").exists())
 
     def test_message_alerts_are_not_delivered_to_lecturer_feed(self):
         UserAlert.objects.create(

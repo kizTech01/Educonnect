@@ -1,6 +1,6 @@
 {% extends 'portal/dashboard_base.html' %}
 
-{% block title %}Manage Courses | MAU EduConnect{% endblock %}
+{% block title %}Manage Courses | Educonnect{% endblock %}
 
 {% block dashboard_content %}
 <section class="split-layout">
@@ -69,7 +69,7 @@
                         <td>{{ course.level }}</td>
                         <td>{{ course.lecturer.full_name|default:"Pending" }}</td>
                         <td>{% if course.is_free %}Free{% else %}Paid {{ course.amount }}{% endif %}</td>
-                        <td>{% if course.file %}<a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small">Download</a>{% else %}<span class="muted-note">No file</span>{% endif %}</td>
+                        <td>{% if course.file %}<a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a> <a href="{% url 'portal:download-course-file' course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>{% else %}<span class="muted-note">No file</span>{% endif %}</td>
                         <td>{{ course.schedule_day|default:"TBA" }} {{ course.schedule_time|time:"H:i"|default:"" }} {{ course.venue|default:"" }}</td>
                         <td class="actions-cell">
                             <a href="{% url 'portal:admin-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
