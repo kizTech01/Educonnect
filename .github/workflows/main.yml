@@ -1,0 +1,55 @@
+name: EduConnect Docker Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  docker-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+
+      - name: Check Docker version
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Build EduConnect image
+        run: docker build -t educonnect-test .
+
+      - name: Run Django system check
+        run: |
+          docker run --rm \
+            -e DJANGO_SECRET_KEY=github-actions-test-key \
+            -e DJANGO_DEBUG=True \
+            -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e DJANGO_TIME_ZONE=Africa/Lagos \
+            educonnect-test \
+            python manage.py check
+
+      - name: Check migrations
+        run: |
+          docker run --rm \
+            -e DJANGO_SECRET_KEY=github-actions-test-key \
+            -e DJANGO_DEBUG=True \
+            -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e DJANGO_TIME_ZONE=Africa/Lagos \
+            educonnect-test \
+            python manage.py makemigrations --check --dry-run
+
+      - name: Run Django tests
+        run: |
+          docker run --rm \
+            -e DJANGO_SECRET_KEY=github-actions-test-key \
+            -e DJANGO_DEBUG=True \
+            -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e DJANGO_TIME_ZONE=Africa/Lagos \
+            educonnect-test \
+            python manage.py test
