@@ -16,7 +16,7 @@
         <div class="container nav-shell">
             <a href="{% url 'portal:home' %}" class="brand-mark">
                 {% if institution.logo %}
-                    <img src="{{ institution.logo.url }}" alt="{{ institution.name }} logo" onerror="this.onerror=null;this.src='{{ fallback_logo }}';">
+                    <img src="{% url 'portal:institution-logo' %}" alt="{{ institution.name }} logo" onerror="this.onerror=null;this.src='{{ fallback_logo }}';">
                 {% else %}
                     <img src="{{ fallback_logo }}" alt="{{ institution.name }} logo">
                 {% endif %}

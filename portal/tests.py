@@ -45,12 +45,7 @@ from .models import (
     User,
     UserAlert,
 )
-from .services import (
-    DEFAULT_PAYSTACK_PUBLIC_KEY,
-    DEFAULT_PAYSTACK_SECRET_KEY,
-    dispatch_due_course_reminders,
-    ensure_default_admin_user,
-)
+from .services import dispatch_due_course_reminders, ensure_default_admin_user
 from .views import sidebar_links
 from .automation import import_course_allocations, import_department_lecturers
 
@@ -597,6 +592,36 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertContains(response, reverse("portal:download-course-file", args=[self.free_course.id]))
 
+    def test_student_course_filter_combines_search_and_level(self):
+        self.client.force_login(self.student)
+
+        response = self.client.get(
+            reverse("portal:student-courses"),
+            {"level": "100", "search": "computing"},
+        )
+
+        self.assertContains(response, self.free_course.code)
+        self.assertNotContains(response, self.paid_course.code)
+
+    def test_student_course_filter_rejects_another_department(self):
+        other_department = Department.objects.create(name="Mathematics", code="MTH")
+        other_course = Course.objects.create(
+            department=other_department,
+            code="MTH101",
+            title="Calculus",
+            level="100",
+            is_free=True,
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(
+            reverse("portal:student-courses"),
+            {"department": other_department.id, "search": "calculus"},
+        )
+
+        self.assertContains(response, "Select a valid choice")
+        self.assertNotContains(response, other_course.code)
+
     def test_lecturer_can_amend_paid_course_amount(self):
         self.client.force_login(self.lecturer)
         response = self.client.post(
@@ -745,7 +770,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(gateway.paystack_secret_key, "")
         self.assertFalse(gateway.is_configured)
 
-    def test_blank_department_gateway_uses_default_paystack_test_keys(self):
+    def test_blank_department_gateway_stays_unconfigured(self):
         DepartmentPaymentGateway.objects.filter(department=self.department).update(
             paystack_public_key="",
             paystack_secret_key="",
@@ -755,8 +780,9 @@ class DashboardAndCourseFlowTests(TestCase):
 
         gateway = ensure_department_gateway_credentials(self.department)
 
-        self.assertEqual(gateway.paystack_public_key, DEFAULT_PAYSTACK_PUBLIC_KEY)
-        self.assertEqual(gateway.paystack_secret_key, DEFAULT_PAYSTACK_SECRET_KEY)
+        self.assertEqual(gateway.paystack_public_key, "")
+        self.assertEqual(gateway.paystack_secret_key, "")
+        self.assertFalse(gateway.is_configured)
 
     def test_admin_menu_does_not_show_view_courses_label(self):
         request = self.factory.get(reverse("portal:admin-dashboard"))
@@ -993,7 +1019,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Upload Timetable")
         self.assertNotContains(response, "Upload Handbook")
-        self.assertNotContains(response, "Filter Handbooks")
+        self.assertContains(response, "Filter Handbooks")
 
     def test_lecturer_users_page_lists_departmental_students_only(self):
         self.client.force_login(self.lecturer)
@@ -1026,6 +1052,12 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertIn("paid-students.pdf", response["Content-Disposition"])
 
     def test_lecturer_can_search_paid_course_student_by_id(self):
+        StudentCourseRegistration.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            registered_by=self.student,
+        )
         CoursePayment.objects.create(
             student=self.student,
             course=self.paid_course,
@@ -1117,7 +1149,9 @@ class DashboardAndCourseFlowTests(TestCase):
 
         original_payment.refresh_from_db()
         self.assertFalse(original_payment.is_active_for_registration)
-        page_response = self.client.get(reverse("portal:student-courses"))
+        page_response = self.client.get(
+            reverse("portal:student-courses"), {"search": self.paid_course.code}
+        )
         self.assertContains(page_response, 'name="action" value="pay-course"', html=False)
 
     def test_new_academic_session_requires_payment_before_paid_course_reregistration(self):
@@ -1132,7 +1166,9 @@ class DashboardAndCourseFlowTests(TestCase):
         AcademicSession.objects.create(name="2027/2028", is_current=True)
 
         self.client.force_login(self.student)
-        page_response = self.client.get(reverse("portal:student-courses"))
+        page_response = self.client.get(
+            reverse("portal:student-courses"), {"search": self.paid_course.code}
+        )
 
         self.assertContains(page_response, 'name="action" value="pay-course"', html=False)
         self.assertNotContains(page_response, "Already registered")
@@ -1351,8 +1387,8 @@ class DashboardAndCourseFlowTests(TestCase):
     def test_departmental_payment_redirects_to_paystack_authorization_url(self, initialize_paystack_transaction):
         initialize_paystack_transaction.return_value = {"authorization_url": "https://checkout.paystack.com/mock-department"}
         DepartmentPaymentGateway.objects.filter(department=self.department).update(
-            paystack_public_key=DEFAULT_PAYSTACK_PUBLIC_KEY,
-            paystack_secret_key=DEFAULT_PAYSTACK_SECRET_KEY,
+            paystack_public_key="pk_test_department",
+            paystack_secret_key="sk_test_department",
         )
         self.client.force_login(self.student)
         response = self.client.post(
@@ -1367,7 +1403,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, "https://checkout.paystack.com/mock-department")
         initialize_paystack_transaction.assert_called_once()
-        self.assertEqual(initialize_paystack_transaction.call_args.kwargs["secret_key"], DEFAULT_PAYSTACK_SECRET_KEY)
+        self.assertEqual(initialize_paystack_transaction.call_args.kwargs["secret_key"], "sk_test_department")
 
     @patch("portal.views.initialize_paystack_transaction")
     def test_departmental_payment_falls_back_to_browser_checkout_when_paystack_is_unreachable(self, initialize_paystack_transaction):
@@ -1594,6 +1630,7 @@ class DashboardAndCourseFlowTests(TestCase):
     def test_departmental_exam_card_download_is_pdf(self):
         StudentCourseRegistration.objects.create(student=self.student, course=self.free_course, registered_by=self.student)
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
+        InstitutionProfile.objects.create(name="Example University")
         payment = DepartmentalPayment.objects.create(
             student=self.student,
             department=self.department,
@@ -1610,7 +1647,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertIn(".pdf", response["Content-Disposition"])
         self.assertTrue(response.content.startswith(b"%PDF"))
-        self.assertIn("Modibbo Adama University Yola".encode("utf-8"), response.content)
+        self.assertIn(b"Example University", response.content)
         self.assertIn(self.student.full_name.encode("utf-8"), response.content)
         self.assertIn(self.free_course.code.encode("utf-8"), response.content)
         self.assertIn(self.paid_course.code.encode("utf-8"), response.content)
@@ -1633,7 +1670,7 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertEqual(departmental_page.status_code, 200)
         self.assertContains(departmental_page, "Payment completed.")
-        self.assertContains(departmental_page, "Download Exam Card PDF")
+        self.assertContains(departmental_page, "Download Exam Card")
         self.assertContains(departmental_page, exam_card_url)
 
         download = self.client.get(exam_card_url)
@@ -1920,9 +1957,13 @@ class DashboardAndCourseFlowTests(TestCase):
 
         page_response = self.client.get(reverse("portal:admin-about"))
         self.assertContains(page_response, "University or institution name")
-        self.assertContains(page_response, profile.logo.url)
+        self.assertContains(page_response, reverse("portal:institution-logo"))
         self.assertNotContains(page_response, "Upload institution logo")
         self.assertNotContains(page_response, "multipart/form-data")
+
+        logo_response = self.client.get(reverse("portal:institution-logo"))
+        self.assertEqual(logo_response.status_code, 200)
+        self.assertEqual(b"".join(logo_response.streaming_content), b"official-logo-image")
 
     @patch("portal.views.get_institution_logo", return_value=(b"replacement-logo", "png"))
     def test_admin_about_refreshes_the_official_logo_when_the_name_is_unchanged(self, logo_lookup):
@@ -2190,8 +2231,8 @@ class DashboardAndCourseFlowTests(TestCase):
             course=self.paid_course,
             amount=self.paid_course.amount,
             status=CoursePayment.Status.PENDING,
-            paystack_public_key_used=DEFAULT_PAYSTACK_PUBLIC_KEY,
-            paystack_secret_key_used=DEFAULT_PAYSTACK_SECRET_KEY,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
         )
         payload = {
             "event": "charge.success",
@@ -2201,7 +2242,7 @@ class DashboardAndCourseFlowTests(TestCase):
             },
         }
         body = json.dumps(payload).encode("utf-8")
-        signature = hmac.new(DEFAULT_PAYSTACK_SECRET_KEY.encode("utf-8"), body, hashlib.sha512).hexdigest()
+        signature = hmac.new(b"sk_test_course", body, hashlib.sha512).hexdigest()
 
         response = self.client.post(
             reverse("portal:paystack-webhook"),
@@ -2314,7 +2355,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "data": {"customer_code": "CUS_test"},
         }
         body = json.dumps(payload).encode("utf-8")
-        signature = hmac.new(DEFAULT_PAYSTACK_SECRET_KEY.encode("utf-8"), body, hashlib.sha512).hexdigest()
+        signature = hmac.new(b"sk_test_course", body, hashlib.sha512).hexdigest()
 
         response = self.client.post(
             reverse("portal:paystack-webhook"),

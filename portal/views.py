@@ -91,8 +91,6 @@ from .models import (
     curriculum_for_department,
 )
 from .services import (
-    DEFAULT_PAYSTACK_PUBLIC_KEY,
-    DEFAULT_PAYSTACK_SECRET_KEY,
     deliver_notification,
     ensure_default_admin_user,
     initialize_paystack_transaction,
@@ -106,6 +104,14 @@ from .automation import import_course_allocations, import_department_lecturers, 
 from .branding import LogoLookupError, get_institution_logo
 
 LOGIN_ROLES = {User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN}
+
+
+def institution_logo(request):
+    """Serve the public institution logo without exposing other uploaded files."""
+    institution = InstitutionProfile.objects.first()
+    if institution is None or not institution.logo:
+        raise Http404("Institution logo not found.")
+    return FileResponse(institution.logo.open("rb"), as_attachment=False)
 
 
 def login_form_for_role(role, data=None):
@@ -199,24 +205,8 @@ def role_required(*roles):
 
 
 def ensure_department_gateway_credentials(department):
-    gateway, _ = DepartmentPaymentGateway.objects.get_or_create(
-        department=department,
-        defaults={
-            "paystack_public_key": DEFAULT_PAYSTACK_PUBLIC_KEY,
-            "paystack_secret_key": DEFAULT_PAYSTACK_SECRET_KEY,
-        },
-    )
-    updated_fields = []
-    if not gateway.paystack_public_key:
-        gateway.paystack_public_key = DEFAULT_PAYSTACK_PUBLIC_KEY
-        updated_fields.append("paystack_public_key")
-    if not gateway.paystack_secret_key:
-        gateway.paystack_secret_key = DEFAULT_PAYSTACK_SECRET_KEY
-        updated_fields.append("paystack_secret_key")
-    if updated_fields:
-        updated_fields.append("updated_at")
-        gateway.save(update_fields=updated_fields)
-    return gateway
+    """Create an unconfigured gateway; an HOD must add the real Paystack keys."""
+    return DepartmentPaymentGateway.objects.get_or_create(department=department)[0]
 
 
 def ensure_all_department_gateways():
@@ -447,7 +437,7 @@ def _verification_matches_payment(verification, *, reference, amount):
 
 
 def _configured_paystack_webhook_secrets():
-    secrets = {DEFAULT_PAYSTACK_SECRET_KEY}
+    secrets = set()
     course_gateway = course_payment_gateway()
     if course_gateway.paystack_secret_key:
         secrets.add(course_gateway.paystack_secret_key)
@@ -1119,7 +1109,12 @@ def send_profile_password_reset(request):
 
 
 def lecturer_registered_courses_queryset(user):
-    return Course.objects.filter(lecturer_registrations__lecturer=user).select_related("department", "lecturer").distinct()
+    # Older and admin-imported courses may have a lecturer assigned directly
+    # before a LecturerCourseRegistration record exists. Include both forms so
+    # those courses remain visible and manageable by their assigned lecturer.
+    return Course.objects.filter(
+        Q(lecturer=user) | Q(lecturer_registrations__lecturer=user)
+    ).select_related("department", "lecturer").distinct()
 
 
 def _create_course_materials_from_upload(form, *, lecturer):
@@ -1389,12 +1384,13 @@ def student_departmental(request):
 @role_required(User.Role.STUDENT)
 def student_courses(request):
     current_session = current_departmental_session()
-    filter_form = StudentCourseFilterForm(request.GET or None)
-    if request.user.department_id:
-        filter_form.fields["department"].queryset = Department.objects.filter(pk=request.user.department_id)
+    filter_form = StudentCourseFilterForm(request.GET or None, student=request.user)
 
     available_courses = _student_course_catalog_queryset(request.user)
-    catalog_is_filtered = False
+    # A bound but invalid query (such as a different department ID) must not
+    # fall back to the full catalogue. It remains empty and displays the form
+    # error, preserving the student's department and curriculum boundaries.
+    catalog_is_filtered = filter_form.is_bound
     if filter_form.is_valid():
         department = filter_form.cleaned_data.get("department")
         level = filter_form.cleaned_data.get("level")

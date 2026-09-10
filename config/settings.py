@@ -31,7 +31,7 @@ SECRET_KEY = os.getenv(
     "django-insecure-local-development-key-change-me",
 )
 
-DEBUG = False
+DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() in {"1", "true", "yes", "on"}
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -48,6 +48,11 @@ RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if RENDER_EXTERNAL_HOSTNAME:
     if RENDER_EXTERNAL_HOSTNAME not in ALLOWED_HOSTS:
         ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+
+if DEBUG:
+    for local_host in ("localhost", "127.0.0.1"):
+        if local_host not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS.append(local_host)
 
 
 CSRF_TRUSTED_ORIGINS = [
@@ -204,6 +209,11 @@ AUTH_PASSWORD_VALIDATORS = [
         )
     },
 ]
+
+# Use only in automated tests to keep CI fast. Production and local development
+# retain Django's default secure password hashers.
+if os.getenv("DJANGO_TEST_FAST_PASSWORD_HASHER", "").lower() in {"1", "true", "yes", "on"}:
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
 
 # Internationalization

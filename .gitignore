@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+*.log
+.tmp/
 db.sqlite3
 media/
 staticfiles/

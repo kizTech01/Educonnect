@@ -1,0 +1,50 @@
+name: Django CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DJANGO_DEBUG: "True"
+      DJANGO_USE_LOCAL_SQLITE: "True"
+      DJANGO_TEST_FAST_PASSWORD_HASHER: "True"
+      DJANGO_SECRET_KEY: ci-only-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDE
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Check migrations
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Run Django checks
+        run: python manage.py check
+
+      - name: Run test suite
+        run: python manage.py test --verbosity 2
+
+      - name: Validate production settings
+        env:
+          DJANGO_DEBUG: "False"
+          DJANGO_SECRET_KEY: ci-only-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDE
+          DJANGO_ALLOWED_HOSTS: example.com
+          CSRF_TRUSTED_ORIGINS: https://example.com
+        run: python manage.py check --deploy

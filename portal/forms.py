@@ -198,8 +198,15 @@ class StudentCourseFilterForm(forms.Form):
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
     search = forms.CharField(required=False)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, student=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if student is not None:
+            self.fields["department"].queryset = (
+                Department.objects.filter(pk=student.department_id)
+                if student.department_id
+                else Department.objects.none()
+            )
+        self.fields["search"].widget.attrs["placeholder"] = "Course code, title, or lecturer"
         for field in self.fields.values():
             if not isinstance(field.widget, forms.HiddenInput):
                 field.widget.attrs["class"] = "input-field"

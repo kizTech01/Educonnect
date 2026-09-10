@@ -30,16 +30,6 @@ PAYSTACK_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-DEFAULT_PAYSTACK_SECRET_KEY = getattr(
-    settings,
-    "PAYSTACK_SECRET_KEY",
-    "removed-paystack-test-key",
-)
-DEFAULT_PAYSTACK_PUBLIC_KEY = getattr(
-    settings,
-    "PAYSTACK_PUBLIC_KEY",
-    "pk_test_fd50b599b31f0cfb316e4460621ca9921b7945ff",
-)
 NOTIFICATION_RECIPIENT_BATCH_SIZE = 500
 NOTIFICATION_EMAIL_BATCH_SIZE = 100
 logger = logging.getLogger(__name__)
