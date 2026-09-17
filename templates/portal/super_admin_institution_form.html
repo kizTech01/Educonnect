@@ -1,0 +1,26 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}Edit institution{% endblock %}
+{% block super_content %}
+<section class="split-layout">
+  <section class="panel-card" id="delete-institution">
+    <div class="panel-head"><h2>{{ institution.name }}</h2></div>
+    <p class="muted-note">Update the institution details, portal address, administrator email, or logo. A changed administrator email becomes that administrator's sign-in username.</p>
+    <form method="post" enctype="multipart/form-data" class="stack-form">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button class="primary-btn" type="submit">Save changes</button>
+      <a class="ghost-btn" href="{% url 'portal:super-admin-institutions' %}">Cancel</a>
+    </form>
+  </section>
+  <section class="panel-card">
+    <div class="panel-head"><h2>Delete institution</h2></div>
+    <p class="muted-note">This permanently deletes {{ institution.name }}, its users, subscriptions, and all tenant data. Subscription plans shared by the platform are kept.</p>
+    <form method="post" action="{% url 'portal:super-admin-institution-delete' institution.id %}" class="stack-form">
+      {% csrf_token %}
+      <label for="id_confirmation">Type <strong>{{ institution.name }}</strong> to confirm deletion.</label>
+      <input class="input-field" id="id_confirmation" name="confirmation" autocomplete="off" required>
+      <button class="danger-btn" type="submit">Permanently delete institution</button>
+    </form>
+  </section>
+</section>
+{% endblock %}

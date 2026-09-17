@@ -1,18 +1,8 @@
 {% extends 'portal/dashboard_base.html' %}
 
-{% block title %}About Institution | Educonnect{% endblock %}
+{% block title %}Academic Sessions | Educonnect{% endblock %}
 
 {% block dashboard_content %}
-<section class="panel-card">
-    <div class="panel-head"><h2>Institution Details</h2></div>
-    <p class="muted-note">Save the institution name to refresh the verified official logo shown throughout the portal.</p>
-    <form method="post" class="stack-form">
-        {% csrf_token %}
-        <label>{{ form.name.label }} {{ form.name }} {{ form.name.errors }}</label>
-        <button type="submit" class="primary-btn">Save Name and Refresh Official Logo</button>
-    </form>
-</section>
-
 <section class="panel-card">
     <div class="panel-head">
         <h2>Academic Sessions</h2>

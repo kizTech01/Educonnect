@@ -1,0 +1,11 @@
+{% extends 'portal/super_admin_base.html' %}
+
+{% block super_title %}EduConnect AI{% endblock %}
+
+{% block super_content %}
+<section class="panel-card">
+  <p class="muted-note">Platform-wide assistance is available only to Super Admins. It reports aggregate platform information and never exposes one tenant to another.</p>
+  <form method="post">{% csrf_token %}<label for="question">Ask about institutions, screening, or subscriptions</label><textarea id="question" class="input-field" name="question" rows="3" required></textarea><button class="button" type="submit">Ask</button></form>
+  {% if answer %}<div class="resource-card" style="margin-top: 1rem">{{ answer }}</div>{% endif %}
+</section>
+{% endblock %}

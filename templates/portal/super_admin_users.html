@@ -1,0 +1,35 @@
+{% extends 'portal/super_admin_base.html' %}
+
+{% block super_title %}Platform administrators{% endblock %}
+
+{% block super_content %}
+<section class="split-layout">
+  <section class="panel-card">
+    <div class="panel-head"><h2>Add platform administrator</h2></div>
+    <p class="muted-note">Platform administrators can manage every institution and subscription on Educonnect.</p>
+    <form method="post" class="stack-form">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button class="primary-btn" type="submit">Create administrator</button>
+    </form>
+  </section>
+  <section class="panel-card">
+    <div class="panel-head"><h2>Current administrators</h2></div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Name</th><th>Username</th><th>Email</th><th>Last sign-in</th></tr>
+        {% for user in users %}
+          <tr>
+            <td>{{ user.full_name }}</td>
+            <td>{{ user.username }}</td>
+            <td>{{ user.email|default:"-" }}</td>
+            <td>{{ user.last_login|default:"Never" }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4">No platform administrators found.</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </section>
+</section>
+{% endblock %}

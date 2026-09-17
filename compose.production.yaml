@@ -52,6 +52,26 @@ services:
           python manage.py send_due_course_reminders
         done
 
+  subscription-notifications:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    depends_on:
+      db:
+        condition: service_healthy
+      web:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          python manage.py send_subscription_expiry_notifications || true
+          sleep 86400
+        done
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -67,7 +87,6 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - static_files:/srv/static:ro
-      - media_files:/srv/media:ro
       - caddy_data:/data
       - caddy_config:/config
 

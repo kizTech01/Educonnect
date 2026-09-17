@@ -1,0 +1,17 @@
+{% extends 'portal/super_admin_base.html' %}
+
+{% block super_title %}{{ institution.name }} screening{% endblock %}
+
+{% block super_content %}
+<section class="panel-card">
+  <p><strong>Applicant URL:</strong> {{ screening_host }}</p>
+  <p class="muted-note">The applicant workflow is hosted by the independently deployed Online Screening application. These settings and the signed API credential are shared with that service.</p>
+  <form method="post">{% csrf_token %}{{ form.as_p }}<button class="button" type="submit">Save configuration</button></form>
+</section>
+<section class="panel-card">
+  <h2>API credential</h2>
+  <p class="muted-note">Use this as the HMAC secret in the external Screening application. Rotate it immediately if it is exposed.</p>
+  <code>{{ integration.api_secret }}</code>
+  <form method="post" style="margin-top: 1rem">{% csrf_token %}<input type="hidden" name="action" value="rotate-secret"><button class="button button-secondary" type="submit">Rotate API secret</button></form>
+</section>
+{% endblock %}

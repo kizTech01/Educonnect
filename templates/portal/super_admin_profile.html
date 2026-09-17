@@ -1,0 +1,16 @@
+{% extends 'portal/super_admin_base.html' %}
+
+{% block super_title %}My profile{% endblock %}
+
+{% block super_content %}
+<section class="panel-card">
+  <div class="panel-head"><h2>Personal information</h2></div>
+  <form method="post" class="stack-form">
+    {% csrf_token %}
+    <p><label for="id_first_name">First name</label><input class="input-field" id="id_first_name" name="first_name" value="{{ request.user.first_name }}"></p>
+    <p><label for="id_last_name">Last name</label><input class="input-field" id="id_last_name" name="last_name" value="{{ request.user.last_name }}"></p>
+    <p><label for="id_email">Email</label><input class="input-field" id="id_email" type="email" name="email" value="{{ request.user.email }}"></p>
+    <button class="primary-btn" type="submit">Save profile</button>
+  </form>
+</section>
+{% endblock %}

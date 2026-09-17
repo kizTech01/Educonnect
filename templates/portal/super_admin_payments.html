@@ -1,0 +1,3 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}Payments{% endblock %}
+{% block super_content %}<section class="panel"><div class="table-wrap"><table><tr><th>Reference</th><th>Institution</th><th>Plan</th><th>Amount</th><th>Status</th><th>Date</th></tr>{% for payment in payments %}<tr><td>{{ payment.reference }}</td><td>{{ payment.institution.name }}</td><td>{{ payment.plan.name }}</td><td>₦{{ payment.amount }}</td><td>{{ payment.get_status_display }}</td><td>{{ payment.paid_at|default:payment.created_at }}</td></tr>{% empty %}<tr><td colspan="6">No payments yet.</td></tr>{% endfor %}</table></div></section>{% endblock %}

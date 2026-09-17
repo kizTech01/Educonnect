@@ -1,0 +1,18 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}Platform settings{% endblock %}
+{% block super_content %}
+<div class="content-grid two-column">
+  <section class="panel-card">
+    <div class="panel-head"><h2>Configuration overview</h2></div>
+    <div class="detail-grid">
+      <article class="resource-card"><span class="muted-note">Platform domain</span><strong>{{ platform_domain }}</strong></article>
+      <article class="resource-card"><span class="muted-note">Subscription gateway</span><strong>{% if paystack_configured %}Configured{% else %}Not configured{% endif %}</strong></article>
+    </div>
+  </section>
+  <section class="panel-card">
+    <div class="panel-head"><h2>Subscription payment gateway</h2></div>
+    <p class="muted-note">These Paystack keys are used only when institutions pay for Educonnect subscriptions. Course and departmental gateways remain institution-managed.</p>
+    <form method="post" class="stack-form">{% csrf_token %}{{ gateway_form.as_p }}<button class="primary-btn">Save payment gateway</button></form>
+  </section>
+</div>
+{% endblock %}

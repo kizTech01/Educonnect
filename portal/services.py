@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
@@ -22,6 +23,14 @@ from .models import (
     StudentCourseRegistration,
     User,
     UserAlert,
+    AuditLog,
+    Payment,
+    Subscription,
+    SubscriptionPlan,
+    SubscriptionPlanDuration,
+    SubscriptionPaymentGateway,
+    SubscriptionEvent,
+    SubscriptionNotification,
 )
 
 PAYSTACK_API_BASE = "https://api.paystack.co"
@@ -32,7 +41,39 @@ PAYSTACK_USER_AGENT = (
 )
 NOTIFICATION_RECIPIENT_BATCH_SIZE = 500
 NOTIFICATION_EMAIL_BATCH_SIZE = 100
+# Imported lecturers and institution administrators receive this same
+# temporary credential. They can replace it through the email verification
+# password-reset flow.
+TEMPORARY_ACCOUNT_PASSWORD = "educonnect"
+FREE_TRIAL_PLAN_NAME = "Six-month free trial"
+FREE_TRIAL_DURATION_DAYS = 183
 logger = logging.getLogger(__name__)
+
+
+def grant_free_trial_subscription(institution):
+    """Give each newly provisioned institution one six-month trial."""
+    trial_plan, _ = SubscriptionPlan.objects.get_or_create(
+        name=FREE_TRIAL_PLAN_NAME,
+        defaults={
+            "description": "Complimentary access for new Educonnect institutions.",
+            "price": Decimal("0.00"),
+            "billing_period": SubscriptionPlan.BillingPeriod.CUSTOM,
+            "custom_duration_days": FREE_TRIAL_DURATION_DAYS,
+            "is_active": True,
+            "is_trial": True,
+        },
+    )
+    today = timezone.localdate()
+    return Subscription.objects.get_or_create(
+        institution=institution,
+        plan=trial_plan,
+        defaults={
+            "start_date": today,
+            "end_date": today + timedelta(days=FREE_TRIAL_DURATION_DAYS),
+            "status": Subscription.Status.TRIAL,
+            "amount": Decimal("0.00"),
+        },
+    )
 
 
 def paystack_amount_in_kobo(amount):
@@ -109,6 +150,182 @@ def verify_paystack_transaction(secret_key, reference):
     if not data:
         raise ValueError("Paystack did not return transaction details.")
     return data
+
+
+def subscription_paystack_secret_key():
+    """Use the super-admin gateway, with environment configuration as fallback."""
+    gateway = SubscriptionPaymentGateway.objects.filter(
+        slug="subscription",
+        is_active=True,
+    ).first()
+    return (gateway.paystack_secret_key if gateway and gateway.is_configured else settings.PAYSTACK_SECRET_KEY)
+
+
+def create_subscription_payment(*, institution, plan_duration, email, callback_url):
+    """Create a pending payment for the selected plan duration and its amount."""
+    plan = plan_duration.plan
+    if (
+        not plan.is_active
+        or plan.is_trial
+        or not plan_duration.is_active
+        or plan_duration.duration_days not in {183, 365, 730, 1825}
+    ):
+        raise ValueError("That subscription plan is unavailable.")
+    secret_key = subscription_paystack_secret_key()
+    if not secret_key:
+        raise ValueError("Subscription billing is not configured. Please contact Educonnect support.")
+    subscription = institution.current_subscription
+    if subscription is None:
+        today = timezone.localdate()
+        subscription = Subscription.objects.create(
+            institution=institution,
+            plan=plan,
+            start_date=today,
+            end_date=today,
+            status=Subscription.Status.TRIAL,
+            amount=Decimal("0.00"),
+        )
+    payment = Payment.objects.create(
+        institution=institution,
+        subscription=subscription,
+        plan=plan,
+        duration_days=plan_duration.duration_days,
+        reference=f"SUB-{timezone.now():%Y%m%d}-{uuid4().hex[:14].upper()}",
+        amount=plan_duration.price,
+    )
+    try:
+        transaction_data = initialize_paystack_transaction(
+            secret_key=secret_key,
+            email=email,
+            amount=payment.amount,
+            reference=payment.reference,
+            callback_url=callback_url,
+            metadata={"kind": "subscription", "institution_id": institution.id, "payment_id": payment.id},
+        )
+    except Exception:
+        # Keep the auditable pending attempt, but do not imply checkout started.
+        raise
+    return payment, transaction_data
+
+
+def finalize_subscription_payment(*, reference, verification):
+    """Atomically apply a verified payment once; safe for callbacks and retries."""
+    expected_kobo = None
+    with transaction.atomic():
+        payment = (
+            Payment.objects.select_for_update()
+            .select_related("institution", "subscription", "plan")
+            .filter(reference=reference)
+            .first()
+        )
+        if payment is None:
+            return None, False
+        expected_kobo = paystack_amount_in_kobo(payment.amount)
+        verified_amount = verification.get("amount")
+        if (
+            verification.get("status") != "success"
+            or verification.get("reference") != payment.reference
+            or verified_amount != expected_kobo
+        ):
+            payment.status = Payment.Status.FAILED
+            payment.gateway_response = verification
+            payment.save(update_fields=["status", "gateway_response", "updated_at"])
+            AuditLog.objects.create(
+                institution=payment.institution,
+                action="subscription_payment_failed",
+                description=f"Paystack verification failed for {payment.reference}.",
+                object_type="Payment",
+                object_id=str(payment.id),
+            )
+            return payment, False
+        if payment.status == Payment.Status.SUCCESS:
+            return payment, False
+
+        subscription = Subscription.objects.select_for_update().get(pk=payment.subscription_id)
+        today = timezone.localdate()
+        baseline = max(subscription.end_date, today)
+        subscription.plan = payment.plan
+        subscription.amount = payment.amount
+        subscription.end_date = baseline + timedelta(days=payment.duration_days or payment.plan.duration_days)
+        subscription.status = Subscription.Status.ACTIVE
+        subscription.payment_reference = payment.reference
+        subscription.save()
+
+        payment.status = Payment.Status.SUCCESS
+        payment.paid_at = timezone.now()
+        payment.gateway_response = verification
+        payment.receipt_number = f"EC-{payment.paid_at:%Y%m%d}-{payment.id:06d}"
+        payment.save(update_fields=["status", "paid_at", "gateway_response", "receipt_number", "updated_at"])
+        SubscriptionEvent.objects.create(
+            subscription=subscription,
+            payment=payment,
+            event_type="renewed",
+            description=f"Subscription extended to {subscription.end_date:%d %B %Y}.",
+        )
+        AuditLog.objects.create(
+            institution=payment.institution,
+            action="subscription_renewed",
+            description=f"Payment {payment.reference} extended the subscription.",
+            object_type="Subscription",
+            object_id=str(subscription.id),
+        )
+    return payment, True
+
+
+def verify_and_finalize_subscription_payment(reference):
+    secret_key = subscription_paystack_secret_key()
+    if not secret_key:
+        raise ValueError("Platform Paystack billing is not configured.")
+    verification = verify_paystack_transaction(secret_key, reference)
+    return finalize_subscription_payment(reference=reference, verification=verification)
+
+
+def send_subscription_expiry_notifications(today=None):
+    """Idempotent daily email notifications; scheduler-friendly and channel-ready."""
+    today = today or timezone.localdate()
+    sent = 0
+    for subscription in Subscription.objects.select_related("institution", "plan").exclude(
+        status__in=[Subscription.Status.CANCELLED, Subscription.Status.SUSPENDED]
+    ):
+        days = (subscription.end_date - today).days
+        if days not in {60, 30, 7, 1, 0}:
+            continue
+        subject = "Your Educonnect subscription has expired" if days == 0 else (
+            "Your Educonnect subscription expires tomorrow" if days == 1 else
+            f"Your Educonnect subscription expires in {days} days"
+        )
+        with transaction.atomic():
+            notification, _ = SubscriptionNotification.objects.select_for_update().get_or_create(
+                subscription=subscription,
+                days_before_expiry=days,
+                channel="email",
+                defaults={"status": SubscriptionNotification.Status.PENDING},
+            )
+            if notification.status == SubscriptionNotification.Status.SENT:
+                continue
+            notification.attempt_count += 1
+            try:
+                EmailMessage(
+                    subject,
+                    f"{subscription.institution.name}: {subject}.",
+                    settings.DEFAULT_FROM_EMAIL,
+                    [subscription.institution.email],
+                ).send(fail_silently=False)
+            except Exception as exc:
+                notification.status = SubscriptionNotification.Status.FAILED
+                notification.last_error = str(exc)[:1000]
+                notification.save(update_fields=["status", "attempt_count", "last_error"])
+                logger.exception(
+                    "Subscription expiry notification failed for subscription %s.",
+                    subscription.id,
+                )
+                continue
+            notification.status = SubscriptionNotification.Status.SENT
+            notification.sent_at = timezone.now()
+            notification.last_error = ""
+            notification.save(update_fields=["status", "attempt_count", "last_error", "sent_at"])
+            sent += 1
+    return sent
 
 
 def default_material_status(material: CourseMaterial):
@@ -227,7 +444,9 @@ def deliver_notification(notification):
     for student_id in students.distinct().values_list("id", flat=True).iterator(
         chunk_size=NOTIFICATION_RECIPIENT_BATCH_SIZE
     ):
-        recipient_rows.append(NotificationRecipient(notification=notification, student_id=student_id))
+        recipient_rows.append(
+            NotificationRecipient(institution=notification.institution, notification=notification, student_id=student_id)
+        )
         if len(recipient_rows) == NOTIFICATION_RECIPIENT_BATCH_SIZE:
             NotificationRecipient.objects.bulk_create(recipient_rows, ignore_conflicts=True)
             recipient_rows.clear()
@@ -244,6 +463,7 @@ def deliver_notification(notification):
     ):
         alert_rows.append(
             UserAlert(
+                institution=notification.institution,
                 recipient_id=student_id,
                 alert_type=UserAlert.AlertType.MESSAGE,
                 title=notification.subject,

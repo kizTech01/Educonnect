@@ -1,7 +1,9 @@
+from contextvars import ContextVar
+from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.models import AbstractUser, UserManager
 from django.core.validators import FileExtensionValidator
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -18,16 +20,182 @@ LEVEL_CHOICES = [
 ]
 
 
-class TimeStampedModel(models.Model):
+_current_institution = ContextVar("current_institution", default=None)
+
+
+def set_current_institution(institution):
+    """Set the request tenant used by tenant-aware querysets."""
+    return _current_institution.set(institution)
+
+
+def reset_current_institution(token):
+    _current_institution.reset(token)
+
+
+def get_current_institution():
+    return _current_institution.get()
+
+
+def get_default_institution():
+    """Compatibility tenant for data created outside a resolved portal host."""
+    institution, _ = Institution.objects.get_or_create(
+        institution_code="EDUCONNECT-LEGACY",
+        defaults={
+            "name": "Educonnect Legacy Institution",
+            "institution_type": Institution.Type.OTHER,
+            "email": "support@educonnect.local",
+            "subdomain": "legacy",
+            "status": Institution.Status.ACTIVE,
+        },
+    )
+    return institution
+
+
+def generate_api_secret():
+    return uuid4().hex
+
+
+class Institution(models.Model):
+    """A customer organisation hosted by the shared Educonnect application."""
+
+    class Type(models.TextChoices):
+        UNIVERSITY = "university", "University"
+        POLYTECHNIC = "polytechnic", "Polytechnic"
+        COLLEGE = "college", "College"
+        OTHER = "other", "Other"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        SUSPENDED = "suspended", "Suspended"
+        PENDING = "pending", "Pending"
+        EXPIRED = "expired", "Expired"
+
+    name = models.CharField(max_length=200)
+    institution_code = models.CharField(max_length=32, unique=True)
+    institution_type = models.CharField(max_length=20, choices=Type.choices, default=Type.UNIVERSITY)
+    email = models.EmailField()
+    phone = models.CharField(max_length=30, blank=True)
+    address = models.TextField(blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    country = models.CharField(max_length=100, default="Nigeria")
+    timezone = models.CharField(max_length=64, default="Africa/Lagos", blank=True)
+    academic_configuration = models.JSONField(default=dict, blank=True)
+    logo = models.FileField(upload_to="institutions/%Y/%m/", blank=True)
+    subdomain = models.SlugField(max_length=63, unique=True)
+    custom_domain = models.CharField(max_length=253, blank=True, unique=True, null=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        ordering = ["name"]
+
+    @property
+    def current_subscription(self):
+        return self.subscriptions.order_by("-end_date", "-created_at").first()
+
+    @property
+    def is_operational(self):
+        subscription = self.current_subscription
+        return self.status == self.Status.ACTIVE and bool(subscription and subscription.allows_access)
+
+    def feature_enabled(self, code, _checked=None):
+        """Return whether a live, entitled feature is enabled for this tenant.
+
+        Dependencies are evaluated here as a defence in depth measure.  This
+        keeps a dependent capability unavailable even if a prerequisite was
+        disabled after the dependent feature was enabled.
+        """
+        checked = _checked or set()
+        if code in checked:
+            # A cyclic feature configuration cannot be safely enabled.
+            return False
+        checked.add(code)
+        if not self.is_operational:
+            return False
+        setting = InstitutionFeature.objects.select_related("feature").filter(
+            institution=self,
+            feature__code=code,
+            feature__is_active=True,
+            enabled=True,
+        ).first()
+        if not setting:
+            return False
+        entitled_features = (self.current_subscription.plan.features if self.current_subscription else []) or []
+        if (
+            setting.feature.requires_subscription
+            and entitled_features
+            and setting.feature.code not in entitled_features
+        ):
+            return False
+        return all(self.feature_enabled(dependency, checked) for dependency in setting.feature.dependencies)
+
+    def __str__(self):
+        return self.name
+
+
+class TenantQuerySet(models.QuerySet):
+    def for_institution(self, institution):
+        return self.filter(institution=institution)
+
+
+class TenantManager(models.Manager.from_queryset(TenantQuerySet)):
+    """Filters tenant-owned records automatically during a portal request.
+
+    Platform jobs and Django admin run without a request tenant and deliberately
+    see all records; they must still apply explicit institution filters.
+    """
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        institution = get_current_institution()
+        return queryset.filter(institution=institution) if institution else queryset
+
+
+class TenantUserManager(UserManager):
+    """Django's UserManager API plus the same request-tenant filtering."""
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        institution = get_current_institution()
+        return queryset.filter(institution=institution) if institution else queryset
+
+    def for_institution(self, institution):
+        return self.get_queryset().filter(institution=institution)
+
+
+class TimeStampedModel(models.Model):
+    """Base for data owned by exactly one institution."""
+    institution = models.ForeignKey(
+        Institution,
+        on_delete=models.PROTECT,
+        related_name="%(class)ss",
+        null=True,
+        blank=True,
+        editable=False,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantManager()
+    all_objects = models.Manager()
+
+    class Meta:
         abstract = True
+
+    def save(self, *args, **kwargs):
+        current = get_current_institution()
+        if current:
+            if self.institution_id and self.institution_id != current.pk:
+                raise ValidationError("Cross-institution data writes are not permitted.")
+            self.institution = current
+        elif not self.institution_id:
+            self.institution = get_default_institution()
+        super().save(*args, **kwargs)
 
 
 class InstitutionProfile(TimeStampedModel):
-    """The single, administrator-managed identity shown throughout the portal."""
+    """The administrator-managed identity shown within one institution portal."""
 
     name = models.CharField(max_length=200, default="Educonnect")
     logo = models.FileField(
@@ -37,11 +205,24 @@ class InstitutionProfile(TimeStampedModel):
     website = models.URLField(blank=True)
     email = models.EmailField(blank=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["institution"],
+                name="unique_institution_profile",
+            ),
+        ]
+
     def save(self, *args, **kwargs):
-        # Keep this model intentionally singleton without relying on a magic PK.
-        if not self.pk and InstitutionProfile.objects.exists():
-            existing = InstitutionProfile.objects.first()
-            self.pk = existing.pk
+        # Each tenant has one profile.  Retain the original singleton-like
+        # editing behaviour, but scope it to the tenant instead of allowing a
+        # second institution to overwrite the first institution's profile.
+        if not self.pk and self.institution_id:
+            existing = InstitutionProfile.all_objects.filter(
+                institution_id=self.institution_id
+            ).first()
+            if existing:
+                self.pk = existing.pk
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -49,12 +230,15 @@ class InstitutionProfile(TimeStampedModel):
 
 
 class Faculty(TimeStampedModel):
-    name = models.CharField(max_length=150, unique=True)
-    code = models.CharField(max_length=20, unique=True)
+    name = models.CharField(max_length=150)
+    code = models.CharField(max_length=20)
     description = models.TextField(blank=True)
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(fields=["institution", "code"], name="unique_institution_faculty_code"),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.code})"
@@ -70,11 +254,14 @@ class Department(TimeStampedModel):
         related_name="headed_department",
     )
     name = models.CharField(max_length=150)
-    code = models.CharField(max_length=20, unique=True)
+    code = models.CharField(max_length=20)
     description = models.TextField(blank=True)
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(fields=["institution", "code"], name="unique_institution_department_code"),
+        ]
 
     def save(self, *args, **kwargs):
         # Legacy integrations that create a department directly still receive a
@@ -118,6 +305,13 @@ class User(AbstractUser):
         LECTURER = "lecturer", "Lecturer"
 
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
+    institution = models.ForeignKey(
+        Institution,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="users",
+    )
     department = models.ForeignKey(
         Department,
         null=True,
@@ -134,7 +328,7 @@ class User(AbstractUser):
         help_text="The curriculum assigned when this student joined their department.",
     )
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES, blank=True)
-    id_number = models.CharField(max_length=30, unique=True, null=True, blank=True)
+    id_number = models.CharField(max_length=30, null=True, blank=True)
     phone_number = models.CharField(max_length=30, blank=True)
     passport_photo = models.FileField(
         upload_to="passports/%Y/%m/",
@@ -146,10 +340,26 @@ class User(AbstractUser):
     browser_alerts_enabled = models.BooleanField(default=False)
     class_reminder_alerts_enabled = models.BooleanField(default=False)
 
+    objects = TenantUserManager()
+    all_objects = UserManager()
+
     class Meta:
         ordering = ["username"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["institution", "id_number"],
+                name="unique_institution_user_id_number",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
+        current = get_current_institution()
+        if current:
+            if self.institution_id and self.institution_id != current.pk:
+                raise ValidationError("A user cannot be moved between institutions in a tenant request.")
+            self.institution = current
+        elif not self.institution_id and not self.is_superuser:
+            self.institution = get_default_institution()
         if self.role != self.Role.LECTURER:
             self.is_approved = True
         super().save(*args, **kwargs)
@@ -160,6 +370,405 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.full_name
+
+
+class SubscriptionPlan(models.Model):
+    """Database-managed commercial plans; no prices belong in views or templates."""
+
+    class BillingPeriod(models.TextChoices):
+        MONTHLY = "monthly", "Monthly"
+        QUARTERLY = "quarterly", "Quarterly"
+        YEARLY = "yearly", "Yearly"
+        CUSTOM = "custom", "Custom"
+
+    name = models.CharField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    billing_period = models.CharField(max_length=20, choices=BillingPeriod.choices)
+    custom_duration_days = models.PositiveIntegerField(null=True, blank=True)
+    max_students = models.PositiveIntegerField(null=True, blank=True)
+    max_staff = models.PositiveIntegerField(null=True, blank=True)
+    max_storage_mb = models.PositiveIntegerField(null=True, blank=True)
+    features = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    is_trial = models.BooleanField(default=False, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["price", "name"]
+
+    @property
+    def duration_days(self):
+        return {
+            self.BillingPeriod.MONTHLY: 30,
+            self.BillingPeriod.QUARTERLY: 90,
+            self.BillingPeriod.YEARLY: 365,
+        }.get(self.billing_period, self.custom_duration_days or 0)
+
+    @property
+    def duration_label(self):
+        return {
+            183: "6 months",
+            365: "1 year",
+            730: "2 years",
+            1825: "5 years",
+        }.get(self.duration_days, f"{self.duration_days} days")
+
+    def clean(self):
+        if self.price < 0:
+            raise ValidationError({"price": "A plan price cannot be negative."})
+        if self.billing_period == self.BillingPeriod.CUSTOM and not self.custom_duration_days:
+            raise ValidationError({"custom_duration_days": "Custom plans need a duration."})
+
+    def __str__(self):
+        return self.name
+
+
+class SubscriptionPlanDuration(models.Model):
+    """A purchasable duration and price for a platform subscription plan."""
+
+    DURATION_CHOICES = (
+        (183, "6 months"),
+        (365, "1 year"),
+        (730, "2 years"),
+        (1825, "5 years"),
+    )
+
+    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.CASCADE, related_name="durations")
+    duration_days = models.PositiveIntegerField(choices=DURATION_CHOICES)
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["plan__name", "duration_days"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["plan", "duration_days"],
+                name="unique_subscription_plan_duration",
+            ),
+        ]
+
+    @property
+    def duration_label(self):
+        return dict(self.DURATION_CHOICES).get(self.duration_days, f"{self.duration_days} days")
+
+    def __str__(self):
+        return f"{self.plan.name} — {self.duration_label}"
+
+
+class SubscriptionPaymentGateway(models.Model):
+    """The platform-owned gateway used for institution subscription payments."""
+
+    slug = models.SlugField(max_length=30, unique=True, default="subscription")
+    paystack_public_key = models.CharField(max_length=255, blank=True)
+    paystack_secret_key = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def is_configured(self):
+        return bool(self.is_active and self.paystack_public_key and self.paystack_secret_key)
+
+    def __str__(self):
+        return "Subscription payment gateway"
+
+
+class Subscription(models.Model):
+    class Status(models.TextChoices):
+        TRIAL = "trial", "Trial"
+        ACTIVE = "active", "Active"
+        EXPIRING_SOON = "expiring_soon", "Expiring soon"
+        EXPIRED = "expired", "Expired"
+        SUSPENDED = "suspended", "Suspended"
+        CANCELLED = "cancelled", "Cancelled"
+
+    institution = models.ForeignKey(Institution, on_delete=models.PROTECT, related_name="subscriptions")
+    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.PROTECT, related_name="subscriptions")
+    start_date = models.DateField()
+    end_date = models.DateField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.TRIAL)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payment_reference = models.CharField(max_length=100, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-end_date", "-created_at"]
+        indexes = [models.Index(fields=["institution", "status", "end_date"])]
+
+    @property
+    def computed_status(self):
+        if self.status in {self.Status.SUSPENDED, self.Status.CANCELLED}:
+            return self.status
+        today = timezone.localdate()
+        if self.end_date < today:
+            return self.Status.EXPIRED
+        if self.end_date <= today + timedelta(days=60):
+            return self.Status.EXPIRING_SOON
+        return self.Status.ACTIVE
+
+    @property
+    def allows_access(self):
+        return self.computed_status in {self.Status.TRIAL, self.Status.ACTIVE, self.Status.EXPIRING_SOON}
+
+    def refresh_status(self, *, commit=True):
+        computed = self.computed_status
+        if computed != self.status:
+            self.status = computed
+            if commit:
+                self.save(update_fields=["status", "updated_at"])
+        return computed
+
+    def clean(self):
+        if self.end_date < self.start_date:
+            raise ValidationError({"end_date": "The end date cannot be before the start date."})
+
+    def __str__(self):
+        return f"{self.institution} — {self.plan} ({self.end_date})"
+
+
+class Payment(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Successful"
+        FAILED = "failed", "Failed"
+        ABANDONED = "abandoned", "Abandoned"
+
+    institution = models.ForeignKey(Institution, on_delete=models.PROTECT, related_name="subscription_payments")
+    subscription = models.ForeignKey(Subscription, on_delete=models.PROTECT, related_name="payments")
+    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.PROTECT, related_name="payments")
+    duration_days = models.PositiveIntegerField(null=True, blank=True)
+    reference = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default="NGN")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    gateway_response = models.JSONField(default=dict, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    receipt_number = models.CharField(max_length=50, blank=True, unique=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["institution", "status", "created_at"])]
+
+    def __str__(self):
+        return f"{self.reference} ({self.status})"
+
+
+class SubscriptionEvent(models.Model):
+    subscription = models.ForeignKey(Subscription, on_delete=models.CASCADE, related_name="events")
+    payment = models.ForeignKey(Payment, null=True, blank=True, on_delete=models.SET_NULL, related_name="events")
+    event_type = models.CharField(max_length=50)
+    description = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class AuditLog(models.Model):
+    institution = models.ForeignKey(Institution, null=True, blank=True, on_delete=models.SET_NULL, related_name="audit_logs")
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="audit_logs")
+    action = models.CharField(max_length=100)
+    description = models.TextField(blank=True)
+    object_type = models.CharField(max_length=100, blank=True)
+    object_id = models.CharField(max_length=64, blank=True)
+    old_value = models.JSONField(default=dict, blank=True)
+    new_value = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["institution", "action", "created_at"])]
+
+
+class Feature(models.Model):
+    """A platform capability which can be granted independently per institution."""
+
+    code = models.SlugField(max_length=64, unique=True)
+    name = models.CharField(max_length=120)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    requires_subscription = models.BooleanField(default=True)
+    dependencies = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def clean(self):
+        if not isinstance(self.dependencies, list) or not all(isinstance(value, str) for value in self.dependencies):
+            raise ValidationError({"dependencies": "Dependencies must be a JSON list of feature codes."})
+
+    def __str__(self):
+        return self.name
+
+
+class InstitutionFeature(models.Model):
+    institution = models.ForeignKey(Institution, on_delete=models.CASCADE, related_name="feature_settings")
+    feature = models.ForeignKey(Feature, on_delete=models.PROTECT, related_name="institution_settings")
+    enabled = models.BooleanField(default=False)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["institution", "feature"], name="unique_institution_feature"),
+        ]
+
+    def clean(self):
+        if not self.enabled:
+            dependents = list(
+                Feature.objects.filter(
+                    institution_settings__institution=self.institution,
+                    institution_settings__enabled=True,
+                )
+                .distinct()
+                .values_list("name", "dependencies")
+            )
+            dependents = [name for name, dependencies in dependents if self.feature.code in dependencies]
+            if dependents:
+                raise ValidationError(
+                    f"Disable dependent feature(s) first: {', '.join(dependents)}."
+                )
+            return
+        if not self.institution.is_operational:
+            raise ValidationError("Only active institutions with a valid subscription can use platform features.")
+        subscription = self.institution.current_subscription
+        entitled_features = (subscription.plan.features if subscription else []) or []
+        if self.feature.requires_subscription and entitled_features and self.feature.code not in entitled_features:
+            raise ValidationError(f"The current subscription plan does not include {self.feature.name}.")
+        missing = list(
+            Feature.objects.filter(code__in=self.feature.dependencies, is_active=True)
+            .exclude(institution_settings__institution=self.institution, institution_settings__enabled=True)
+            .values_list("name", flat=True)
+        )
+        if missing:
+            raise ValidationError(f"Enable the required feature(s) first: {', '.join(missing)}.")
+
+    def save(self, *args, **kwargs):
+        if self.enabled and self.activated_at is None:
+            self.activated_at = timezone.now()
+        if not self.enabled:
+            self.activated_at = None
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.institution} — {self.feature}"
+
+
+class ScreeningIntegration(models.Model):
+    """Tenant-specific configuration and shared secret for an external screening service."""
+
+    institution = models.OneToOneField(Institution, on_delete=models.CASCADE, related_name="screening_integration")
+    is_open = models.BooleanField(default=False)
+    admission_session = models.ForeignKey("AcademicSession", null=True, blank=True, on_delete=models.SET_NULL)
+    opens_at = models.DateTimeField(null=True, blank=True)
+    closes_at = models.DateTimeField(null=True, blank=True)
+    application_fee = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    available_programmes = models.JSONField(default=list, blank=True)
+    admission_requirements = models.JSONField(default=dict, blank=True)
+    required_documents = models.JSONField(default=list, blank=True)
+    applicant_categories = models.JSONField(default=list, blank=True)
+    utme_de_settings = models.JSONField(default=dict, blank=True)
+    workflow_settings = models.JSONField(default=dict, blank=True)
+    notification_settings = models.JSONField(default=dict, blank=True)
+    api_secret = models.CharField(max_length=64, default=generate_api_secret, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "screening integration"
+
+    def clean(self):
+        if (
+            self.admission_session_id
+            and self.institution_id
+            and self.admission_session.institution_id != self.institution_id
+        ):
+            raise ValidationError({"admission_session": "Choose an academic session from this institution."})
+
+    def rotate_secret(self):
+        self.api_secret = generate_api_secret()
+        self.save(update_fields=["api_secret", "updated_at"])
+        return self.api_secret
+
+    @property
+    def is_accepting_applications(self):
+        now = timezone.now()
+        return bool(
+            self.institution.feature_enabled("online-screening")
+            and self.is_open
+            and (self.opens_at is None or self.opens_at <= now)
+            and (self.closes_at is None or now <= self.closes_at)
+        )
+
+
+class ScreeningApplication(models.Model):
+    """A minimal integration ledger; the full applicant workflow remains external."""
+
+    class Status(models.TextChoices):
+        RECEIVED = "received", "Received"
+        APPROVED = "approved", "Approved"
+        ADMITTED = "admitted", "Admitted"
+        TRANSFERRED = "transferred", "Transferred"
+        REJECTED = "rejected", "Rejected"
+
+    institution = models.ForeignKey(Institution, on_delete=models.PROTECT, related_name="screening_applications")
+    external_application_id = models.CharField(max_length=100)
+    applicant_reference = models.CharField(max_length=100, blank=True)
+    jamb_number = models.CharField(max_length=30, blank=True)
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150)
+    email = models.EmailField(blank=True)
+    department = models.ForeignKey(Department, null=True, blank=True, on_delete=models.PROTECT)
+    academic_session = models.ForeignKey("AcademicSession", null=True, blank=True, on_delete=models.PROTECT)
+    programme = models.CharField(max_length=200, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.RECEIVED)
+    payload = models.JSONField(default=dict, blank=True)
+    admitted_at = models.DateTimeField(null=True, blank=True)
+    student = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="screening_admissions")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["institution", "external_application_id"], name="unique_screening_application_per_institution"),
+        ]
+        indexes = [models.Index(fields=["institution", "status", "external_application_id"])]
+
+    def __str__(self):
+        return f"{self.institution.institution_code}: {self.external_application_id}"
+
+
+class SubscriptionNotification(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    subscription = models.ForeignKey(Subscription, on_delete=models.CASCADE, related_name="notifications")
+    days_before_expiry = models.IntegerField()
+    channel = models.CharField(max_length=20, default="email")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.SENT)
+    attempt_count = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["subscription", "days_before_expiry", "channel"],
+                name="unique_subscription_notification",
+            )
+        ]
 
 
 class Course(TimeStampedModel):
@@ -563,13 +1172,19 @@ class NotificationRecipient(TimeStampedModel):
 
 
 class CoursePaymentGateway(TimeStampedModel):
-    slug = models.CharField(max_length=30, unique=True, default="courses")
+    slug = models.CharField(max_length=30, default="courses")
     payment_url = models.URLField(blank=True)
     paystack_public_key = models.CharField(max_length=255, blank=True)
     paystack_secret_key = models.CharField(max_length=255, blank=True)
 
     class Meta:
         ordering = ["slug"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["institution", "slug"],
+                name="unique_institution_course_gateway_slug",
+            ),
+        ]
 
     def __str__(self):
         return "Course Paystack Settings"
@@ -619,11 +1234,17 @@ class DepartmentCoursePaymentGateway(TimeStampedModel):
 
 
 class AcademicSession(TimeStampedModel):
-    name = models.CharField(max_length=20, unique=True)
+    name = models.CharField(max_length=20)
     is_current = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-is_current", "-name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["institution", "name"],
+                name="unique_institution_academic_session_name",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)

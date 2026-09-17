@@ -42,6 +42,41 @@ services:
       - key: DEFAULT_FROM_EMAIL
         sync: false
 
+  - type: cron
+    name: educonnect-subscription-notifications
+    runtime: python
+    schedule: "0 7 * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python manage.py send_subscription_expiry_notifications
+    envVars:
+      - key: DJANGO_DEBUG
+        value: "False"
+      - key: DJANGO_TIME_ZONE
+        value: Africa/Lagos
+      - key: DJANGO_SECRET_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: DJANGO_SECRET_KEY
+      - key: DATABASE_URL
+        fromDatabase:
+          name: educonnect-db
+          property: connectionString
+      - key: EMAIL_BACKEND
+        value: django.core.mail.backends.smtp.EmailBackend
+      - key: EMAIL_HOST
+        sync: false
+      - key: EMAIL_PORT
+        value: "587"
+      - key: EMAIL_HOST_USER
+        sync: false
+      - key: EMAIL_HOST_PASSWORD
+        sync: false
+      - key: EMAIL_USE_TLS
+        value: "True"
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
+
 databases:
   - name: educonnect-db
     plan: basic-1gb

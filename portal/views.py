@@ -2,17 +2,18 @@ import hashlib
 import hmac
 import json
 from decimal import Decimal, InvalidOperation
+from datetime import timedelta
 from functools import wraps
 from pathlib import Path
 
+from django.apps import apps
 from django.contrib import messages
 from django.conf import settings
-from django.contrib.auth import authenticate, login, logout
-from django.contrib.auth.forms import PasswordResetForm
-from django.core.files.base import ContentFile
-from django.core.exceptions import PermissionDenied
-from django.db import transaction
-from django.db.models import Count, Max
+from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
+from django.core.cache import cache
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import models, transaction
+from django.db.models import Count, Max, OuterRef, Prefetch, Subquery, Sum
 from django.db.models import Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -35,7 +36,15 @@ from .forms import (
     DepartmentLecturerUploadForm,
     CourseAllocationUploadForm,
     FacultyForm,
-    InstitutionProfileForm,
+    InstitutionCreateForm,
+    InstitutionUpdateForm,
+    SubscriptionAssignmentForm,
+    SubscriptionPlanForm,
+    SubscriptionPlanDurationForm,
+    SubscriptionPaymentGatewayForm,
+    ScreeningIntegrationForm,
+    SubscriptionRenewalForm,
+    PlatformAdminForm,
     DepartmentPaymentGatewayForm,
     DepartmentCoursePaymentGatewayForm,
     DepartmentalAdditionalDocumentForm,
@@ -57,6 +66,9 @@ from .forms import (
     TimetableFilterForm,
     TimetableForm,
     LecturerCourseFilterForm,
+    AdminProfileForm,
+    InstitutionAdminPasswordChangeForm,
+    UserPasswordResetForm,
 )
 from .models import (
     AcademicSession,
@@ -68,6 +80,7 @@ from .models import (
     CourseAllocationUpload,
     Faculty,
     InstitutionProfile,
+    Institution,
     DepartmentPaymentGateway,
     DepartmentCoursePaymentGateway,
     DepartmentalAssociation,
@@ -88,9 +101,22 @@ from .models import (
     Timetable,
     User,
     UserAlert,
+    AuditLog,
+    Payment,
+    Subscription,
+    SubscriptionPlan,
+    SubscriptionPlanDuration,
+    SubscriptionPaymentGateway,
+    Feature,
+    InstitutionFeature,
+    ScreeningIntegration,
+    ScreeningApplication,
+    TimeStampedModel,
     curriculum_for_department,
 )
 from .services import (
+    TEMPORARY_ACCOUNT_PASSWORD,
+    grant_free_trial_subscription,
     deliver_notification,
     ensure_default_admin_user,
     initialize_paystack_transaction,
@@ -98,17 +124,132 @@ from .services import (
     sync_material_access_for_material,
     sync_material_access_for_registration,
     verify_paystack_transaction,
+    create_subscription_payment,
+    subscription_paystack_secret_key,
+    verify_and_finalize_subscription_payment,
 )
 from .pdf import build_exam_card_pdf, build_pdf_document
 from .automation import import_course_allocations, import_department_lecturers, import_handbook_courses
-from .branding import LogoLookupError, get_institution_logo
 
 LOGIN_ROLES = {User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN}
+SCREENING_SIGNATURE_HEADER = "HTTP_X_EDUCONNECT_SIGNATURE"
+SCREENING_TIMESTAMP_HEADER = "HTTP_X_EDUCONNECT_TIMESTAMP"
+SCREENING_INSTITUTION_HEADER = "HTTP_X_EDUCONNECT_INSTITUTION"
+
+
+def institution_overview_queryset():
+    """Institution rows enriched with the figures shown to platform admins."""
+    latest_subscription = Subscription.objects.filter(
+        institution=OuterRef("pk"),
+    ).order_by("-end_date", "-created_at")
+    return Institution.objects.annotate(
+        student_count=Count(
+            "users",
+            filter=Q(users__role=User.Role.STUDENT),
+            distinct=True,
+        ),
+        staff_count=Count(
+            "users",
+            filter=Q(users__role__in=[User.Role.LECTURER, User.Role.ADMIN]),
+            distinct=True,
+        ),
+        plan_name=Subquery(latest_subscription.values("plan__name")[:1]),
+        subscription_status=Subquery(latest_subscription.values("status")[:1]),
+    ).prefetch_related(
+        Prefetch(
+            "users",
+            queryset=User.all_objects.filter(
+                role=User.Role.ADMIN,
+                is_superuser=False,
+            ).order_by("email", "id"),
+            to_attr="institution_administrators",
+        )
+    )
+
+
+@transaction.atomic
+def delete_institution_data(institution):
+    """Permanently remove an institution's records and uploaded files.
+
+    Platform-managed subscription plans are deliberately retained because they
+    can be shared by several institutions.  The deletion audit entry is written
+    by the caller after this function completes, so it remains as the sole
+    platform-level record of the destructive action.
+    """
+    tenant_models = [
+        model
+        for model in apps.get_models()
+        if issubclass(model, TimeStampedModel) and not model._meta.abstract
+    ]
+
+    # Django does not remove files from storage when model records are deleted.
+    # Collect every tenant-owned upload first, then remove the physical files
+    # only after the corresponding database rows have been removed.
+    uploads = []
+    for model in [User, *tenant_models]:
+        manager = getattr(model, "all_objects", model._default_manager)
+        for field in model._meta.fields:
+            if isinstance(field, models.FileField):
+                uploads.extend(
+                    (field.storage, name)
+                    for name in manager.filter(institution=institution)
+                    .exclude(**{field.name: ""})
+                    .values_list(field.name, flat=True)
+                )
+
+    # These records use PROTECT for tenant integrity, so remove them before
+    # their referenced tenant, users, departments, or subscription records.
+    ScreeningApplication.objects.filter(institution=institution).delete()
+    AuditLog.objects.filter(institution=institution).delete()
+    Payment.objects.filter(institution=institution).delete()
+    Subscription.objects.filter(institution=institution).delete()
+
+    # Delete dependent records before their parents (courses before
+    # departments, departments before faculties, etc.), then remove users.
+    for model in reversed(tenant_models):
+        model.all_objects.filter(institution=institution).delete()
+    User.all_objects.filter(institution=institution).delete()
+
+    if institution.logo:
+        uploads.append((institution.logo.storage, institution.logo.name))
+    institution.delete()
+
+    files_to_delete = tuple(uploads)
+
+    def delete_uploaded_files():
+        deleted_uploads = set()
+        for storage, name in files_to_delete:
+            if not name:
+                continue
+            key = (id(storage), name)
+            if key not in deleted_uploads:
+                storage.delete(name)
+                deleted_uploads.add(key)
+
+    transaction.on_commit(delete_uploaded_files)
+
+
+def _login_throttle_key(request, username):
+    identity = f"{request.META.get('REMOTE_ADDR', '')}:{username.lower()}"
+    return f"portal-login:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+
+
+def _login_is_throttled(request, username):
+    return int(cache.get(_login_throttle_key(request, username), 0)) >= 5
+
+
+def _record_failed_login(request, username):
+    key = _login_throttle_key(request, username)
+    cache.set(key, int(cache.get(key, 0)) + 1, timeout=15 * 60)
+
+
+def _clear_failed_logins(request, username):
+    cache.delete(_login_throttle_key(request, username))
 
 
 def institution_logo(request):
     """Serve the public institution logo without exposing other uploaded files."""
-    institution = InstitutionProfile.objects.first()
+    institution = getattr(request, "institution", None) or InstitutionProfile.objects.first()
     if institution is None or not institution.logo:
         raise Http404("Institution logo not found.")
     return FileResponse(institution.logo.open("rb"), as_attachment=False)
@@ -131,22 +272,24 @@ def signup_form_for_role(role, data=None):
     return form_class(data) if data is not None else form_class()
 
 
-def auth_page_context(role, login_form=None, signup_form=None):
+def auth_page_context(role, login_form=None, signup_form=None, *, is_super_admin=False):
     ensure_default_admin_user()
-    role_label = User.Role(role).label
-    signup_available = role in {User.Role.STUDENT, User.Role.LECTURER}
+    role_label = "Super Administrator" if is_super_admin else User.Role(role).label
+    signup_available = not is_super_admin and role in {User.Role.STUDENT, User.Role.LECTURER}
     signup_form = signup_form if signup_form is not None else signup_form_for_role(role)
     return {
         "auth_role": role,
         "role_label": role_label,
         "page_title": f"{role_label} Login",
         "page_description": (
-            "Use your portal credentials to continue."
+            "Use your superuser credentials to manage the Educonnect platform."
+            if is_super_admin
+            else "Use your institution administrator credentials to continue."
             if role == User.Role.ADMIN
             else f"Use your {role_label.lower()} credentials to enter your dashboard."
         ),
         "login_form": login_form or login_form_for_role(role),
-        "login_action": reverse("portal:role-login", kwargs={"role": role}),
+        "login_action": reverse("portal:super-admin-login") if is_super_admin else reverse("portal:role-login", kwargs={"role": role}),
         "login_button_label": f"Enter {role_label} Dashboard",
         "signup_available": signup_available,
         "signup_form": signup_form,
@@ -195,13 +338,97 @@ def role_required(*roles):
                 logout(request)
                 messages.warning(request, "Your lecturer account is awaiting admin approval.")
                 return redirect("portal:home")
-            if request.user.is_superuser or request.user.role in roles:
+            if request.user.is_superuser:
+                return redirect("portal:super-admin-dashboard")
+            if request.user.role in roles:
                 return view_func(request, *args, **kwargs)
             raise PermissionDenied
 
         return never_cache(_wrapped)
 
     return decorator
+
+
+def super_admin_required(view_func):
+    @wraps(view_func)
+    @never_cache
+    def _wrapped(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return redirect("portal:super-admin-login")
+        if not request.user.is_superuser:
+            raise PermissionDenied
+        return view_func(request, *args, **kwargs)
+
+    return _wrapped
+
+
+def institution_feature_required(feature_code):
+    """Guard a tenant feature in the backend as well as in navigation."""
+    def decorator(view_func):
+        @wraps(view_func)
+        def _wrapped(request, *args, **kwargs):
+            institution = getattr(request, "institution", None)
+            if not institution or not institution.feature_enabled(feature_code):
+                raise PermissionDenied("This feature is not enabled for your institution.")
+            return view_func(request, *args, **kwargs)
+        return _wrapped
+    return decorator
+
+
+def _client_ip(request):
+    return request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR", "")).split(",")[0].strip() or None
+
+
+def _screening_json(request):
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _screening_api_authenticate(request, institution_code):
+    """Authenticate a request signed by the separately deployed screening app."""
+    header_code = request.META.get(SCREENING_INSTITUTION_HEADER, "").strip()
+    if not header_code or header_code.casefold() != institution_code.casefold():
+        return None, JsonResponse({"detail": "Institution credentials do not match this endpoint."}, status=403)
+    institution = Institution.objects.filter(institution_code__iexact=institution_code).first()
+    if not institution or not institution.feature_enabled("online-screening"):
+        return None, JsonResponse({"detail": "Online Screening is unavailable for this institution."}, status=403)
+    integration = getattr(institution, "screening_integration", None)
+    if not integration:
+        return None, JsonResponse({"detail": "Screening integration is not configured."}, status=409)
+    try:
+        timestamp = int(request.META.get(SCREENING_TIMESTAMP_HEADER, ""))
+    except (TypeError, ValueError):
+        return None, JsonResponse({"detail": "A valid request timestamp is required."}, status=401)
+    max_skew = getattr(settings, "SCREENING_API_MAX_CLOCK_SKEW_SECONDS", 300)
+    if abs(int(timezone.now().timestamp()) - timestamp) > max_skew:
+        return None, JsonResponse({"detail": "The signed request has expired."}, status=401)
+    signature = request.META.get(SCREENING_SIGNATURE_HEADER, "")
+    signed_content = str(timestamp).encode("utf-8") + b"." + request.body
+    expected = hmac.new(integration.api_secret.encode("utf-8"), signed_content, hashlib.sha256).hexdigest()
+    if not signature or not hmac.compare_digest(signature, expected):
+        return None, JsonResponse({"detail": "Invalid API credentials."}, status=401)
+    replay_key = "screening-api-signature:" + hashlib.sha256(
+        f"{institution.id}:{signature}".encode("utf-8")
+    ).hexdigest()
+    if not cache.add(replay_key, True, timeout=max_skew):
+        return None, JsonResponse({"detail": "Duplicate signed request rejected."}, status=409)
+    return (institution, integration), None
+
+
+def _screening_lookup(institution, payload, field, model, *, required=False):
+    code = str(payload.get(field, "") or "").strip()
+    if not code:
+        if required:
+            raise ValidationError({field: f"{field.replace('_', ' ').capitalize()} is required."})
+        return None
+    lookup_field = "code" if model is Department else "name"
+    instance = model.all_objects.filter(institution=institution, **{lookup_field: code}).first()
+    if not instance:
+        raise ValidationError({field: "The supplied value does not belong to this institution."})
+    return instance
 
 
 def ensure_department_gateway_credentials(department):
@@ -244,6 +471,9 @@ def sidebar_links(request):
             is_deleted=False,
             is_read=False,
         ).count()
+    institution = getattr(request, "institution", None)
+    ai_enabled = bool(institution and institution.feature_enabled("educonnect-ai"))
+    screening_enabled = bool(institution and institution.feature_enabled("online-screening"))
     if request.user.is_superuser or request.user.role == User.Role.ADMIN:
         links = [
             {"label": "Dashboard", "url_name": "portal:admin-dashboard"},
@@ -258,7 +488,7 @@ def sidebar_links(request):
             {"label": "Departments", "url_name": "portal:admin-departments"},
             {"label": "HODs", "url_name": "portal:admin-hods"},
             {"label": "Faculty", "url_name": "portal:admin-faculties"},
-            {"label": "About", "url_name": "portal:admin-about"},
+            {"label": "Academic Sessions", "url_name": "portal:admin-about"},
             {"label": "Courses", "url_name": "portal:admin-courses"},
             {
                 "label": "Paid Courses",
@@ -267,7 +497,13 @@ def sidebar_links(request):
             },
             {"label": "Timetable and Handbook", "url_name": "portal:admin-documents"},
             {"label": "Users", "url_name": "portal:admin-users"},
+            {"label": "Subscription & Billing", "url_name": "portal:billing-overview"},
+            {"label": "Profile", "url_name": "portal:profile"},
         ]
+        if ai_enabled:
+            links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
+        if screening_enabled:
+            links.insert(-1, {"label": "Online Screening", "url_name": "portal:screening-portal"})
     elif request.user.role == User.Role.LECTURER:
         is_hod = Department.objects.filter(
             head_of_department=request.user,
@@ -297,6 +533,10 @@ def sidebar_links(request):
             {"label": "Timetable and Handbook", "url_name": "portal:lecturer-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
+        if ai_enabled:
+            links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
+        if screening_enabled:
+            links.insert(-1, {"label": "Online Screening", "url_name": "portal:screening-portal"})
     else:
         links = [
             {"label": "Dashboard", "url_name": "portal:student-dashboard"},
@@ -306,6 +546,10 @@ def sidebar_links(request):
             {"label": "Timetable and Handbook", "url_name": "portal:student-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
+        if ai_enabled:
+            links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
+        if screening_enabled:
+            links.insert(-1, {"label": "Online Screening", "url_name": "portal:screening-portal"})
     resolved_links = []
     for item in links:
         if "children" in item:
@@ -438,6 +682,14 @@ def _verification_matches_payment(verification, *, reference, amount):
 
 def _configured_paystack_webhook_secrets():
     secrets = set()
+    if settings.PAYSTACK_SECRET_KEY:
+        secrets.add(settings.PAYSTACK_SECRET_KEY)
+    subscription_gateway = SubscriptionPaymentGateway.objects.filter(
+        slug="subscription",
+        is_active=True,
+    ).first()
+    if subscription_gateway and subscription_gateway.is_configured:
+        secrets.add(subscription_gateway.paystack_secret_key)
     course_gateway = course_payment_gateway()
     if course_gateway.paystack_secret_key:
         secrets.add(course_gateway.paystack_secret_key)
@@ -910,6 +1162,10 @@ def portal_login(request, role=None):
 
     active_role = requested_role
 
+    if _login_is_throttled(request, username):
+        form.add_error(None, "Too many failed sign-in attempts. Please try again in 15 minutes.")
+        return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
+
     user = authenticate(
         request,
         username=username,
@@ -917,13 +1173,17 @@ def portal_login(request, role=None):
     )
 
     if not user:
+        _record_failed_login(request, username)
         if requested_role:
             form.add_error(None, "Invalid username or password.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
         messages.error(request, "Invalid username or password.")
         return redirect("portal:home")
     if active_role == User.Role.ADMIN:
-        if not (user.is_superuser or user.role == User.Role.ADMIN):
+        if user.is_superuser:
+            form.add_error(None, "Super administrator accounts must use the super administrator login.")
+            return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
+        if user.role != User.Role.ADMIN:
             if requested_role:
                 form.add_error(None, "This account is not an admin account.")
                 return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
@@ -942,7 +1202,15 @@ def portal_login(request, role=None):
         messages.warning(request, "Your lecturer account is waiting for admin approval.")
         return redirect("portal:home")
 
+    _clear_failed_logins(request, username)
     login(request, user)
+    AuditLog.objects.create(
+        institution=user.institution,
+        user=user,
+        action="login",
+        description="User signed in.",
+        ip_address=request.META.get("REMOTE_ADDR") or None,
+    )
     return redirect("portal:dashboard")
 
 
@@ -993,6 +1261,14 @@ def lecturer_signup(request):
 
 @require_http_methods(["GET", "POST"])
 def portal_logout(request):
+    if request.user.is_authenticated:
+        AuditLog.objects.create(
+            institution=request.user.institution,
+            user=request.user,
+            action="logout",
+            description="User signed out.",
+            ip_address=request.META.get("REMOTE_ADDR") or None,
+        )
     logout(request)
     if request.method == "POST":
         messages.success(request, "You have been signed out.")
@@ -1021,23 +1297,737 @@ def paystack_webhook(request):
             data.get("amount"),
             signing_secret=signing_secret,
         )
+        subscription_secret = subscription_paystack_secret_key()
+        if (
+            not processed
+            and subscription_secret
+            and hmac.compare_digest(signing_secret, subscription_secret)
+            and Payment.objects.filter(reference=data.get("reference")).exists()
+        ):
+            try:
+                _, processed = verify_and_finalize_subscription_payment(data.get("reference"))
+            except ValueError:
+                # A failed verification is recorded by the finalizer; do not
+                # acknowledge it as a successful subscription update.
+                processed = False
     return JsonResponse({"ok": True, "event": event, "processed": processed})
 
 
 def dashboard_redirect(request):
     if not request.user.is_authenticated:
         return redirect("portal:home")
-    if request.user.is_superuser or request.user.role == User.Role.ADMIN:
+    if request.user.is_superuser:
+        return redirect("portal:super-admin-dashboard")
+    if request.user.role == User.Role.ADMIN:
         return redirect("portal:admin-dashboard")
     if request.user.role == User.Role.LECTURER:
         return redirect("portal:lecturer-dashboard")
     return redirect("portal:student-dashboard")
 
 
-@role_required(User.Role.STUDENT, User.Role.LECTURER)
+@ensure_csrf_cookie
+@never_cache
+def super_admin_login(request):
+    if request.method == "GET":
+        return render(request, "portal/auth_login.html", auth_page_context(User.Role.ADMIN, is_super_admin=True))
+    form = PortalAuthenticationForm(request.POST, initial={"role": User.Role.ADMIN})
+    if not form.is_valid():
+        form.add_error(None, "Please complete the login form correctly.")
+        return render(request, "portal/auth_login.html", auth_page_context(User.Role.ADMIN, login_form=form, is_super_admin=True))
+    username = form.cleaned_data["username"]
+    if _login_is_throttled(request, username):
+        form.add_error(None, "Too many failed sign-in attempts. Please try again in 15 minutes.")
+        return render(request, "portal/auth_login.html", auth_page_context(User.Role.ADMIN, login_form=form, is_super_admin=True))
+    user = authenticate(request, username=username, password=form.cleaned_data["password"])
+    if not user or not user.is_superuser:
+        _record_failed_login(request, username)
+        form.add_error(None, "Invalid super administrator credentials.")
+        return render(request, "portal/auth_login.html", auth_page_context(User.Role.ADMIN, login_form=form, is_super_admin=True))
+    _clear_failed_logins(request, username)
+    login(request, user)
+    AuditLog.objects.create(user=user, action="login", description="Super administrator signed in.")
+    return redirect("portal:super-admin-dashboard")
+
+
+@super_admin_required
+def super_admin_dashboard(request):
+    institutions = Institution.objects.all()
+    payments = Payment.objects.filter(status=Payment.Status.SUCCESS)
+    today = timezone.localdate()
+    month_start = today.replace(day=1)
+    annual_start = today.replace(month=1, day=1)
+    context = {
+        "institution_count": institutions.count(),
+        "active_institution_count": institutions.filter(status=Institution.Status.ACTIVE).count(),
+        "suspended_institution_count": institutions.filter(status=Institution.Status.SUSPENDED).count(),
+        "expired_institution_count": institutions.filter(status=Institution.Status.EXPIRED).count(),
+        "active_subscription_count": Subscription.objects.filter(status__in=[Subscription.Status.ACTIVE, Subscription.Status.EXPIRING_SOON]).count(),
+        "expiring_subscription_count": Subscription.objects.filter(end_date__range=[today, today + timedelta(days=60)]).count(),
+        "monthly_revenue": payments.filter(paid_at__date__gte=month_start).aggregate(total=Sum("amount"))["total"] or Decimal("0.00"),
+        "annual_revenue": payments.filter(paid_at__date__gte=annual_start).aggregate(total=Sum("amount"))["total"] or Decimal("0.00"),
+        "recent_payments": payments.select_related("institution", "plan")[:8],
+        "recent_institutions": institutions.order_by("-created_at")[:8],
+        "institution_user_counts": institution_overview_queryset()[:20],
+    }
+    return render(request, "portal/super_admin_dashboard.html", context)
+
+
+@super_admin_required
+def super_admin_institutions(request):
+    form = InstitutionCreateForm()
+    if request.method == "POST":
+        form = InstitutionCreateForm(request.POST, request.FILES)
+        if form.is_valid():
+            with transaction.atomic():
+                institution = form.save()
+                institution.status = Institution.Status.ACTIVE
+                institution.save(update_fields=["status", "updated_at"])
+                name_parts = institution.name.split(maxsplit=1)
+                admin = User.all_objects.create_user(
+                    username=institution.email,
+                    email=institution.email,
+                    password=TEMPORARY_ACCOUNT_PASSWORD,
+                    first_name=name_parts[0],
+                    last_name=name_parts[1] if len(name_parts) > 1 else "",
+                    role=User.Role.ADMIN,
+                    institution=institution,
+                )
+                free_trial, _ = grant_free_trial_subscription(institution)
+                AuditLog.objects.create(
+                    user=request.user,
+                    institution=institution,
+                    action="institution_created",
+                    description=(
+                        f"Created {institution.name}, institution admin {admin.username}, and a six-month free trial "
+                        f"ending {free_trial.end_date:%d %B %Y}."
+                    ),
+                    object_type="Institution",
+                    object_id=str(institution.id),
+                )
+            messages.success(
+                request,
+                f"{institution.name} has been created. The administrator signs in with {admin.email} "
+                f"and the temporary password '{TEMPORARY_ACCOUNT_PASSWORD}'. "
+                f"A six-month free trial is active until {free_trial.end_date:%d %B %Y}. "
+                f"Portal: https://{institution.subdomain}.{settings.PLATFORM_BASE_DOMAIN}",
+            )
+            return redirect("portal:super-admin-institutions")
+    return render(request, "portal/super_admin_institutions.html", {
+        "institutions": institution_overview_queryset(),
+        "form": form,
+    })
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_institution_edit(request, institution_id):
+    institution = get_object_or_404(Institution, pk=institution_id)
+    if request.method == "POST":
+        form = InstitutionUpdateForm(request.POST, request.FILES, instance=institution)
+        if form.is_valid():
+            with transaction.atomic():
+                institution = form.save()
+                administrator = (
+                    User.all_objects.filter(
+                        institution=institution,
+                        role=User.Role.ADMIN,
+                        is_superuser=False,
+                    )
+                    .order_by("id")
+                    .first()
+                )
+                if administrator and administrator.email != institution.email:
+                    administrator.email = institution.email
+                    administrator.username = institution.email
+                    administrator.save(update_fields=["email", "username"])
+                AuditLog.objects.create(
+                    user=request.user,
+                    institution=institution,
+                    action="institution_updated",
+                    description=f"Updated institution {institution.name}.",
+                    object_type="Institution",
+                    object_id=str(institution.id),
+                )
+            messages.success(request, f"{institution.name} has been updated.")
+            return redirect("portal:super-admin-institutions")
+    else:
+        form = InstitutionUpdateForm(instance=institution)
+    return render(request, "portal/super_admin_institution_form.html", {
+        "form": form,
+        "institution": institution,
+    })
+
+
+@super_admin_required
+@require_http_methods(["POST"])
+def super_admin_institution_delete(request, institution_id):
+    institution = get_object_or_404(Institution, pk=institution_id)
+    confirmation = request.POST.get("confirmation", "").strip()
+    if confirmation != institution.name:
+        messages.error(request, "To delete an institution, enter its exact name as confirmation.")
+        return redirect("portal:super-admin-institution-edit", institution_id=institution.id)
+
+    institution_name = institution.name
+    with transaction.atomic():
+        delete_institution_data(institution)
+        AuditLog.objects.create(
+            user=request.user,
+            action="institution_deleted",
+            description=f"Permanently deleted institution {institution_name} and its tenant data.",
+            object_type="Institution",
+        )
+    messages.success(request, f"{institution_name} and its tenant data were permanently deleted.")
+    return redirect("portal:super-admin-institutions")
+
+
+@super_admin_required
+@require_http_methods(["POST"])
+def super_admin_institution_status(request, institution_id, status):
+    if status not in {Institution.Status.ACTIVE, Institution.Status.SUSPENDED}:
+        raise Http404
+    institution = get_object_or_404(Institution, pk=institution_id)
+    institution.status = status
+    institution.save(update_fields=["status", "updated_at"])
+    AuditLog.objects.create(
+        user=request.user, institution=institution, action=f"institution_{status}",
+        description=f"Institution status changed to {status}.", object_type="Institution", object_id=str(institution.id),
+    )
+    return redirect("portal:super-admin-institutions")
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_institution_features(request, institution_id):
+    institution = get_object_or_404(Institution, pk=institution_id)
+    features = Feature.objects.filter(is_active=True)
+    for feature in features:
+        InstitutionFeature.objects.get_or_create(institution=institution, feature=feature)
+    if request.method == "POST":
+        feature = get_object_or_404(features, pk=request.POST.get("feature_id"))
+        setting = InstitutionFeature.objects.get(institution=institution, feature=feature)
+        previous = setting.enabled
+        setting.enabled = request.POST.get("enabled") == "true"
+        try:
+            with transaction.atomic():
+                setting.save()
+                if setting.enabled and feature.code == "online-screening":
+                    ScreeningIntegration.objects.get_or_create(institution=institution)
+                AuditLog.objects.create(
+                    user=request.user,
+                    institution=institution,
+                    action="institution_feature_updated",
+                    description=f"{'Enabled' if setting.enabled else 'Disabled'} {feature.name} for {institution.name}.",
+                    object_type="InstitutionFeature",
+                    object_id=str(setting.id),
+                    old_value={"enabled": previous},
+                    new_value={"enabled": setting.enabled},
+                    ip_address=_client_ip(request),
+                )
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+        else:
+            messages.success(request, f"{feature.name} has been {'enabled' if setting.enabled else 'disabled'}.")
+        return redirect("portal:super-admin-institution-features", institution_id=institution.id)
+    return render(request, "portal/super_admin_institution_features.html", {
+        "institution": institution,
+        "feature_settings": InstitutionFeature.objects.filter(institution=institution).select_related("feature"),
+    })
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_screening_configuration(request, institution_id):
+    institution = get_object_or_404(Institution, pk=institution_id)
+    if not institution.feature_enabled("online-screening"):
+        messages.error(request, "Enable Online Screening before configuring it.")
+        return redirect("portal:super-admin-institution-features", institution_id=institution.id)
+    integration, _ = ScreeningIntegration.objects.get_or_create(institution=institution)
+    if request.method == "POST":
+        if request.POST.get("action") == "rotate-secret":
+            integration.rotate_secret()
+            AuditLog.objects.create(
+                user=request.user, institution=institution, action="screening_api_secret_rotated",
+                description=f"Rotated the Screening API secret for {institution.name}.", object_type="ScreeningIntegration", object_id=str(integration.id),
+            )
+            messages.success(request, "A new API secret has been generated. Copy it now and update the Screening application.")
+            return redirect("portal:super-admin-screening-configuration", institution_id=institution.id)
+        form = ScreeningIntegrationForm(request.POST, instance=integration, institution=institution)
+        if form.is_valid():
+            integration = form.save()
+            AuditLog.objects.create(
+                user=request.user, institution=institution, action="screening_configuration_updated",
+                description=f"Updated Online Screening configuration for {institution.name}.", object_type="ScreeningIntegration", object_id=str(integration.id),
+            )
+            messages.success(request, "Screening configuration saved.")
+            return redirect("portal:super-admin-screening-configuration", institution_id=institution.id)
+    else:
+        form = ScreeningIntegrationForm(instance=integration, institution=institution)
+    screening_host = f"apply.{institution.subdomain}.{settings.PLATFORM_BASE_DOMAIN}"
+    return render(request, "portal/super_admin_screening_configuration.html", {
+        "institution": institution, "integration": integration, "form": form, "screening_host": screening_host,
+    })
+
+
+@super_admin_required
+@require_http_methods(["POST"])
+def super_admin_reset_institution_admin_password(request, user_id):
+    administrator = get_object_or_404(
+        User.all_objects,
+        pk=user_id,
+        role=User.Role.ADMIN,
+        is_superuser=False,
+    )
+    if not administrator.email:
+        messages.error(request, "This institution administrator has no email address, so a verified reset cannot be sent.")
+        return redirect("portal:super-admin-institutions")
+
+    administrator.set_password(TEMPORARY_ACCOUNT_PASSWORD)
+    administrator.save(update_fields=["password"])
+    _send_password_reset_verification(request, administrator)
+    AuditLog.objects.create(
+        user=request.user,
+        institution=administrator.institution,
+        action="institution_admin_password_reset",
+        description=f"Reset the password for institution administrator {administrator.username}.",
+        object_type="User",
+        object_id=str(administrator.id),
+    )
+    messages.success(
+        request,
+        f"{administrator.email}'s password was reset to '{TEMPORARY_ACCOUNT_PASSWORD}' and a verification link was sent.",
+    )
+    return redirect("portal:super-admin-institutions")
+
+
+@super_admin_required
+def super_admin_plans(request):
+    form = SubscriptionPlanForm()
+    duration_form = SubscriptionPlanDurationForm()
+    if request.method == "POST":
+        if request.POST.get("action") == "add-duration":
+            duration_form = SubscriptionPlanDurationForm(request.POST)
+            if duration_form.is_valid():
+                duration = duration_form.save()
+                AuditLog.objects.create(
+                    user=request.user,
+                    action="subscription_plan_duration_created",
+                    description=f"Added {duration.duration_label} pricing for {duration.plan.name}.",
+                )
+                messages.success(request, f"Added {duration.duration_label} pricing for {duration.plan.name}.")
+                return redirect("portal:super-admin-plans")
+        else:
+            form = SubscriptionPlanForm(request.POST)
+            if form.is_valid():
+                plan = form.save()
+                AuditLog.objects.create(user=request.user, action="subscription_plan_created", description=f"Created plan {plan.name}.")
+                messages.success(request, "Subscription plan created with its first duration and amount.")
+                return redirect("portal:super-admin-plans")
+    return render(request, "portal/super_admin_plans.html", {
+        "plans": SubscriptionPlan.objects.prefetch_related("durations"),
+        "form": form,
+        "duration_form": duration_form,
+    })
+
+
+@super_admin_required
+def super_admin_subscriptions(request):
+    form = SubscriptionAssignmentForm()
+    if request.method == "POST":
+        form = SubscriptionAssignmentForm(request.POST)
+        institution_id = request.POST.get("institution")
+        institution = get_object_or_404(Institution, pk=institution_id)
+        if form.is_valid():
+            subscription = form.save(commit=False)
+            subscription.institution = institution
+            subscription.save()
+            AuditLog.objects.create(user=request.user, institution=institution, action="subscription_created", description="Subscription assigned by super admin.")
+            messages.success(request, "Subscription assigned.")
+            return redirect("portal:super-admin-subscriptions")
+    return render(request, "portal/super_admin_subscriptions.html", {
+        "subscriptions": Subscription.objects.select_related("institution", "plan")[:100],
+        "institutions": Institution.objects.all(), "form": form,
+    })
+
+
+@super_admin_required
+def super_admin_payments(request):
+    return render(request, "portal/super_admin_payments.html", {"payments": Payment.objects.select_related("institution", "plan")[:200]})
+
+
+@super_admin_required
+def super_admin_audit_logs(request):
+    logs = AuditLog.objects.select_related("institution", "user")
+    query = request.GET.get("q", "").strip()
+    if query:
+        logs = logs.filter(Q(action__icontains=query) | Q(description__icontains=query) | Q(institution__name__icontains=query))
+    return render(request, "portal/super_admin_audit_logs.html", {"logs": logs[:300], "query": query})
+
+
+@super_admin_required
+def super_admin_users(request):
+    form = PlatformAdminForm()
+    if request.method == "POST":
+        form = PlatformAdminForm(request.POST)
+        if form.is_valid():
+            administrator = User.all_objects.create_superuser(
+                username=form.cleaned_data["username"], email=form.cleaned_data["email"], password=form.cleaned_data["password"],
+            )
+            AuditLog.objects.create(user=request.user, action="platform_administrator_created", description=f"Created platform administrator {administrator.username}.")
+            messages.success(request, "Platform administrator created.")
+            return redirect("portal:super-admin-users")
+    return render(request, "portal/super_admin_users.html", {"users": User.all_objects.filter(is_superuser=True), "form": form})
+
+
+@super_admin_required
+def super_admin_reports(request):
+    return render(request, "portal/super_admin_reports.html", {
+        "institution_rows": Institution.objects.annotate(
+            users_total=Count("users"), revenue=Sum("subscription_payments__amount", filter=Q(subscription_payments__status=Payment.Status.SUCCESS)),
+        ),
+    })
+
+
+@super_admin_required
+def super_admin_settings(request):
+    gateway, _ = SubscriptionPaymentGateway.objects.get_or_create(slug="subscription")
+    form = SubscriptionPaymentGatewayForm(instance=gateway)
+    if request.method == "POST":
+        form = SubscriptionPaymentGatewayForm(request.POST, instance=gateway)
+        if form.is_valid():
+            form.save()
+            AuditLog.objects.create(user=request.user, action="subscription_gateway_updated", description="Updated the subscription payment gateway.")
+            messages.success(request, "Subscription payment gateway saved.")
+            return redirect("portal:super-admin-settings")
+    return render(request, "portal/super_admin_settings.html", {
+        "platform_domain": settings.PLATFORM_BASE_DOMAIN,
+        "paystack_configured": gateway.is_configured or bool(settings.PAYSTACK_SECRET_KEY and settings.PAYSTACK_PUBLIC_KEY),
+        "gateway_form": form,
+    })
+
+
+@super_admin_required
+def super_admin_profile(request):
+    if request.method == "POST":
+        request.user.first_name = request.POST.get("first_name", "").strip()
+        request.user.last_name = request.POST.get("last_name", "").strip()
+        email = request.POST.get("email", "").strip().lower()
+        if email:
+            request.user.email = email
+        request.user.save(update_fields=["first_name", "last_name", "email"])
+        AuditLog.objects.create(user=request.user, action="profile_updated", description="Super administrator updated their profile.")
+        messages.success(request, "Profile updated.")
+        return redirect("portal:super-admin-profile")
+    return render(request, "portal/super_admin_profile.html")
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_ai(request):
+    answer = None
+    if request.method == "POST":
+        question = request.POST.get("question", "").casefold()
+        if "screening" in question:
+            answer = f"{Institution.objects.filter(feature_settings__feature__code='online-screening', feature_settings__enabled=True).distinct().count()} institution(s) have Online Screening enabled."
+        elif "expir" in question or "subscription" in question:
+            answer = f"{Subscription.objects.filter(end_date__lte=timezone.localdate() + timedelta(days=60)).count()} subscription(s) expire within 60 days."
+        else:
+            answer = f"There are {Institution.objects.filter(status=Institution.Status.ACTIVE).count()} active institutions on the platform."
+    return render(request, "portal/super_admin_ai.html", {"answer": answer})
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
+@institution_feature_required("online-screening")
+def screening_portal(request):
+    institution = request.institution
+    integration = get_object_or_404(ScreeningIntegration, institution=institution)
+    url_template = getattr(settings, "SCREENING_APPLICATION_URL_TEMPLATE", "https://apply.{subdomain}.{base_domain}")
+    return redirect(url_template.format(subdomain=institution.subdomain, base_domain=settings.PLATFORM_BASE_DOMAIN, institution_code=institution.institution_code))
+
+
+def _ai_answer(user, question):
+    question = question.casefold()
+    if user.role == User.Role.STUDENT:
+        if "course" in question:
+            courses = StudentCourseRegistration.objects.filter(student=user).select_related("course")[:8]
+            names = ", ".join(registration.course.code for registration in courses)
+            return f"Your registered courses are: {names or 'none yet'}."
+        if "department" in question:
+            return f"Your department is {user.department.name if user.department else 'not assigned yet'}."
+        return "I can help with your registered courses, department, timetable, documents, and course registration."
+    if user.role == User.Role.LECTURER:
+        if "course" in question or "class" in question:
+            courses = LecturerCourseRegistration.objects.filter(lecturer=user).select_related("course")[:8]
+            return "Your assigned courses are: " + (", ".join(item.course.code for item in courses) or "none yet") + "."
+        return "I can help with your assigned courses, materials, students, and messages."
+    if "feature" in question:
+        enabled = InstitutionFeature.objects.filter(institution=user.institution, enabled=True).select_related("feature")
+        return "Enabled features: " + (", ".join(item.feature.name for item in enabled) or "none") + "."
+    if "department" in question:
+        return "Departments: " + (", ".join(Department.objects.values_list("name", flat=True)[:20]) or "none") + "."
+    return "I can help with institution users, departments, enabled features, and administration workflows."
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
+@institution_feature_required("educonnect-ai")
+@require_http_methods(["GET", "POST"])
+def ai_assistant(request):
+    answer = None
+    question = ""
+    if request.method == "POST":
+        question = request.POST.get("question", "").strip()
+        if question:
+            answer = _ai_answer(request.user, question)
+            AuditLog.objects.create(
+                user=request.user, institution=request.institution, action="ai_assistant_query",
+                description="A user queried the institution-scoped EduConnect AI assistant.", object_type="EduConnectAI",
+                ip_address=_client_ip(request),
+            )
+    return render(request, "portal/ai_assistant.html", dashboard_context(request, "EduConnect AI", answer=answer, question=question))
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def api_institution_detail(request, institution_code):
+    authenticated, error = _screening_api_authenticate(request, institution_code)
+    if error:
+        return error
+    institution, integration = authenticated
+    return JsonResponse({
+        "institution_code": institution.institution_code,
+        "name": institution.name,
+        "status": institution.status,
+        "online_screening_enabled": True,
+        "screening_open": integration.is_accepting_applications,
+        "admission_session": integration.admission_session.name if integration.admission_session else None,
+        "available_programmes": integration.available_programmes,
+    })
+
+
+def _screening_application_from_payload(institution, payload):
+    application_id = str(payload.get("application_id", "")).strip()
+    if not application_id:
+        raise ValidationError({"application_id": "Application ID is required."})
+    existing = ScreeningApplication.objects.filter(
+        institution=institution, external_application_id=application_id,
+    ).first()
+    first_name = str(payload.get("first_name", existing.first_name if existing else "")).strip()
+    last_name = str(payload.get("last_name", existing.last_name if existing else "")).strip()
+    if not first_name or not last_name:
+        raise ValidationError({"applicant": "First name and last name are required."})
+    department = _screening_lookup(institution, payload, "department_code", Department)
+    academic_session = _screening_lookup(institution, payload, "academic_session", AcademicSession)
+    defaults = {
+        "applicant_reference": str(payload.get("applicant_reference", "")).strip(),
+        "jamb_number": str(payload.get("jamb_number", "")).strip(),
+        "first_name": first_name,
+        "last_name": last_name,
+        "email": str(payload.get("email", "")).strip(),
+        "programme": str(payload.get("programme", "")).strip(),
+        "payload": payload.get("data", {}) if isinstance(payload.get("data", {}), dict) else {},
+    }
+    if department:
+        defaults["department"] = department
+    if academic_session:
+        defaults["academic_session"] = academic_session
+    application, created = ScreeningApplication.objects.update_or_create(
+        institution=institution, external_application_id=application_id, defaults=defaults,
+    )
+    return application, created
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def api_screening_applications(request):
+    institution_code = request.META.get(SCREENING_INSTITUTION_HEADER, "")
+    authenticated, error = _screening_api_authenticate(request, institution_code)
+    if error:
+        return error
+    payload = _screening_json(request)
+    if payload is None:
+        return JsonResponse({"detail": "Request body must be a JSON object."}, status=400)
+    institution, _ = authenticated
+    try:
+        with transaction.atomic():
+            application, created = _screening_application_from_payload(institution, payload)
+            AuditLog.objects.create(
+                institution=institution, action="screening_application_received",
+                description=f"Screening application {application.external_application_id} {'created' if created else 'updated'} through the API.",
+                object_type="ScreeningApplication", object_id=str(application.id), ip_address=_client_ip(request),
+            )
+    except ValidationError as exc:
+        return JsonResponse({"detail": "Invalid application payload.", "errors": exc.message_dict}, status=400)
+    return JsonResponse({"application_id": application.external_application_id, "status": application.status, "created": created}, status=201 if created else 200)
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def api_screening_application_status(request, institution_code, application_id):
+    authenticated, error = _screening_api_authenticate(request, institution_code)
+    if error:
+        return error
+    institution, _ = authenticated
+    application = get_object_or_404(ScreeningApplication, institution=institution, external_application_id=application_id)
+    return JsonResponse({
+        "application_id": application.external_application_id,
+        "status": application.status,
+        "student_id": application.student_id,
+        "admitted_at": application.admitted_at.isoformat() if application.admitted_at else None,
+    })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def api_screening_admit(request, institution_code, application_id):
+    authenticated, error = _screening_api_authenticate(request, institution_code)
+    if error:
+        return error
+    institution, _ = authenticated
+    application = get_object_or_404(ScreeningApplication, institution=institution, external_application_id=application_id)
+    if application.status == ScreeningApplication.Status.REJECTED:
+        return JsonResponse({"detail": "A rejected application cannot be admitted."}, status=409)
+    application.status = ScreeningApplication.Status.ADMITTED
+    application.admitted_at = timezone.now()
+    application.save(update_fields=["status", "admitted_at", "updated_at"])
+    AuditLog.objects.create(
+        institution=institution, action="screening_application_admitted",
+        description=f"Screening application {application.external_application_id} was admitted through the API.",
+        object_type="ScreeningApplication", object_id=str(application.id), ip_address=_client_ip(request),
+    )
+    return JsonResponse({"application_id": application.external_application_id, "status": application.status})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def api_student_from_screening(request):
+    institution_code = request.META.get(SCREENING_INSTITUTION_HEADER, "")
+    authenticated, error = _screening_api_authenticate(request, institution_code)
+    if error:
+        return error
+    payload = _screening_json(request)
+    if payload is None:
+        return JsonResponse({"detail": "Request body must be a JSON object."}, status=400)
+    institution, _ = authenticated
+    application_id = str(payload.get("application_id", "")).strip()
+    application = ScreeningApplication.objects.filter(institution=institution, external_application_id=application_id).first()
+    if not application:
+        return JsonResponse({"detail": "Application not found for this institution."}, status=404)
+    if application.status not in {ScreeningApplication.Status.ADMITTED, ScreeningApplication.Status.TRANSFERRED}:
+        return JsonResponse({"detail": "Only admitted applications can create student records."}, status=409)
+    try:
+        department = _screening_lookup(institution, payload, "department_code", Department, required=not application.department_id) or application.department
+        session = _screening_lookup(institution, payload, "academic_session", AcademicSession, required=not application.academic_session_id) or application.academic_session
+        if not department or not session:
+            raise ValidationError({"admission": "A valid department and academic session are required."})
+        identifier = str(payload.get("student_id") or application.jamb_number or application.applicant_reference or application.external_application_id).strip()
+        if not identifier:
+            raise ValidationError({"student_id": "A student or admission reference is required."})
+        with transaction.atomic():
+            application = ScreeningApplication.objects.select_for_update().get(pk=application.pk)
+            student = application.student or User.all_objects.filter(institution=institution, id_number=identifier).first()
+            created = student is None
+            if created:
+                username_base = f"{institution.institution_code}-{identifier}"[:150]
+                username = username_base
+                suffix = 2
+                while User.all_objects.filter(username=username).exists():
+                    username = f"{username_base[:145]}-{suffix}"
+                    suffix += 1
+                student = User.all_objects.create_user(
+                    username=username, password=None, first_name=application.first_name, last_name=application.last_name,
+                    email=application.email, role=User.Role.STUDENT, institution=institution, department=department,
+                    id_number=identifier, level=str(payload.get("level", "")),
+                )
+            else:
+                student.department = department
+                if payload.get("level"):
+                    student.level = str(payload["level"])
+                student.save(update_fields=["department", "level"])
+            application.department = department
+            application.academic_session = session
+            application.student = student
+            application.status = ScreeningApplication.Status.TRANSFERRED
+            application.save(update_fields=["department", "academic_session", "student", "status", "updated_at"])
+            AuditLog.objects.create(
+                institution=institution, action="screening_student_transferred",
+                description=f"Created or linked student {student.username} from screening application {application.external_application_id}.",
+                object_type="User", object_id=str(student.id), ip_address=_client_ip(request),
+            )
+    except ValidationError as exc:
+        return JsonResponse({"detail": "Invalid student transfer payload.", "errors": exc.message_dict}, status=400)
+    return JsonResponse({"application_id": application.external_application_id, "student_id": student.id, "username": student.username, "created": created}, status=201 if created else 200)
+
+
+@role_required(User.Role.ADMIN)
+def billing_overview(request):
+    institution = getattr(request, "institution", None)
+    if institution is None:
+        raise PermissionDenied
+    return render(request, "portal/billing_overview.html", {
+        "subscription": institution.current_subscription,
+        "payments": Payment.objects.filter(institution=institution).select_related("plan")[:30],
+        "plans": SubscriptionPlan.objects.filter(is_active=True),
+    })
+
+
+@role_required(User.Role.ADMIN)
+def billing_renew(request):
+    institution = getattr(request, "institution", None)
+    if institution is None:
+        raise PermissionDenied
+    form = SubscriptionRenewalForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        if not subscription_paystack_secret_key():
+            form.add_error(None, "Subscription billing is not configured. Please contact Educonnect support.")
+        else:
+            try:
+                payment, checkout = create_subscription_payment(
+                    institution=institution,
+                    plan_duration=form.cleaned_data["plan_duration"],
+                    email=request.user.email or institution.email,
+                    callback_url=request.build_absolute_uri(reverse("portal:billing-callback")),
+                )
+                AuditLog.objects.create(user=request.user, institution=institution, action="subscription_checkout_started", description=f"Started checkout {payment.reference}.")
+                return redirect(checkout["authorization_url"])
+            except ValueError as exc:
+                form.add_error(None, str(exc))
+    return render(request, "portal/billing_renew.html", {"form": form, "institution": institution})
+
+
+@role_required(User.Role.ADMIN)
+def billing_callback(request):
+    reference = request.GET.get("reference", "")
+    payment = get_object_or_404(Payment, reference=reference, institution=getattr(request, "institution", None))
+    try:
+        _, changed = verify_and_finalize_subscription_payment(payment.reference)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect("portal:billing-overview")
+    messages.success(request, "Payment verified and subscription updated." if changed else "This payment has already been processed.")
+    return redirect("portal:billing-receipt", payment_id=payment.id)
+
+
+@role_required(User.Role.ADMIN)
+def billing_receipt(request, payment_id):
+    payment = get_object_or_404(Payment.objects.select_related("institution", "plan", "subscription"), pk=payment_id, institution=getattr(request, "institution", None), status=Payment.Status.SUCCESS)
+    response = render(request, "portal/payment_receipt.html", {"payment": payment})
+    response["Content-Disposition"] = f'attachment; filename="educonnect-receipt-{payment.reference}.html"'
+    return response
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
 def profile(request):
-    form_class = LecturerProfileForm if request.user.role == User.Role.LECTURER else StudentProfileForm
+    if request.user.role == User.Role.ADMIN:
+        form_class = AdminProfileForm
+    elif request.user.role == User.Role.LECTURER:
+        form_class = LecturerProfileForm
+    else:
+        form_class = StudentProfileForm
     form = form_class(instance=request.user)
+    password_form = (
+        InstitutionAdminPasswordChangeForm(request.user)
+        if request.user.role == User.Role.ADMIN
+        else None
+    )
     if request.method == "POST":
         previous_level = request.user.level
         previous_department_id = request.user.department_id
@@ -1080,12 +2070,64 @@ def profile(request):
             request,
             "Profile",
             form=form,
+            password_form=password_form,
             browser_alerts_enabled=request.user.browser_alerts_enabled,
         ),
     )
 
 
-@role_required(User.Role.STUDENT, User.Role.LECTURER)
+@role_required(User.Role.ADMIN)
+@require_http_methods(["POST"])
+def institution_admin_change_password(request):
+    """Allow a signed-in institution administrator to replace their password."""
+    if not request.user.institution_id:
+        raise PermissionDenied
+
+    form = InstitutionAdminPasswordChangeForm(request.user, request.POST)
+    if form.is_valid():
+        user = form.save()
+        update_session_auth_hash(request, user)
+        AuditLog.objects.create(
+            user=user,
+            institution=user.institution,
+            action="institution_admin_password_changed",
+            description="Institution administrator changed their password.",
+            object_type="User",
+            object_id=str(user.id),
+        )
+        messages.success(request, "Your password has been changed.")
+        return redirect("portal:profile")
+
+    messages.error(request, "Please correct the password form errors below.")
+    return render(
+        request,
+        "portal/profile.html",
+        dashboard_context(
+            request,
+            "Profile",
+            form=AdminProfileForm(instance=request.user),
+            password_form=form,
+            browser_alerts_enabled=request.user.browser_alerts_enabled,
+        ),
+        status=400,
+    )
+
+
+def _send_password_reset_verification(request, user):
+    form = UserPasswordResetForm({"email": user.email}, target_user=user)
+    if not form.is_valid():
+        return False
+    form.save(
+        request=request,
+        use_https=request.is_secure(),
+        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@educonnect.local"),
+        subject_template_name="portal/emails/password_reset_subject.txt",
+        email_template_name="portal/emails/password_reset_email.txt",
+    )
+    return True
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
 def send_profile_password_reset(request):
     if request.method != "POST":
         raise PermissionDenied
@@ -1093,15 +2135,7 @@ def send_profile_password_reset(request):
         messages.error(request, "Add an email address to your profile before requesting a password reset.")
         return redirect("portal:profile")
 
-    form = PasswordResetForm({"email": request.user.email})
-    if form.is_valid():
-        form.save(
-            request=request,
-            use_https=request.is_secure(),
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@educonnect.local"),
-            subject_template_name="portal/emails/password_reset_subject.txt",
-            email_template_name="portal/emails/password_reset_email.txt",
-        )
+    if _send_password_reset_verification(request, request.user):
         messages.success(request, f"A password reset verification link has been sent to {request.user.email}.")
     else:
         messages.error(request, "We could not send the password reset email right now.")
@@ -1963,7 +2997,7 @@ def lecturer_course_groups(request, course_id):
                     for index, student in enumerate(students):
                         groups[index % len(groups)][1].append(student)
                 CourseStudentGroupMembership.objects.bulk_create([
-                    CourseStudentGroupMembership(group=group, student=student)
+                    CourseStudentGroupMembership(institution=request.institution, group=group, student=student)
                     for group, members in groups for student in members
                 ])
             messages.success(request, f"{len(groups)} student group(s) created from {len(students)} paid student(s).")
@@ -2107,7 +3141,7 @@ def lecturer_messages(request):
             notification.save()
             form.save_m2m()
             NotificationAttachment.objects.bulk_create([
-                NotificationAttachment(notification=notification, file=attachment)
+                NotificationAttachment(institution=request.institution, notification=notification, file=attachment)
                 for attachment in form.cleaned_data["attachments"]
             ])
             deliver_notification(notification)
@@ -2496,62 +3530,30 @@ def admin_faculties(request):
 
 @role_required(User.Role.ADMIN)
 def admin_about(request):
-    institution = InstitutionProfile.objects.first()
-    if institution is None:
-        institution = InstitutionProfile.objects.create(name="Educonnect")
-    form = InstitutionProfileForm(instance=institution)
     session_form = AcademicSessionForm(initial={"is_current": True})
     if request.method == "POST":
-        if request.POST.get("action") == "create-academic-session":
-            session_form = AcademicSessionForm(request.POST)
-            if session_form.is_valid():
-                session = session_form.save()
-                for department in Department.objects.all():
-                    ensure_departmental_fees_for_department(department)
-                reset_count = reset_lecturer_course_registrations() if session.is_current else 0
-                messages.success(
-                    request,
-                    f"Academic session {session.name} created"
-                    + (
-                        f" and set as current. {reset_count} lecturer course registration(s) were cleared; "
-                        "students start this session with no registered courses."
-                        if session.is_current else "."
-                    ),
-                )
-                return redirect("portal:admin-about")
-        else:
-            form = InstitutionProfileForm(request.POST, instance=institution)
-            if form.is_valid():
-                updated_institution = form.save(commit=False)
-                if updated_institution.name:
-                    try:
-                        logo_bytes, extension = get_institution_logo(updated_institution.name)
-                    except LogoLookupError as exc:
-                        updated_institution.save()
-                        messages.warning(
-                            request,
-                            f"Institution name saved, but an official logo could not be verified: {exc}",
-                        )
-                    else:
-                        updated_institution.logo.save(
-                            f"institution-logo.{extension}",
-                            ContentFile(logo_bytes),
-                            save=False,
-                        )
-                        updated_institution.save()
-                        messages.success(request, "Institution name and verified official logo saved.")
-                else:
-                    updated_institution.save()
-                    messages.success(request, "Institution name saved.")
-                return redirect("portal:admin-about")
+        session_form = AcademicSessionForm(request.POST)
+        if session_form.is_valid():
+            session = session_form.save()
+            for department in Department.objects.all():
+                ensure_departmental_fees_for_department(department)
+            reset_count = reset_lecturer_course_registrations() if session.is_current else 0
+            messages.success(
+                request,
+                f"Academic session {session.name} created"
+                + (
+                    f" and set as current. {reset_count} lecturer course registration(s) were cleared; "
+                    "students start this session with no registered courses."
+                    if session.is_current else "."
+                ),
+            )
+            return redirect("portal:admin-about")
     return render(
         request,
         "portal/admin_about.html",
         dashboard_context(
             request,
-            "About Your Institution",
-            form=form,
-            institution=institution,
+            "Academic Sessions",
             session_form=session_form,
             current_session=AcademicSession.objects.filter(is_current=True).first(),
             past_sessions=AcademicSession.objects.filter(is_current=False),

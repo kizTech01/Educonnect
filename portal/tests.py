@@ -1943,40 +1943,15 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertTrue(view_response["Content-Disposition"].startswith("inline"))
         self.assertTrue(download_response["Content-Disposition"].startswith("attachment"))
 
-    @patch("portal.views.get_institution_logo", return_value=(b"official-logo-image", "png"))
-    def test_admin_about_saves_the_institution_name_and_verified_official_logo(self, logo_lookup):
+    def test_admin_academic_sessions_page_does_not_allow_identity_changes(self):
         self.client.force_login(self.admin)
-
-        response = self.client.post(reverse("portal:admin-about"), {"name": "Example University"})
-
-        self.assertEqual(response.status_code, 302)
-        profile = InstitutionProfile.objects.get()
-        self.assertEqual(profile.name, "Example University")
-        self.assertTrue(profile.logo.name.endswith(".png"))
-        logo_lookup.assert_called_once_with("Example University")
 
         page_response = self.client.get(reverse("portal:admin-about"))
-        self.assertContains(page_response, "University or institution name")
-        self.assertContains(page_response, reverse("portal:institution-logo"))
-        self.assertNotContains(page_response, "Upload institution logo")
-        self.assertNotContains(page_response, "multipart/form-data")
 
-        logo_response = self.client.get(reverse("portal:institution-logo"))
-        self.assertEqual(logo_response.status_code, 200)
-        self.assertEqual(b"".join(logo_response.streaming_content), b"official-logo-image")
-
-    @patch("portal.views.get_institution_logo", return_value=(b"replacement-logo", "png"))
-    def test_admin_about_refreshes_the_official_logo_when_the_name_is_unchanged(self, logo_lookup):
-        profile = InstitutionProfile.objects.create(name="Example University")
-        profile.logo.save("old-logo.png", SimpleUploadedFile("old-logo.png", b"old"), save=True)
-        self.client.force_login(self.admin)
-
-        response = self.client.post(reverse("portal:admin-about"), {"name": "Example University"})
-
-        self.assertEqual(response.status_code, 302)
-        profile.refresh_from_db()
-        logo_lookup.assert_called_once_with("Example University")
-        self.assertEqual(profile.logo.read(), b"replacement-logo")
+        self.assertContains(page_response, "Academic Sessions")
+        self.assertContains(page_response, "Create Academic Session")
+        self.assertNotContains(page_response, "Institution Details")
+        self.assertNotContains(page_response, "University or institution name")
 
     def test_admin_can_create_academic_session_from_about_and_see_past_sessions(self):
         LecturerCourseRegistration.objects.create(lecturer=self.lecturer, course=self.paid_course)
@@ -2410,13 +2385,13 @@ class DefaultAdminBootstrapTests(TestCase):
         self.assertTrue(admin_user.check_password("updated-secret-123"))
         self.assertFalse(admin_user.check_password(self.password))
 
-    def test_admin_login_uses_current_password_after_bootstrap(self):
+    def test_super_admin_login_uses_current_password_after_bootstrap(self):
         admin_user = ensure_default_admin_user()
         admin_user.set_password("updated-secret-123")
         admin_user.save(update_fields=["password"])
 
         response = self.client.post(
-            reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
+            reverse("portal:super-admin-login"),
             {
                 "role": User.Role.ADMIN,
                 "username": self.username,
@@ -2425,22 +2400,22 @@ class DefaultAdminBootstrapTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.url, reverse("portal:dashboard"))
+        self.assertEqual(response.url, reverse("portal:super-admin-dashboard"))
 
-    def test_direct_role_login_page_sets_csrf_cookie_for_post(self):
+    def test_super_admin_login_page_sets_csrf_cookie_for_post(self):
         admin_user = ensure_default_admin_user()
         admin_user.set_password("updated-secret-123")
         admin_user.save(update_fields=["password"])
 
         client = Client(enforce_csrf_checks=True)
-        get_response = client.get(reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}))
+        get_response = client.get(reverse("portal:super-admin-login"))
 
         self.assertEqual(get_response.status_code, 200)
         self.assertIn("csrftoken", client.cookies)
 
         csrf_token = client.cookies["csrftoken"].value
         response = client.post(
-            reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
+            reverse("portal:super-admin-login"),
             {
                 "csrfmiddlewaretoken": csrf_token,
                 "role": User.Role.ADMIN,
@@ -2450,7 +2425,7 @@ class DefaultAdminBootstrapTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.url, reverse("portal:dashboard"))
+        self.assertEqual(response.url, reverse("portal:super-admin-dashboard"))
 
     def test_logout_clears_authenticated_session(self):
         admin_user = ensure_default_admin_user()
@@ -2458,7 +2433,7 @@ class DefaultAdminBootstrapTests(TestCase):
         admin_user.save(update_fields=["password"])
 
         login_response = self.client.post(
-            reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
+            reverse("portal:super-admin-login"),
             {
                 "role": User.Role.ADMIN,
                 "username": self.username,

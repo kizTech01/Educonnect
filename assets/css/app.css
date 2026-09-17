@@ -800,6 +800,13 @@ textarea {
     margin-bottom: 1.5rem;
 }
 
+.institution-management-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
 .panel-head {
     display: flex;
     justify-content: space-between;
@@ -844,6 +851,32 @@ th {
 
 .actions-cell {
     justify-content: flex-end;
+}
+
+.institution-actions-cell {
+    min-width: 15rem;
+}
+
+.institution-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+.institution-actions .small {
+    min-width: 0;
+    width: 100%;
+    white-space: nowrap;
+}
+
+.institution-actions form {
+    margin: 0;
+}
+
+@media (max-width: 640px) {
+    .institution-actions {
+        grid-template-columns: 1fr;
+    }
 }
 
 .stack-form p {

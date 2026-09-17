@@ -1,0 +1,3 @@
+{% extends 'portal/dashboard_base.html' %}
+{% block title %}Renew subscription | Educonnect{% endblock %}
+{% block dashboard_content %}<section class="panel narrow-panel"><h2>Renew {{ institution.name }}</h2><p>Select a plan, then choose its duration. The amount displayed for that duration is the amount sent to Paystack.</p><form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="primary-btn">Continue to secure checkout</button></form></section>{% endblock %}

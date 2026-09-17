@@ -1,0 +1,13 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+  <p class="muted-note">EduConnect AI only uses information available to your signed-in role within {{ request.institution.name }}. It provides guidance and does not perform administrative actions.</p>
+  <form method="post">{% csrf_token %}
+    <label for="ai-question">Ask a question</label>
+    <textarea class="input-field" id="ai-question" name="question" rows="4" required>{{ question }}</textarea>
+    <button class="button" type="submit">Ask EduConnect AI</button>
+  </form>
+  {% if answer %}<div class="resource-card" style="margin-top: 1rem"><strong>Response</strong><p>{{ answer }}</p></div>{% endif %}
+</section>
+{% endblock %}

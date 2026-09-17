@@ -1,0 +1,17 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}Subscription plans{% endblock %}
+{% block super_content %}
+<div class="content-grid two-column">
+  <section class="panel-card">
+    <div class="panel-head"><h2>Create plan</h2></div>
+    <p class="muted-note">Create a plan with its first duration and amount. Add the other durations below.</p>
+    <form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="primary-btn">Save plan</button></form>
+  </section>
+  <section class="panel-card">
+    <div class="panel-head"><h2>Add duration and amount</h2></div>
+    <p class="muted-note">Each plan can have a different amount for 6 months, 1 year, 2 years, and 5 years.</p>
+    <form method="post" class="stack-form">{% csrf_token %}<input type="hidden" name="action" value="add-duration">{{ duration_form.as_p }}<button class="primary-btn">Add duration</button></form>
+  </section>
+</div>
+<section class="panel-card"><div class="panel-head"><h2>Available plans</h2></div><div class="table-wrap"><table><tr><th>Plan</th><th>Duration prices</th><th>Active</th></tr>{% for plan in plans %}<tr><td><strong>{{ plan.name }}</strong>{% if plan.description %}<br><small>{{ plan.description }}</small>{% endif %}</td><td>{% for duration in plan.durations.all %}<div>{{ duration.duration_label }} — ₦{{ duration.price }}{% if not duration.is_active %} (inactive){% endif %}</div>{% empty %}<span class="muted-note">No durations configured</span>{% endfor %}</td><td>{{ plan.is_active|yesno:'Yes,No' }}</td></tr>{% empty %}<tr><td colspan="3">No plans yet.</td></tr>{% endfor %}</table></div></section>
+{% endblock %}

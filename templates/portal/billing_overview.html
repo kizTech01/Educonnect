@@ -1,0 +1,6 @@
+{% extends 'portal/dashboard_base.html' %}
+{% block title %}Subscription billing | Educonnect{% endblock %}
+{% block dashboard_content %}
+<section class="panel"><h2>Subscription status</h2>{% if subscription %}<p><strong>{{ subscription.plan.name }}</strong> — {{ subscription.computed_status }}. Your subscription ends on {{ subscription.end_date }}.</p>{% else %}<p>No active subscription has been assigned to this institution.</p>{% endif %}<a class="primary-btn" href="{% url 'portal:billing-renew' %}">Choose plan and renew</a></section>
+<section class="panel"><h2>Payment history</h2><div class="table-wrap"><table><tr><th>Reference</th><th>Plan</th><th>Amount</th><th>Status</th><th>Receipt</th></tr>{% for payment in payments %}<tr><td>{{ payment.reference }}</td><td>{{ payment.plan.name }}</td><td>₦{{ payment.amount }}</td><td>{{ payment.get_status_display }}</td><td>{% if payment.status == 'success' %}<a href="{% url 'portal:billing-receipt' payment.id %}">Download</a>{% endif %}</td></tr>{% empty %}<tr><td colspan="5">No subscription payments yet.</td></tr>{% endfor %}</table></div></section>
+{% endblock %}

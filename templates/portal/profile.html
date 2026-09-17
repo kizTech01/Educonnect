@@ -41,10 +41,19 @@
     <div class="panel-head">
         <h2>Change Password</h2>
     </div>
-    <p class="muted-note">We will verify the request through your email before your password can be changed.</p>
-    <form method="post" action="{% url 'portal:profile-password-reset' %}">
-        {% csrf_token %}
-        <button type="submit" class="ghost-btn">Send Password Reset Link</button>
-    </form>
+    {% if request.user.role == "admin" %}
+        <p class="muted-note">Choose a new password for your institution administrator account.</p>
+        <form method="post" action="{% url 'portal:institution-admin-change-password' %}" class="stack-form">
+            {% csrf_token %}
+            {{ password_form.as_p }}
+            <button type="submit" class="primary-btn">Update Password</button>
+        </form>
+    {% else %}
+        <p class="muted-note">We will verify the request through your email before your password can be changed.</p>
+        <form method="post" action="{% url 'portal:profile-password-reset' %}">
+            {% csrf_token %}
+            <button type="submit" class="ghost-btn">Send Password Reset Link</button>
+        </form>
+    {% endif %}
 </section>
 {% endblock %}

@@ -21,6 +21,7 @@ from .models import (
     Handbook,
     Faculty,
     InstitutionProfile,
+    Institution,
     LecturerCourseRegistration,
     MaterialAccess,
     Notification,
@@ -29,6 +30,14 @@ from .models import (
     StudentCourseRegistration,
     Timetable,
     User,
+    AuditLog,
+    Payment,
+    Subscription,
+    SubscriptionPlan,
+    Feature,
+    InstitutionFeature,
+    ScreeningIntegration,
+    ScreeningApplication,
 )
 
 
@@ -210,3 +219,69 @@ class DepartmentalPaymentAdmin(admin.ModelAdmin):
     list_filter = ("status", "department", "session")
     search_fields = ("student__username", "student__id_number", "paystack_reference")
     inlines = [DepartmentalPaymentItemInline, DepartmentalPaymentDocumentInline]
+
+
+@admin.register(Institution)
+class InstitutionAdmin(admin.ModelAdmin):
+    list_display = ("name", "institution_code", "subdomain", "status", "created_at")
+    list_filter = ("institution_type", "status")
+    search_fields = ("name", "institution_code", "subdomain", "email")
+
+
+@admin.register(SubscriptionPlan)
+class SubscriptionPlanAdmin(admin.ModelAdmin):
+    list_display = ("name", "price", "billing_period", "is_active")
+    list_filter = ("billing_period", "is_active")
+
+
+@admin.register(Subscription)
+class SubscriptionAdmin(admin.ModelAdmin):
+    list_display = ("institution", "plan", "end_date", "status", "amount")
+    list_filter = ("status", "plan")
+    search_fields = ("institution__name", "payment_reference")
+
+
+@admin.register(Payment)
+class SubscriptionPaymentAdmin(admin.ModelAdmin):
+    list_display = ("reference", "institution", "plan", "amount", "status", "paid_at")
+    list_filter = ("status", "currency")
+    search_fields = ("reference", "institution__name", "receipt_number")
+    readonly_fields = ("reference", "gateway_response", "paid_at", "receipt_number")
+
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "action", "institution", "user", "ip_address")
+    list_filter = ("action", "institution")
+    search_fields = ("action", "description", "object_id")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(Feature)
+class FeatureAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "is_active", "requires_subscription")
+    list_filter = ("is_active", "requires_subscription")
+    search_fields = ("name", "code")
+
+
+@admin.register(InstitutionFeature)
+class InstitutionFeatureAdmin(admin.ModelAdmin):
+    list_display = ("institution", "feature", "enabled", "activated_at", "updated_at")
+    list_filter = ("enabled", "feature")
+    search_fields = ("institution__name", "feature__name")
+
+
+@admin.register(ScreeningIntegration)
+class ScreeningIntegrationAdmin(admin.ModelAdmin):
+    list_display = ("institution", "is_open", "admission_session", "updated_at")
+    list_filter = ("is_open",)
+    search_fields = ("institution__name",)
+    readonly_fields = ("api_secret", "created_at", "updated_at")
+
+
+@admin.register(ScreeningApplication)
+class ScreeningApplicationAdmin(admin.ModelAdmin):
+    list_display = ("external_application_id", "institution", "status", "department", "student", "updated_at")
+    list_filter = ("status", "institution")
+    search_fields = ("external_application_id", "applicant_reference", "jamb_number", "email")
+    readonly_fields = ("created_at", "updated_at")

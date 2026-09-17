@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+
+{% block body_class %}dashboard-page{% endblock %}
+
+{% block content %}
+<main class="dashboard-layout" data-dashboard-layout>
+  <aside class="dashboard-sidebar" id="dashboard-sidebar" data-dashboard-sidebar aria-label="Platform administration navigation">
+    <div class="sidebar-brand">
+      <div>
+        <h3>Educonnect</h3>
+        <p>Platform administration</p>
+      </div>
+      <button type="button" class="sidebar-close-btn" data-sidebar-close aria-label="Close sidebar navigation">Close menu</button>
+    </div>
+    <nav aria-label="Super administrator menu">
+      <ul class="sidebar-menu">
+        <li><a href="{% url 'portal:super-admin-dashboard' %}" class="{% if request.resolver_match.url_name == 'super-admin-dashboard' %}active{% endif %}">Dashboard</a></li>
+        <li><a href="{% url 'portal:super-admin-institutions' %}" class="{% if request.resolver_match.url_name == 'super-admin-institutions' %}active{% endif %}">Institutions</a></li>
+        <li><a href="{% url 'portal:super-admin-subscriptions' %}" class="{% if request.resolver_match.url_name == 'super-admin-subscriptions' %}active{% endif %}">Subscriptions</a></li>
+        <li><a href="{% url 'portal:super-admin-plans' %}" class="{% if request.resolver_match.url_name == 'super-admin-plans' %}active{% endif %}">Plans</a></li>
+        <li><a href="{% url 'portal:super-admin-ai' %}" class="{% if request.resolver_match.url_name == 'super-admin-ai' %}active{% endif %}">EduConnect AI</a></li>
+        <li><a href="{% url 'portal:super-admin-payments' %}" class="{% if request.resolver_match.url_name == 'super-admin-payments' %}active{% endif %}">Payments</a></li>
+        <li><a href="{% url 'portal:super-admin-users' %}" class="{% if request.resolver_match.url_name == 'super-admin-users' %}active{% endif %}">Users</a></li>
+        <li><a href="{% url 'portal:super-admin-audit-logs' %}" class="{% if request.resolver_match.url_name == 'super-admin-audit-logs' %}active{% endif %}">Audit logs</a></li>
+        <li><a href="{% url 'portal:super-admin-reports' %}" class="{% if request.resolver_match.url_name == 'super-admin-reports' %}active{% endif %}">Reports</a></li>
+        <li><a href="{% url 'portal:super-admin-settings' %}" class="{% if request.resolver_match.url_name == 'super-admin-settings' %}active{% endif %}">Settings</a></li>
+        <li><a href="{% url 'portal:super-admin-profile' %}" class="{% if request.resolver_match.url_name == 'super-admin-profile' %}active{% endif %}">Profile</a></li>
+        <li><a href="{% url 'portal:logout' %}">Logout</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-note">
+      <span>Signed in as</span>
+      <strong>{{ request.user.full_name }}</strong>
+      <small>Super administrator</small>
+    </div>
+  </aside>
+
+  <section class="dashboard-main">
+    <div class="dashboard-topbar">
+      <div class="dashboard-topbar-copy">
+        <button type="button" class="dashboard-sidebar-toggle" data-sidebar-toggle aria-controls="dashboard-sidebar" aria-expanded="false" aria-label="Open sidebar navigation">
+          <span class="dashboard-sidebar-toggle-icon" aria-hidden="true">&#9776;</span>
+        </button>
+        <div class="dashboard-title-block">
+          <p class="eyebrow">Educonnect platform</p>
+          <h1>{% block super_title %}Administration{% endblock %}</h1>
+          <p class="dashboard-topbar-summary">Manage institutions, subscriptions, payments, and platform access from one workspace.</p>
+        </div>
+      </div>
+      <div class="dashboard-meta"><span class="dashboard-role-chip">Super administrator</span></div>
+    </div>
+    {% block super_content %}{% endblock %}
+  </section>
+  <div class="dashboard-backdrop" data-dashboard-backdrop aria-hidden="true"></div>
+</main>
+{% endblock %}

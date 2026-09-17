@@ -1,0 +1,45 @@
+{% extends 'portal/super_admin_base.html' %}
+
+{% block super_title %}Platform dashboard{% endblock %}
+
+{% block super_content %}
+<section class="card-grid metrics">
+  <article class="metric-card"><span>Total institutions</span><strong>{{ institution_count }}</strong></article>
+  <article class="metric-card"><span>Active institutions</span><strong>{{ active_institution_count }}</strong></article>
+  <article class="metric-card"><span>Suspended institutions</span><strong>{{ suspended_institution_count }}</strong></article>
+  <article class="metric-card"><span>Expired institutions</span><strong>{{ expired_institution_count }}</strong></article>
+  <article class="metric-card"><span>Active subscriptions</span><strong>{{ active_subscription_count }}</strong></article>
+  <article class="metric-card"><span>Expiring subscriptions</span><strong>{{ expiring_subscription_count }}</strong></article>
+  <article class="metric-card"><span>Monthly revenue</span><strong>&#8358;{{ monthly_revenue }}</strong></article>
+  <article class="metric-card"><span>Annual revenue</span><strong>&#8358;{{ annual_revenue }}</strong></article>
+</section>
+
+<section class="split-layout">
+  <section class="panel-card">
+    <div class="panel-head"><h2>Recent institution registrations</h2></div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Institution</th><th>Portal</th><th>Students</th><th>Staff</th><th>Plan</th><th>Status</th></tr>
+        {% for institution in institution_user_counts %}
+          <tr><td>{{ institution.name }}</td><td>{{ institution.subdomain }}</td><td>{{ institution.student_count }}</td><td>{{ institution.staff_count }}</td><td>{{ institution.plan_name|default:"No plan" }}</td><td>{{ institution.get_status_display }}</td></tr>
+        {% empty %}
+          <tr><td colspan="6">No institutions yet.</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </section>
+  <section class="panel-card">
+    <div class="panel-head"><h2>Recent payments</h2></div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Institution</th><th>Plan</th><th>Amount</th></tr>
+        {% for payment in recent_payments %}
+          <tr><td>{{ payment.institution.name }}</td><td>{{ payment.plan.name }}</td><td>&#8358;{{ payment.amount }}</td></tr>
+        {% empty %}
+          <tr><td colspan="3">No successful payments yet.</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </section>
+</section>
+{% endblock %}

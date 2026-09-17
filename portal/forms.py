@@ -1,7 +1,11 @@
 from decimal import Decimal
 from datetime import date
+from urllib.parse import urlsplit
 
 from django import forms
+from django.conf import settings
+from django.contrib.auth.forms import PasswordChangeForm, PasswordResetForm
+from django.core.validators import FileExtensionValidator
 from django.db.models import Q
 from django.utils.text import slugify
 
@@ -22,11 +26,17 @@ from .models import (
     Handbook,
     Faculty,
     InstitutionProfile,
+    Institution,
     LecturerCourseRegistration,
     Notification,
     StudentCourseRegistration,
     Timetable,
     User,
+    Subscription,
+    SubscriptionPlan,
+    SubscriptionPlanDuration,
+    SubscriptionPaymentGateway,
+    ScreeningIntegration,
     LEVEL_CHOICES,
 )
 
@@ -51,6 +61,9 @@ class StyledModelForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         for field in self.fields.values():
+            queryset = getattr(field, "queryset", None)
+            if queryset is not None and any(item.name == "institution" for item in queryset.model._meta.fields):
+                field.queryset = queryset.model._default_manager.all()
             widget = field.widget
             if isinstance(widget, (forms.CheckboxInput, forms.CheckboxSelectMultiple)):
                 continue
@@ -137,6 +150,256 @@ class InstitutionProfileForm(StyledModelForm):
         }
 
 
+class InstitutionCreateForm(StyledModelForm):
+    logo = forms.FileField(
+        required=True,
+        label="Institution logo",
+        help_text="Upload this institution's logo (JPG, PNG, SVG, or WebP).",
+        validators=[FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "svg", "webp"])],
+        widget=forms.ClearableFileInput(attrs={"accept": ".jpg,.jpeg,.png,.svg,.webp,image/jpeg,image/png,image/svg+xml,image/webp"}),
+    )
+    # A plain text field lets us turn an institution name or portal URL into the
+    # slug stored by the model, rather than rejecting it before ``clean_subdomain``
+    # can run.
+    subdomain = forms.CharField(
+        max_length=63,
+        label="Portal subdomain",
+        help_text="Enter a short name (for example, Coastal Polytechnic) or its portal URL.",
+    )
+
+    class Meta:
+        model = Institution
+        fields = [
+            "name", "institution_code", "institution_type", "state", "email", "phone",
+            "address", "country", "timezone", "logo", "subdomain", "custom_domain", "status",
+        ]
+
+    def clean_email(self):
+        """Use the institution contact email as its administrator's login."""
+        email = self.cleaned_data["email"].lower()
+        if User.all_objects.filter(email__iexact=email).exists():
+            raise forms.ValidationError("A user with this email already exists.")
+        if User.all_objects.filter(username__iexact=email).exists():
+            raise forms.ValidationError("This email is already used as a username.")
+        return email
+
+    def clean_subdomain(self):
+        value = self.cleaned_data["subdomain"].strip().lower()
+        parsed = urlsplit(value if "://" in value else f"//{value}")
+        if parsed.hostname:
+            value = parsed.hostname
+
+        # Pasting this application's full portal address should keep only the
+        # institution-specific part, e.g. coastal.educonnect.com -> coastal.
+        base_domain = settings.PLATFORM_BASE_DOMAIN.lower().strip(".")
+        if value.endswith(f".{base_domain}"):
+            value = value[: -(len(base_domain) + 1)]
+
+        subdomain = slugify(value)
+        if not subdomain:
+            raise forms.ValidationError("Enter an institution name or a valid portal subdomain.")
+        if len(subdomain) > 63:
+            raise forms.ValidationError("The portal subdomain must be 63 characters or fewer.")
+        return subdomain
+
+
+class InstitutionUpdateForm(InstitutionCreateForm):
+    """Edit an institution without requiring a replacement logo or admin email."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["logo"].required = False
+        self.fields["logo"].help_text = "Leave blank to keep the current logo."
+
+    def clean_email(self):
+        email = self.cleaned_data["email"].lower()
+        administrator = (
+            User.all_objects.filter(
+                institution=self.instance,
+                role=User.Role.ADMIN,
+                is_superuser=False,
+            )
+            .order_by("id")
+            .first()
+        )
+        existing_users = User.all_objects.all()
+        if administrator:
+            existing_users = existing_users.exclude(pk=administrator.pk)
+        if existing_users.filter(email__iexact=email).exists():
+            raise forms.ValidationError("A user with this email already exists.")
+        if existing_users.filter(username__iexact=email).exists():
+            raise forms.ValidationError("This email is already used as a username.")
+        return email
+
+
+class ScreeningIntegrationForm(StyledModelForm):
+    """Platform-side settings passed to the independently deployed screener."""
+
+    def __init__(self, *args, institution=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if institution is not None:
+            self.fields["admission_session"].queryset = AcademicSession.all_objects.filter(
+                institution=institution
+            )
+
+    class Meta:
+        model = ScreeningIntegration
+        fields = [
+            "is_open", "admission_session", "opens_at", "closes_at", "application_fee",
+            "available_programmes", "admission_requirements", "required_documents",
+            "applicant_categories", "utme_de_settings", "workflow_settings", "notification_settings",
+        ]
+        widgets = {
+            "opens_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            "closes_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            "available_programmes": forms.Textarea(attrs={"rows": 3, "placeholder": '["BSc Computer Science"]'}),
+            "required_documents": forms.Textarea(attrs={"rows": 3, "placeholder": '["O\'Level result"]'}),
+            "applicant_categories": forms.Textarea(attrs={"rows": 2, "placeholder": '["UTME", "Direct Entry"]'}),
+            "admission_requirements": forms.Textarea(attrs={"rows": 3, "placeholder": '{"minimum_utme_score": 160}'}),
+            "utme_de_settings": forms.Textarea(attrs={"rows": 3, "placeholder": '{"utme_enabled": true, "de_enabled": true}'}),
+            "workflow_settings": forms.Textarea(attrs={"rows": 3, "placeholder": '{"verification_required": true}'}),
+            "notification_settings": forms.Textarea(attrs={"rows": 3, "placeholder": '{"email": true}'}),
+        }
+
+    def clean(self):
+        cleaned = super().clean()
+        opens_at, closes_at = cleaned.get("opens_at"), cleaned.get("closes_at")
+        if opens_at and closes_at and closes_at <= opens_at:
+            self.add_error("closes_at", "The closing date must be later than the opening date.")
+        return cleaned
+
+
+class SubscriptionPlanForm(StyledModelForm):
+    DURATION_CHOICES = (
+        ("183", "6 months"),
+        ("365", "1 year"),
+        ("730", "2 years"),
+        ("1825", "5 years"),
+    )
+    duration_days = forms.ChoiceField(choices=DURATION_CHOICES, label="Plan duration")
+
+    class Meta:
+        model = SubscriptionPlan
+        fields = [
+            "name", "description", "price",
+            "max_students", "max_staff", "max_storage_mb", "features", "is_active",
+        ]
+        widgets = {
+            "price": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
+            "features": forms.Textarea(attrs={"rows": 4, "placeholder": '["Feature one", "Feature two"]'}),
+        }
+
+    def clean_features(self):
+        features = self.cleaned_data["features"]
+        if not isinstance(features, list) or not all(isinstance(item, str) for item in features):
+            raise forms.ValidationError("Features must be a JSON array of text values.")
+        return features
+
+    def save(self, commit=True):
+        plan = super().save(commit=False)
+        plan.billing_period = SubscriptionPlan.BillingPeriod.CUSTOM
+        plan.custom_duration_days = int(self.cleaned_data["duration_days"])
+        plan.is_trial = False
+        if commit:
+            plan.save()
+            SubscriptionPlanDuration.objects.get_or_create(
+                plan=plan,
+                duration_days=plan.custom_duration_days,
+                defaults={"price": plan.price},
+            )
+        return plan
+
+
+class SubscriptionPlanDurationForm(StyledModelForm):
+    class Meta:
+        model = SubscriptionPlanDuration
+        fields = ["plan", "duration_days", "price", "is_active"]
+        widgets = {
+            "price": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
+        }
+
+    def clean_price(self):
+        price = self.cleaned_data["price"]
+        if price <= 0:
+            raise forms.ValidationError("A subscription duration must have an amount greater than zero.")
+        return price
+
+
+class SubscriptionAssignmentForm(StyledModelForm):
+    class Meta:
+        model = Subscription
+        fields = ["plan", "start_date", "end_date", "status", "amount"]
+        widgets = {
+            "start_date": forms.DateInput(attrs={"type": "date"}),
+            "end_date": forms.DateInput(attrs={"type": "date"}),
+            "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
+        }
+
+
+class SubscriptionRenewalForm(forms.Form):
+    plan = forms.ModelChoiceField(queryset=SubscriptionPlan.objects.none())
+    plan_duration = forms.ModelChoiceField(queryset=SubscriptionPlanDuration.objects.none(), label="Plan duration")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        available_durations = SubscriptionPlanDuration.objects.filter(
+            is_active=True,
+            plan__is_active=True,
+            plan__is_trial=False,
+        ).select_related("plan")
+        self.fields["plan"].queryset = SubscriptionPlan.objects.filter(
+            is_active=True,
+            is_trial=False,
+            durations__in=available_durations,
+        ).distinct()
+        self.fields["plan_duration"].queryset = available_durations
+        self.fields["plan"].label_from_instance = lambda plan: plan.name
+        self.fields["plan_duration"].label_from_instance = (
+            lambda duration: f"{duration.duration_label} — ₦{duration.price:,.2f}"
+        )
+        self.fields["plan"].widget.attrs["class"] = "input-field"
+        self.fields["plan_duration"].widget.attrs["class"] = "input-field"
+
+    def clean(self):
+        cleaned_data = super().clean()
+        plan = cleaned_data.get("plan")
+        duration = cleaned_data.get("plan_duration")
+        if plan and duration and duration.plan_id != plan.id:
+            self.add_error("plan_duration", "Choose a duration offered by the selected plan.")
+        return cleaned_data
+
+
+class SubscriptionPaymentGatewayForm(StyledModelForm):
+    class Meta:
+        model = SubscriptionPaymentGateway
+        fields = ["paystack_public_key", "paystack_secret_key", "is_active"]
+        widgets = {
+            "paystack_secret_key": forms.PasswordInput(),
+        }
+
+    def clean_paystack_secret_key(self):
+        secret_key = self.cleaned_data["paystack_secret_key"]
+        return secret_key or self.instance.paystack_secret_key
+
+
+class PlatformAdminForm(forms.Form):
+    username = forms.CharField(max_length=150)
+    email = forms.EmailField()
+    password = forms.CharField(min_length=12, widget=forms.PasswordInput)
+
+    def clean_username(self):
+        username = self.cleaned_data["username"]
+        if User.all_objects.filter(username__iexact=username).exists():
+            raise forms.ValidationError("That username is already in use.")
+        return username
+
+    def clean_email(self):
+        email = self.cleaned_data["email"].lower()
+        if User.all_objects.filter(email__iexact=email).exists():
+            raise forms.ValidationError("That email is already in use.")
+        return email
+
+
 class DepartmentLecturerUploadForm(StyledModelForm):
     class Meta:
         model = DepartmentLecturerUpload
@@ -200,6 +463,7 @@ class StudentCourseFilterForm(forms.Form):
 
     def __init__(self, *args, student=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["department"].queryset = Department.objects.all()
         if student is not None:
             self.fields["department"].queryset = (
                 Department.objects.filter(pk=student.department_id)
@@ -264,6 +528,7 @@ class CourseBrowseFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["department"].queryset = Department.objects.all()
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 
@@ -279,6 +544,7 @@ class TimetableFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["department"].queryset = Department.objects.all()
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 
@@ -290,6 +556,7 @@ class LecturerCourseFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["department"].queryset = Department.objects.all()
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 
@@ -320,6 +587,7 @@ class HandbookFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["department"].queryset = Department.objects.all()
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 
@@ -467,6 +735,41 @@ class StudentProfileForm(BaseProfileForm):
 class LecturerProfileForm(BaseProfileForm):
     class Meta(BaseProfileForm.Meta):
         fields = [field for field in BaseProfileForm.Meta.fields if field != "level"]
+
+
+class AdminProfileForm(StyledModelForm):
+    """Keep the institution-admin sign-in email stable after provisioning."""
+
+    class Meta:
+        model = User
+        fields = ["first_name", "last_name", "phone_number"]
+
+
+class InstitutionAdminPasswordChangeForm(PasswordChangeForm):
+    """Style Django's authenticated password-change form for the admin portal."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for field in self.fields.values():
+            field.widget.attrs["class"] = "input-field"
+
+
+class UserPasswordResetForm(PasswordResetForm):
+    """Send a reset link for one known account, even if legacy data has duplicate emails."""
+
+    def __init__(self, *args, target_user=None, **kwargs):
+        self.target_user = target_user
+        super().__init__(*args, **kwargs)
+
+    def get_users(self, email):
+        user = self.target_user
+        if (
+            user
+            and user.is_active
+            and user.has_usable_password()
+            and user.email.casefold() == email.casefold()
+        ):
+            yield user
 
 
 class BaseUserForm(StyledModelForm):
@@ -682,5 +985,6 @@ class DepartmentalSearchForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["department"].queryset = Department.objects.all()
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"

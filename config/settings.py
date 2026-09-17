@@ -42,6 +42,17 @@ ALLOWED_HOSTS = [
     if host.strip()
 ]
 
+# Tenant portals resolve as <subdomain>.<PLATFORM_BASE_DOMAIN>.  Include the
+# wildcard host explicitly because Django does not infer it from the base host.
+PLATFORM_BASE_DOMAIN = os.getenv("PLATFORM_BASE_DOMAIN", "educonnect.com").strip().lower()
+SCREENING_APPLICATION_URL_TEMPLATE = os.getenv(
+    "SCREENING_APPLICATION_URL_TEMPLATE",
+    "https://apply.{subdomain}.{base_domain}",
+).strip()
+SCREENING_API_MAX_CLOCK_SKEW_SECONDS = int(os.getenv("SCREENING_API_MAX_CLOCK_SKEW_SECONDS", "300"))
+if PLATFORM_BASE_DOMAIN and f".{PLATFORM_BASE_DOMAIN}" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(f".{PLATFORM_BASE_DOMAIN}")
+
 # Render automatically provides this variable.
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
@@ -85,7 +96,9 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "portal.middleware.TenantResolutionMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "portal.middleware.TenantAccessMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
@@ -340,3 +353,8 @@ if not DEBUG:
 
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Platform subscription payments use a platform-owned Paystack account.  Course
+# and departmental gateways remain separate, existing institution workflows.
+PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
+PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY", "").strip()

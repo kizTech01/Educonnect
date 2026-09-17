@@ -20,6 +20,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .models import AcademicSession, Course, Curriculum, LecturerCourseRegistration, User
+from .services import TEMPORARY_ACCOUNT_PASSWORD
 
 
 COURSE_CODE_RE = re.compile(r"\b([A-Z]{2,6}\s?-?\d{3,4})\b", re.I)
@@ -352,13 +353,13 @@ def import_department_lecturers(upload):
                 continue
             name_parts = name.split(maxsplit=1)
             User.objects.create_user(
-                username=lecturer_id, password="educonnect", role=User.Role.LECTURER,
+                username=lecturer_id, password=TEMPORARY_ACCOUNT_PASSWORD, role=User.Role.LECTURER,
                 id_number=lecturer_id, first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
                 email=_field(row, "email"), phone_number=_field(row, "phone", "phone_number"),
                 department=upload.department, is_approved=True,
             )
             created += 1
-    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New accounts use the temporary password 'educonnect'."
+    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New accounts use the configured temporary password."
 
 
 def import_course_allocations(upload):

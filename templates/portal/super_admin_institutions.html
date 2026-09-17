@@ -1,0 +1,63 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}Institutions{% endblock %}
+{% block super_content %}
+<section class="institution-management-layout">
+  <section class="panel-card">
+    <div class="panel-head"><h2>Add institution</h2></div>
+    <p class="muted-note">Upload a logo unique to this institution. Its email is used as the administrator username; new administrators begin with the temporary password <strong>educonnect</strong> and receive six months of free access.</p>
+    <form method="post" enctype="multipart/form-data" class="stack-form">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button class="primary-btn">Create institution</button>
+    </form>
+  </section>
+  <section class="panel-card">
+    <div class="panel-head"><h2>All institutions</h2></div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Name</th><th>Portal</th><th>Students</th><th>Staff</th><th>Plan</th><th>Institution administrators</th><th>Status</th><th>Actions</th></tr>
+        {% for institution in institutions %}
+          <tr>
+            <td>{{ institution.name }}</td>
+            <td>https://{{ institution.subdomain }}.{{ PLATFORM_BASE_DOMAIN|default:'educonnect.com' }}</td>
+            <td>{{ institution.student_count }}</td>
+            <td>{{ institution.staff_count }}</td>
+            <td>{{ institution.plan_name|default:"No plan" }}{% if institution.subscription_status %}<br><small>{{ institution.subscription_status|title }}</small>{% endif %}</td>
+            <td>
+              {% for admin in institution.institution_administrators %}
+                <div class="actions-cell">
+                  <span>{{ admin.email|default:admin.username }}</span>
+                  <form method="post" action="{% url 'portal:super-admin-reset-institution-admin-password' admin.id %}">
+                    {% csrf_token %}
+                    <button class="ghost-btn small" type="submit">Reset password</button>
+                  </form>
+                </div>
+              {% empty %}
+                <span>-</span>
+              {% endfor %}
+            </td>
+            <td>{{ institution.get_status_display }}</td>
+            <td class="institution-actions-cell">
+              <div class="institution-actions" aria-label="Actions for {{ institution.name }}">
+                <a class="ghost-btn small" href="{% url 'portal:super-admin-institution-edit' institution.id %}">Edit</a>
+                <a class="ghost-btn small" href="{% url 'portal:super-admin-institution-features' institution.id %}">Features</a>
+              {% if institution.status == 'suspended' %}
+                <form method="post" action="{% url 'portal:super-admin-institution-status' institution.id 'active' %}">
+              {% else %}
+                <form method="post" action="{% url 'portal:super-admin-institution-status' institution.id 'suspended' %}">
+              {% endif %}
+                {% csrf_token %}
+                <button class="ghost-btn small" type="submit">{% if institution.status == 'suspended' %}Activate{% else %}Suspend{% endif %}</button>
+              </form>
+                <a class="danger-btn small" href="{% url 'portal:super-admin-institution-edit' institution.id %}#delete-institution">Delete</a>
+              </div>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="8">No institutions created.</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </section>
+</section>
+{% endblock %}
