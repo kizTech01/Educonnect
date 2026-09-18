@@ -1,0 +1,13 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}Edit {{ plan.name }}{% endblock %}
+{% block super_content %}
+<section class="panel-card narrow-panel">
+  <div class="panel-head"><h2>Plan details</h2></div>
+  <p class="muted-note">Edit the plan description, limits, features, and availability. Change each selling amount from its duration link.</p>
+  <form method="post" class="stack-form">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <div class="form-actions"><button class="primary-btn" type="submit">Save changes</button><a class="ghost-btn" href="{% url 'portal:super-admin-plans' %}">Cancel</a></div>
+  </form>
+</section>
+{% endblock %}

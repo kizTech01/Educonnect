@@ -1,0 +1,13 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}Edit {{ duration.plan.name }} pricing{% endblock %}
+{% block super_content %}
+<section class="panel-card narrow-panel">
+  <div class="panel-head"><h2>{{ duration.duration_label }}</h2></div>
+  <p class="muted-note">Change the selling amount or make this duration unavailable for new renewals. Existing payments and subscriptions are retained.</p>
+  <form method="post" class="stack-form">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <div class="form-actions"><button class="primary-btn" type="submit">Save pricing</button><a class="ghost-btn" href="{% url 'portal:super-admin-plans' %}">Cancel</a></div>
+  </form>
+</section>
+{% endblock %}

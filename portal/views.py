@@ -40,7 +40,9 @@ from .forms import (
     InstitutionUpdateForm,
     SubscriptionAssignmentForm,
     SubscriptionPlanForm,
+    SubscriptionPlanEditForm,
     SubscriptionPlanDurationForm,
+    SubscriptionPlanDurationEditForm,
     SubscriptionPaymentGatewayForm,
     ScreeningIntegrationForm,
     SubscriptionRenewalForm,
@@ -1627,6 +1629,88 @@ def super_admin_plans(request):
         "form": form,
         "duration_form": duration_form,
     })
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_plan_edit(request, plan_id):
+    plan = get_object_or_404(SubscriptionPlan, pk=plan_id)
+    if plan.is_trial:
+        raise Http404
+    form = SubscriptionPlanEditForm(request.POST or None, instance=plan)
+    if request.method == "POST" and form.is_valid():
+        plan = form.save()
+        AuditLog.objects.create(
+            user=request.user,
+            action="subscription_plan_updated",
+            description=f"Updated plan {plan.name}.",
+            object_type="SubscriptionPlan",
+            object_id=str(plan.id),
+        )
+        messages.success(request, f"{plan.name} has been updated.")
+        return redirect("portal:super-admin-plans")
+    return render(request, "portal/super_admin_plan_form.html", {"form": form, "plan": plan})
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_plan_duration_edit(request, duration_id):
+    duration = get_object_or_404(SubscriptionPlanDuration.objects.select_related("plan"), pk=duration_id)
+    if duration.plan.is_trial:
+        raise Http404
+    form = SubscriptionPlanDurationEditForm(request.POST or None, instance=duration)
+    if request.method == "POST" and form.is_valid():
+        duration = form.save()
+        AuditLog.objects.create(
+            user=request.user,
+            action="subscription_plan_duration_updated",
+            description=f"Updated {duration.duration_label} pricing for {duration.plan.name}.",
+            object_type="SubscriptionPlanDuration",
+            object_id=str(duration.id),
+        )
+        messages.success(request, f"{duration.duration_label} pricing has been updated.")
+        return redirect("portal:super-admin-plans")
+    return render(request, "portal/super_admin_plan_duration_form.html", {"form": form, "duration": duration})
+
+
+@super_admin_required
+@require_http_methods(["POST"])
+def super_admin_plan_toggle(request, plan_id):
+    plan = get_object_or_404(SubscriptionPlan, pk=plan_id)
+    if plan.is_trial:
+        raise Http404
+    plan.is_active = not plan.is_active
+    plan.save(update_fields=["is_active", "updated_at"])
+    AuditLog.objects.create(
+        user=request.user,
+        action="subscription_plan_activated" if plan.is_active else "subscription_plan_deactivated",
+        description=f"{'Activated' if plan.is_active else 'Deactivated'} plan {plan.name}.",
+        object_type="SubscriptionPlan",
+        object_id=str(plan.id),
+    )
+    messages.success(request, f"{plan.name} has been {'activated' if plan.is_active else 'deactivated'}.")
+    return redirect("portal:super-admin-plans")
+
+
+@super_admin_required
+@require_http_methods(["POST"])
+def super_admin_plan_delete(request, plan_id):
+    plan = get_object_or_404(SubscriptionPlan, pk=plan_id)
+    if plan.is_trial:
+        raise Http404
+    if plan.subscriptions.exists() or plan.payments.exists():
+        messages.error(request, f"{plan.name} has subscription or payment history and cannot be deleted. Deactivate it instead.")
+        return redirect("portal:super-admin-plans")
+    plan_name = plan.name
+    plan.delete()
+    AuditLog.objects.create(
+        user=request.user,
+        action="subscription_plan_deleted",
+        description=f"Deleted unused plan {plan_name}.",
+        object_type="SubscriptionPlan",
+    )
+    messages.success(request, f"{plan_name} has been deleted.")
+    return redirect("portal:super-admin-plans")
 
 
 @super_admin_required

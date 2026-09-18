@@ -310,10 +310,47 @@ class SubscriptionPlanForm(StyledModelForm):
         return plan
 
 
+class SubscriptionPlanEditForm(StyledModelForm):
+    """Edit commercial plan details without changing its existing durations."""
+
+    class Meta:
+        model = SubscriptionPlan
+        fields = [
+            "name", "description", "max_students", "max_staff", "max_storage_mb",
+            "features", "is_active",
+        ]
+        widgets = {
+            "features": forms.Textarea(attrs={"rows": 4, "placeholder": '["Feature one", "Feature two"]'}),
+        }
+
+    def clean_features(self):
+        features = self.cleaned_data["features"]
+        if not isinstance(features, list) or not all(isinstance(item, str) for item in features):
+            raise forms.ValidationError("Features must be a JSON array of text values.")
+        return features
+
+
 class SubscriptionPlanDurationForm(StyledModelForm):
     class Meta:
         model = SubscriptionPlanDuration
         fields = ["plan", "duration_days", "price", "is_active"]
+        widgets = {
+            "price": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
+        }
+
+    def clean_price(self):
+        price = self.cleaned_data["price"]
+        if price <= 0:
+            raise forms.ValidationError("A subscription duration must have an amount greater than zero.")
+        return price
+
+
+class SubscriptionPlanDurationEditForm(StyledModelForm):
+    """Change a duration's selling price or availability, never its identity."""
+
+    class Meta:
+        model = SubscriptionPlanDuration
+        fields = ["price", "is_active"]
         widgets = {
             "price": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
         }

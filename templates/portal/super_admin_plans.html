@@ -13,5 +13,38 @@
     <form method="post" class="stack-form">{% csrf_token %}<input type="hidden" name="action" value="add-duration">{{ duration_form.as_p }}<button class="primary-btn">Add duration</button></form>
   </section>
 </div>
-<section class="panel-card"><div class="panel-head"><h2>Available plans</h2></div><div class="table-wrap"><table><tr><th>Plan</th><th>Duration prices</th><th>Active</th></tr>{% for plan in plans %}<tr><td><strong>{{ plan.name }}</strong>{% if plan.description %}<br><small>{{ plan.description }}</small>{% endif %}</td><td>{% for duration in plan.durations.all %}<div>{{ duration.duration_label }} — ₦{{ duration.price }}{% if not duration.is_active %} (inactive){% endif %}</div>{% empty %}<span class="muted-note">No durations configured</span>{% endfor %}</td><td>{{ plan.is_active|yesno:'Yes,No' }}</td></tr>{% empty %}<tr><td colspan="3">No plans yet.</td></tr>{% endfor %}</table></div></section>
+<section class="panel-card">
+  <div class="panel-head"><h2>Available plans</h2></div>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Plan</th><th>Duration prices</th><th>Active</th><th>Actions</th></tr>
+      {% for plan in plans %}
+        <tr>
+          <td><strong>{{ plan.name }}</strong>{% if plan.description %}<br><small>{{ plan.description }}</small>{% endif %}</td>
+          <td>
+            {% for duration in plan.durations.all %}
+              <div>{{ duration.duration_label }} &mdash; &#8358;{{ duration.price }}{% if not duration.is_active %} (inactive){% endif %}{% if not plan.is_trial %} <a href="{% url 'portal:super-admin-plan-duration-edit' duration.id %}">Edit</a>{% endif %}</div>
+            {% empty %}
+              <span class="muted-note">No durations configured</span>
+            {% endfor %}
+          </td>
+          <td>{{ plan.is_active|yesno:'Yes,No' }}</td>
+          <td>
+            {% if plan.is_trial %}
+              <span class="muted-note">System trial plan</span>
+            {% else %}
+              <div class="institution-actions">
+                <a class="ghost-btn small" href="{% url 'portal:super-admin-plan-edit' plan.id %}">Edit</a>
+                <form method="post" action="{% url 'portal:super-admin-plan-toggle' plan.id %}">{% csrf_token %}<button class="ghost-btn small" type="submit">{% if plan.is_active %}Deactivate{% else %}Activate{% endif %}</button></form>
+                <form method="post" action="{% url 'portal:super-admin-plan-delete' plan.id %}" onsubmit="return confirm('Delete this unused plan permanently?');">{% csrf_token %}<button class="danger-btn small" type="submit">Delete</button></form>
+              </div>
+            {% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">No plans yet.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</section>
 {% endblock %}

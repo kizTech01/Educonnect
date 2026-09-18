@@ -106,7 +106,7 @@ class MultiInstitutionSaaSTests(TestCase):
         second = self.make_institution("SECOND", "second")
         admin = User.all_objects.create_user("first-admin", password="safe-password-123", role=User.Role.ADMIN, institution=first)
         self.client.force_login(admin)
-        response = self.client.get("/admin-portal/", HTTP_HOST="second.educonnect.com")
+        response = self.client.get("/admin-portal/", HTTP_HOST=f"second.{settings.CORE_DOMAIN}")
         self.assertEqual(response.status_code, 403)
 
     def test_institutions_can_use_the_same_session_and_gateway_names(self):
@@ -175,14 +175,14 @@ class MultiInstitutionSaaSTests(TestCase):
         suspended_user = User.all_objects.create_user("suspended-user", password="safe-password-123", role=User.Role.STUDENT, institution=suspended)
 
         self.client.force_login(active_user)
-        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST="active.educonnect.com"), "/student/")
-        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST="educonnect.com"), "/student/")
+        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST=f"active.{settings.CORE_DOMAIN}"), "/student/")
+        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST=settings.CORE_DOMAIN), "/student/")
         self.client.force_login(expired_user)
-        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST="expired.educonnect.com"), "/billing/", fetch_redirect_response=False)
-        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST="educonnect.com"), "/billing/", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST=f"expired.{settings.CORE_DOMAIN}"), "/billing/", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST=settings.CORE_DOMAIN), "/billing/", fetch_redirect_response=False)
         self.client.force_login(suspended_user)
-        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST="suspended.educonnect.com"), "/billing/", fetch_redirect_response=False)
-        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST="educonnect.com"), "/billing/", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST=f"suspended.{settings.CORE_DOMAIN}"), "/billing/", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/dashboard/", HTTP_HOST=settings.CORE_DOMAIN), "/billing/", fetch_redirect_response=False)
 
 
 class ProtectedTenantMediaTests(TestCase):
@@ -263,18 +263,18 @@ class ProtectedTenantMediaTests(TestCase):
             active_url = reverse("portal:download-course-file", args=[active_course.id])
             expired_url = reverse("portal:download-course-file", args=[expired_course.id])
 
-            anonymous_response = self.client.get(active_url, HTTP_HOST="active-media.educonnect.com")
+            anonymous_response = self.client.get(active_url, HTTP_HOST=f"active-media.{settings.CORE_DOMAIN}")
             self.assertRedirects(anonymous_response, reverse("portal:home"), fetch_redirect_response=False)
 
             self.client.force_login(active_student)
-            authorized_response = self.client.get(active_url, HTTP_HOST="active-media.educonnect.com")
+            authorized_response = self.client.get(active_url, HTTP_HOST=f"active-media.{settings.CORE_DOMAIN}")
             self.assertEqual(authorized_response.status_code, 200)
             self.assertEqual(b"".join(authorized_response.streaming_content), b"private file")
-            direct_media_response = self.client.get(f"/media/{active_course.file.name}", HTTP_HOST="active-media.educonnect.com")
+            direct_media_response = self.client.get(f"/media/{active_course.file.name}", HTTP_HOST=f"active-media.{settings.CORE_DOMAIN}")
             self.assertEqual(direct_media_response.status_code, 404)
 
             self.client.force_login(expired_student)
-            expired_response = self.client.get(expired_url, HTTP_HOST="educonnect.com")
+            expired_response = self.client.get(expired_url, HTTP_HOST=settings.CORE_DOMAIN)
             self.assertRedirects(expired_response, reverse("portal:billing-overview"), fetch_redirect_response=False)
 
 
@@ -388,7 +388,7 @@ class InstitutionFeatureAndScreeningTests(TestCase):
     def test_disabled_feature_is_enforced_even_when_a_user_enters_the_url(self):
         user = User.all_objects.create_user("student", password="safe-password-123", role=User.Role.STUDENT, institution=self.institution)
         self.client.force_login(user)
-        response = self.client.get(reverse("portal:ai-assistant"), HTTP_HOST="screen.educonnect.com")
+        response = self.client.get(reverse("portal:ai-assistant"), HTTP_HOST=f"screen.{settings.CORE_DOMAIN}")
         self.assertEqual(response.status_code, 403)
 
     def test_screening_api_transfers_one_admitted_applicant_into_its_own_tenant(self):
@@ -461,7 +461,7 @@ class InstitutionFeatureAndScreeningTests(TestCase):
         response = self.client.post(
             reverse("portal:super-admin-screening-configuration", args=[self.institution.id]),
             {"is_open": "on", "admission_session": foreign_session.id, "application_fee": "0"},
-            HTTP_HOST="educonnect.com",
+            HTTP_HOST=settings.CORE_DOMAIN,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -562,7 +562,7 @@ class InstitutionFeatureAndScreeningTests(TestCase):
                 "institution_type": Institution.Type.COLLEGE,
                 "email": "hello@ncc.example.test",
                 "country": "Nigeria",
-                "subdomain": "https://Northern Coast College.educonnect.com/",
+                "subdomain": f"https://Northern Coast College.{settings.CORE_DOMAIN}/",
                 "status": Institution.Status.ACTIVE,
             },
             files={"logo": SimpleUploadedFile("ncc-logo.png", b"ncc-logo", content_type="image/png")},
@@ -984,6 +984,79 @@ class InstitutionDeletionStorageTests(TransactionTestCase):
         self.assertTrue(ScreeningApplication.objects.filter(pk=resources["screening"].pk).exists())
         for file_name in resources["files"]:
             self.assertTrue(resources["user"].passport_photo.storage.exists(file_name))
+
+
+class SubscriptionPlanManagementTests(TestCase):
+    def setUp(self):
+        self.super_admin = User.all_objects.create_superuser(
+            username="plans-super-admin",
+            email="plans-super-admin@example.test",
+            password="safe-password-123",
+        )
+        self.plan = SubscriptionPlan.objects.create(
+            name="Standard", price=Decimal("12000.00"),
+            billing_period=SubscriptionPlan.BillingPeriod.CUSTOM,
+            custom_duration_days=365,
+        )
+        self.duration = SubscriptionPlanDuration.objects.create(
+            plan=self.plan, duration_days=365, price=Decimal("12000.00"),
+        )
+        self.client.force_login(self.super_admin)
+
+    def test_super_admin_can_edit_a_plan_and_its_duration(self):
+        plan_response = self.client.post(
+            reverse("portal:super-admin-plan-edit", args=[self.plan.id]),
+            {
+                "name": "Standard Plus",
+                "description": "More storage and support",
+                "max_students": "1000",
+                "max_staff": "100",
+                "max_storage_mb": "20480",
+                "features": '["communication"]',
+                "is_active": "on",
+            },
+        )
+        duration_response = self.client.post(
+            reverse("portal:super-admin-plan-duration-edit", args=[self.duration.id]),
+            {"price": "15000.00", "is_active": "on"},
+        )
+
+        self.assertRedirects(plan_response, reverse("portal:super-admin-plans"))
+        self.assertRedirects(duration_response, reverse("portal:super-admin-plans"))
+        self.plan.refresh_from_db()
+        self.duration.refresh_from_db()
+        self.assertEqual(self.plan.name, "Standard Plus")
+        self.assertEqual(self.plan.features, ["communication"])
+        self.assertEqual(self.duration.price, Decimal("15000.00"))
+
+    def test_super_admin_can_deactivate_or_delete_an_unused_plan_but_not_history(self):
+        toggle_response = self.client.post(reverse("portal:super-admin-plan-toggle", args=[self.plan.id]))
+        self.assertRedirects(toggle_response, reverse("portal:super-admin-plans"))
+        self.plan.refresh_from_db()
+        self.assertFalse(self.plan.is_active)
+
+        institution = Institution.objects.create(
+            name="Plan History University", institution_code="PLAN-HISTORY",
+            institution_type=Institution.Type.UNIVERSITY, email="history@example.test",
+            subdomain="plan-history", status=Institution.Status.ACTIVE,
+        )
+        Subscription.objects.create(
+            institution=institution, plan=self.plan, start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timedelta(days=365), amount=self.plan.price,
+        )
+        blocked_response = self.client.post(reverse("portal:super-admin-plan-delete", args=[self.plan.id]))
+        self.assertRedirects(blocked_response, reverse("portal:super-admin-plans"))
+        self.assertTrue(SubscriptionPlan.objects.filter(pk=self.plan.id).exists())
+
+        unused = SubscriptionPlan.objects.create(
+            name="Disposable", price=Decimal("5000.00"),
+            billing_period=SubscriptionPlan.BillingPeriod.CUSTOM,
+            custom_duration_days=183,
+        )
+        SubscriptionPlanDuration.objects.create(plan=unused, duration_days=183, price=unused.price)
+        delete_response = self.client.post(reverse("portal:super-admin-plan-delete", args=[unused.id]))
+        self.assertRedirects(delete_response, reverse("portal:super-admin-plans"))
+        self.assertFalse(SubscriptionPlan.objects.filter(pk=unused.id).exists())
 
 
 class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
