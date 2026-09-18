@@ -37,7 +37,7 @@ ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv(
         "DJANGO_ALLOWED_HOSTS",
-        "educonnect.com",
+        "educonnect-gmcl.onrender.com",
     ).split(",")
     if host.strip()
 ]
