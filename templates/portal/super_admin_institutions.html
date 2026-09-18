@@ -19,7 +19,7 @@
         {% for institution in institutions %}
           <tr>
             <td>{{ institution.name }}</td>
-            <td>https://{{ institution.subdomain }}.{{ PLATFORM_BASE_DOMAIN|default:'educonnect.com' }}</td>
+            <td>https://{{ institution.subdomain }}.{{ PLATFORM_BASE_DOMAIN }}</td>
             <td>{{ institution.student_count }}</td>
             <td>{{ institution.staff_count }}</td>
             <td>{{ institution.plan_name|default:"No plan" }}{% if institution.subscription_status %}<br><small>{{ institution.subscription_status|title }}</small>{% endif %}</td>

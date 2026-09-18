@@ -20,6 +20,7 @@ jobs:
       DJANGO_TEST_FAST_PASSWORD_HASHER: "True"
       DJANGO_SECRET_KEY: ci-only-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDE
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      CORE_DOMAIN: educonnect.com
       DJANGO_TIME_ZONE: Africa/Lagos
 
     steps:

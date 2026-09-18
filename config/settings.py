@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from config.domain import core_domain_settings, parse_csv, unique
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -33,47 +35,35 @@ SECRET_KEY = os.getenv(
 
 DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() in {"1", "true", "yes", "on"}
 
-ALLOWED_HOSTS = [
-    host.strip()
-    for host in os.getenv(
-        "DJANGO_ALLOWED_HOSTS",
-        "educonnect-gmcl.onrender.com",
-    ).split(",")
-    if host.strip()
-]
+# CORE_DOMAIN is the single source of truth for the shared platform host and
+# every institution subdomain. PLATFORM_BASE_DOMAIN remains as a compatibility
+# alias for the tenant middleware, views, forms, and templates.
+CORE_DOMAIN, core_allowed_hosts, core_csrf_origins = core_domain_settings(
+    os.getenv("CORE_DOMAIN", "")
+)
+PLATFORM_BASE_DOMAIN = CORE_DOMAIN
 
-# Tenant portals resolve as <subdomain>.<PLATFORM_BASE_DOMAIN>.  Include the
-# wildcard host explicitly because Django does not infer it from the base host.
-PLATFORM_BASE_DOMAIN = os.getenv("PLATFORM_BASE_DOMAIN", "educonnect.com").strip().lower()
+ALLOWED_HOSTS = unique(
+    [*core_allowed_hosts, *parse_csv(os.getenv("DJANGO_ALLOWED_HOSTS", ""))]
+)
 SCREENING_APPLICATION_URL_TEMPLATE = os.getenv(
     "SCREENING_APPLICATION_URL_TEMPLATE",
     "https://apply.{subdomain}.{base_domain}",
 ).strip()
 SCREENING_API_MAX_CLOCK_SKEW_SECONDS = int(os.getenv("SCREENING_API_MAX_CLOCK_SKEW_SECONDS", "300"))
-if PLATFORM_BASE_DOMAIN and f".{PLATFORM_BASE_DOMAIN}" not in ALLOWED_HOSTS:
-    ALLOWED_HOSTS.append(f".{PLATFORM_BASE_DOMAIN}")
-
 # Render automatically provides this variable.
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
 if RENDER_EXTERNAL_HOSTNAME:
-    if RENDER_EXTERNAL_HOSTNAME not in ALLOWED_HOSTS:
-        ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+    ALLOWED_HOSTS = unique([*ALLOWED_HOSTS, RENDER_EXTERNAL_HOSTNAME])
 
 if DEBUG:
-    for local_host in ("localhost", "127.0.0.1"):
-        if local_host not in ALLOWED_HOSTS:
-            ALLOWED_HOSTS.append(local_host)
+    ALLOWED_HOSTS = unique([*ALLOWED_HOSTS, "localhost", "127.0.0.1"])
 
 
-CSRF_TRUSTED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "CSRF_TRUSTED_ORIGINS",
-        "",
-    ).split(",")
-    if origin.strip()
-]
+CSRF_TRUSTED_ORIGINS = unique(
+    [*core_csrf_origins, *parse_csv(os.getenv("CSRF_TRUSTED_ORIGINS", ""))]
+)
 
 
 # Applications

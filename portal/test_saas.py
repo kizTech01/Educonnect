@@ -13,7 +13,8 @@ from django.core import mail
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import models, transaction
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.http.request import validate_host
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -50,6 +51,32 @@ from .services import (
     send_subscription_expiry_notifications,
 )
 from .views import delete_institution_data
+from config.domain import core_domain_settings
+
+
+class CoreDomainConfigurationTests(SimpleTestCase):
+    def test_core_domain_generates_hosts_and_https_csrf_origins(self):
+        domain, allowed_hosts, csrf_origins = core_domain_settings("portal.example.test")
+
+        self.assertEqual(domain, "portal.example.test")
+        self.assertEqual(allowed_hosts, ["portal.example.test", ".portal.example.test"])
+        self.assertEqual(
+            csrf_origins,
+            ["https://portal.example.test", "https://*.portal.example.test"],
+        )
+
+    def test_core_domain_allows_its_subdomain_but_not_an_unrelated_host(self):
+        _, allowed_hosts, _ = core_domain_settings("portal.example.test")
+
+        self.assertTrue(validate_host("portal.example.test", allowed_hosts))
+        self.assertTrue(validate_host("mau.portal.example.test", allowed_hosts))
+        self.assertFalse(validate_host("unrelated.example.test", allowed_hosts))
+
+    def test_ci_domain_settings_include_core_and_subdomain_csrf_origins(self):
+        self.assertIn(settings.CORE_DOMAIN, settings.ALLOWED_HOSTS)
+        self.assertIn(f".{settings.CORE_DOMAIN}", settings.ALLOWED_HOSTS)
+        self.assertIn(f"https://{settings.CORE_DOMAIN}", settings.CSRF_TRUSTED_ORIGINS)
+        self.assertIn(f"https://*.{settings.CORE_DOMAIN}", settings.CSRF_TRUSTED_ORIGINS)
 
 
 class MultiInstitutionSaaSTests(TestCase):

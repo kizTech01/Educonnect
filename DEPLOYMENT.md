@@ -15,7 +15,7 @@
 
    Use a transactional email provider and verify the sender domain with that provider before going live.
 4. Deploy. The web service applies migrations before deploy.
-5. Add your custom domain. Set `CSRF_TRUSTED_ORIGINS` on the web service to its full HTTPS address, for example `https://educonnect.example.edu.ng`, and redeploy.
+5. Set `CORE_DOMAIN` to the bare platform hostname, for example `educonnect.example.edu.ng`, and redeploy. Django derives both the core host and its institution subdomains, plus their HTTPS CSRF origins, from this one value.
 6. Test password-reset and lecturer-message emails. When you are ready to pay for automated class reminders, add a Render cron service that runs `python manage.py send_due_course_reminders` every minute.
 7. Before accepting payments, have each department's HOD enter that department's Paystack public and secret keys in **Departmental → API and Document**. Gateways intentionally start unconfigured; no payment key is stored in the repository.
 

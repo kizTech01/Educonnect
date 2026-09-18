@@ -16,6 +16,8 @@ services:
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
+      - key: CORE_DOMAIN
+        value: educonnect-gmcl.onrender.com
       - key: DJANGO_TIME_ZONE
         value: Africa/Lagos
       - key: DJANGO_SECRET_KEY

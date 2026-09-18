@@ -13,6 +13,8 @@ jobs:
   docker-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CORE_DOMAIN: educonnect.com
 
     steps:
       - name: Checkout project
@@ -32,6 +34,7 @@ jobs:
             -e DJANGO_SECRET_KEY=github-actions-test-key \
             -e DJANGO_DEBUG=True \
             -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e CORE_DOMAIN \
             -e DJANGO_TIME_ZONE=Africa/Lagos \
             educonnect-test \
             python manage.py check
@@ -42,6 +45,7 @@ jobs:
             -e DJANGO_SECRET_KEY=github-actions-test-key \
             -e DJANGO_DEBUG=True \
             -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e CORE_DOMAIN \
             -e DJANGO_TIME_ZONE=Africa/Lagos \
             educonnect-test \
             python manage.py makemigrations --check --dry-run
@@ -52,6 +56,7 @@ jobs:
             -e DJANGO_SECRET_KEY=github-actions-test-key \
             -e DJANGO_DEBUG=True \
             -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e CORE_DOMAIN \
             -e DJANGO_TIME_ZONE=Africa/Lagos \
             educonnect-test \
             python manage.py collectstatic --noinput
@@ -62,6 +67,7 @@ jobs:
             -e DJANGO_SECRET_KEY=github-actions-test-key \
             -e DJANGO_DEBUG=True \
             -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e CORE_DOMAIN \
             -e DJANGO_TIME_ZONE=Africa/Lagos \
             educonnect-test \
             python manage.py test
@@ -74,6 +80,7 @@ jobs:
             -e DJANGO_SECRET_KEY=github-actions-production-test-key \
             -e DJANGO_DEBUG=False \
             -e DJANGO_USE_LOCAL_SQLITE=True \
+            -e CORE_DOMAIN \
             -e DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1 \
             -e DJANGO_TIME_ZONE=Africa/Lagos \
             educonnect-test
