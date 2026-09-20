@@ -44,7 +44,7 @@ CORE_DOMAIN, core_allowed_hosts, core_csrf_origins = core_domain_settings(
 PLATFORM_BASE_DOMAIN = CORE_DOMAIN
 
 ALLOWED_HOSTS = unique(
-    [*core_allowed_hosts, *parse_csv(os.getenv("DJANGO_ALLOWED_HOSTS", ""))]
+    [*core_allowed_hosts, *parse_csv(os.getenv("DJANGO_ALLOWED_HOSTS", "educonnect.devs.surf"))]
 )
 SCREENING_APPLICATION_URL_TEMPLATE = os.getenv(
     "SCREENING_APPLICATION_URL_TEMPLATE",
