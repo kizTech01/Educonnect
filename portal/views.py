@@ -335,11 +335,11 @@ def role_required(*roles):
         @wraps(view_func)
         def _wrapped(request, *args, **kwargs):
             if not request.user.is_authenticated:
-                return redirect("portal:home")
+                return redirect("portal:index")
             if request.user.role == User.Role.LECTURER and not request.user.is_approved:
                 logout(request)
                 messages.warning(request, "Your lecturer account is awaiting admin approval.")
-                return redirect("portal:home")
+                return redirect("portal:index")
             if request.user.is_superuser:
                 return redirect("portal:super-admin-dashboard")
             if request.user.role in roles:
@@ -1111,7 +1111,7 @@ def _lecturer_student_scope(request):
     return filter_form, courses, students
 
 
-def home_context(
+def index_context(
     student_login_form=None,
 ):
     ensure_default_admin_user()
@@ -1128,7 +1128,7 @@ def home_context(
 @ensure_csrf_cookie
 @never_cache
 def index(request):
-    return render(request, "portal/index.html", home_context())
+    return render(request, "portal/index.html", index_context())
 
 
 @ensure_csrf_cookie
@@ -1138,7 +1138,7 @@ def portal_login(request, role=None):
     requested_role = role or request.POST.get("role")
     if requested_role not in LOGIN_ROLES:
         messages.error(request, "Please choose a valid login page.")
-        return redirect("portal:home")
+        return redirect("portal:index")
 
     if request.method == "GET":
         return render(request, "portal/auth_login.html", auth_page_context(requested_role))
@@ -1149,7 +1149,7 @@ def portal_login(request, role=None):
             form.add_error(None, "Please complete the login form correctly.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
         messages.error(request, "Please complete the login form correctly.")
-        return redirect("portal:home")
+        return redirect("portal:index")
 
     role = form.cleaned_data["role"]
     username = form.cleaned_data["username"]
@@ -1160,7 +1160,7 @@ def portal_login(request, role=None):
             form.add_error(None, "Please use the login form for this account type.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
         messages.error(request, "Please use the correct login section for this account.")
-        return redirect("portal:home")
+        return redirect("portal:index")
 
     active_role = requested_role
 
@@ -1180,7 +1180,7 @@ def portal_login(request, role=None):
             form.add_error(None, "Invalid username or password.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
         messages.error(request, "Invalid username or password.")
-        return redirect("portal:home")
+        return redirect("portal:index")
     if active_role == User.Role.ADMIN:
         if user.is_superuser:
             form.add_error(None, "Super administrator accounts must use the super administrator login.")
@@ -1190,19 +1190,19 @@ def portal_login(request, role=None):
                 form.add_error(None, "This account is not an admin account.")
                 return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
             messages.error(request, "This account is not an admin account.")
-            return redirect("portal:home")
+            return redirect("portal:index")
     elif user.role != active_role:
         if requested_role:
             form.add_error(None, "Please use the correct login section for this account.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
         messages.error(request, "Please use the correct login section for this account.")
-        return redirect("portal:home")
+        return redirect("portal:index")
     if user.role == User.Role.LECTURER and not user.is_approved:
         if requested_role:
             form.add_error(None, "Your lecturer account is waiting for admin approval.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
         messages.warning(request, "Your lecturer account is waiting for admin approval.")
-        return redirect("portal:home")
+        return redirect("portal:index")
 
     _clear_failed_logins(request, username)
     login(request, user)
@@ -1274,7 +1274,7 @@ def portal_logout(request):
     logout(request)
     if request.method == "POST":
         messages.success(request, "You have been signed out.")
-    return redirect("portal:home")
+    return redirect("portal:index")
 
 
 @csrf_exempt
@@ -1317,7 +1317,7 @@ def paystack_webhook(request):
 
 def dashboard_redirect(request):
     if not request.user.is_authenticated:
-        return redirect("portal:home")
+        return redirect("portal:index")
     if request.user.is_superuser:
         return redirect("portal:super-admin-dashboard")
     if request.user.role == User.Role.ADMIN:
