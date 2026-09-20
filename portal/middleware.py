@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import logout
-from django.http import HttpResponseForbidden
+from django.http import HttpResponse, HttpResponseForbidden
 from django.shortcuts import redirect
 
 from .models import Institution, reset_current_institution, set_current_institution
@@ -14,30 +14,104 @@ class TenantResolutionMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        # Resolve the session user before establishing a tenant filter.  This
-        # lets us compare the authenticated account with the requested host
-        # instead of silently turning a foreign-tenant session into anonymous.
-        request.user.is_authenticated
         host = request.get_host().split(":", 1)[0].lower().rstrip(".")
         domain = settings.PLATFORM_BASE_DOMAIN.lower().strip(".")
+
         institution = None
+        tenant_host = False
+
+        # Example:
+        # mau.educonnect.devs.surf
+        # -> subdomain = mau
         if host and domain and host != domain and host.endswith(f".{domain}"):
-            subdomain = host[: -(len(domain) + 1)]
-            institution = Institution.objects.filter(subdomain__iexact=subdomain).first()
+            subdomain = host[: -(len(domain) + 1)].strip(".")
+
+            if subdomain and "." not in subdomain:
+                institution = (
+                    Institution.objects
+                    .filter(subdomain__iexact=subdomain)
+                    .first()
+                )
+
+            tenant_host = True
+
+        # Support institution custom domains.
         if institution is None and host:
-            institution = Institution.objects.filter(custom_domain__iexact=host).first()
+            institution = (
+                Institution.objects
+                .filter(custom_domain__iexact=host)
+                .first()
+            )
 
         request.tenant_resolved_from_host = institution is not None
 
-        # The shared platform host is used for login and Super Admin pages.  A
-        # tenant account that remains signed in there must still be scoped to
-        # its own institution; otherwise tenant-aware managers would run
-        # without a tenant filter and could expose cross-tenant data.
-        if institution is None and request.user.is_authenticated and not request.user.is_superuser:
+        # A tenant user visiting the central platform domain should still
+        # have their own institution available.
+        if (
+            institution is None
+            and request.user.is_authenticated
+            and not request.user.is_superuser
+        ):
             institution = request.user.institution
+
+        # If this is a tenant subdomain but no institution exists,
+        # stop here instead of allowing a tenant-dependent view to crash.
+        if tenant_host and institution is None:
+            return HttpResponse(
+                """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Institution Not Found</title>
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            background: #f5f7fa;
+                            margin: 0;
+                            padding: 60px 20px;
+                            text-align: center;
+                        }
+
+                        .container {
+                            max-width: 600px;
+                            margin: auto;
+                            background: white;
+                            padding: 40px;
+                            border-radius: 12px;
+                            box-shadow: 0 4px 20px rgba(0,0,0,.08);
+                        }
+
+                        h1 {
+                            margin-bottom: 10px;
+                        }
+
+                        p {
+                            color: #666;
+                            line-height: 1.6;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>Institution Not Found</h1>
+                        <p>
+                            This EduConnect portal address is not connected
+                            to an institution.
+                        </p>
+                        <p>
+                            Please contact the EduConnect platform administrator.
+                        </p>
+                    </div>
+                </body>
+                </html>
+                """,
+                status=404,
+            )
 
         request.institution = institution
         request.tenant_token = set_current_institution(institution)
+
         try:
             return self.get_response(request)
         finally:
