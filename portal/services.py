@@ -662,7 +662,7 @@ def ensure_default_admin_user():
     if not username or not password:
         return None
 
-    admin_user, created = User.objects.get_or_create(
+    admin_user, created = User.all_objects.get_or_create(
         username=username,
         defaults={
             "role": User.Role.ADMIN,
