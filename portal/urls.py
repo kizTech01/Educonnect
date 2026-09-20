@@ -1,7 +1,6 @@
 from django.contrib.auth import views as auth_views
 from django.urls import path, reverse_lazy
-from django.contrib.sitemaps.views import sitemap
-from portal.sitemaps import StaticViewSitemap
+
 
 from . import views
 
