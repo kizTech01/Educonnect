@@ -7,7 +7,7 @@ from . import views
 app_name = "portal"
 
 urlpatterns = [
-    path("", views.index, name="index"),
+    path("", views.index, name="home"),
     path("institution-logo/", views.institution_logo, name="institution-logo"),
     path("login/", views.portal_login, name="login"),
     path("login/<str:role>/", views.portal_login, name="role-login"),
