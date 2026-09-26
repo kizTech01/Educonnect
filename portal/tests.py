@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.exceptions import ValidationError
 from django.test import Client
 from django.test import RequestFactory
 from django.test import TestCase
@@ -19,6 +20,8 @@ from django.utils.datastructures import MultiValueDict
 
 from .models import (
     AcademicSession,
+    AuditLog,
+    AIAutomationJob,
     Course,
     CourseAllocationUpload,
     CoursePayment,
@@ -28,6 +31,7 @@ from .models import (
     CourseReminderDispatch,
     CourseMaterial,
     Department,
+    Faculty,
     DepartmentLecturerUpload,
     DepartmentPaymentGateway,
     DepartmentCoursePaymentGateway,
@@ -36,19 +40,134 @@ from .models import (
     DepartmentalPayment,
     Handbook,
     InstitutionProfile,
+    Institution,
     MaterialAccess,
     Notification,
     NotificationAttachment,
     NotificationRecipient,
     LecturerCourseRegistration,
+    Programme,
     StudentCourseRegistration,
     User,
     UserAlert,
+    RoleAssignment,
+    get_default_institution,
+    set_current_institution,
+    reset_current_institution,
 )
 from .services import dispatch_due_course_reminders, ensure_default_admin_user
-from .views import sidebar_links
-from .automation import import_course_allocations, import_department_lecturers
+from .views import AI_ROLE_EXAMPLES, _ai_answer, sidebar_links
+from .automation import import_course_allocations, import_department_lecturers, import_programmes
 
+
+class InstitutionalRBACTests(TestCase):
+    def setUp(self):
+        self.institution = get_default_institution()
+        self.department = Department.objects.create(name="Secure Computing", code="SEC")
+        self.hod = User.objects.create_user(
+            username="secure-hod", password="pass1234", role=User.Role.LECTURER,
+            department=self.department, is_approved=True,
+        )
+        self.department.head_of_department = self.hod
+        self.department.save(update_fields=["head_of_department"])
+        self.lecturer = User.objects.create_user(
+            username="secure-lecturer", password="pass1234", role=User.Role.LECTURER,
+            department=self.department, is_approved=True,
+        )
+
+    def test_hod_assigns_exam_officer_without_replacing_lecturer_role(self):
+        self.client.force_login(self.hod)
+        response = self.client.post(reverse("portal:hod-exam-officer"), {"lecturer_id": self.lecturer.id})
+
+        self.assertRedirects(response, reverse("portal:hod-exam-officer"))
+        self.lecturer.refresh_from_db()
+        self.assertEqual(self.lecturer.role, User.Role.LECTURER)
+        self.assertTrue(self.lecturer.has_role(User.Role.EXAM_OFFICER))
+        self.assertTrue(RoleAssignment.objects.filter(
+            user=self.lecturer, role=User.Role.EXAM_OFFICER, department=self.department,
+        ).exists())
+        self.assertTrue(AuditLog.objects.filter(action="exam_officer_assigned", user=self.hod).exists())
+
+    def test_role_assignment_rejects_a_cross_tenant_department(self):
+        other = Institution.objects.create(
+            name="Other University", institution_code="OTHER-SEC", email="other@example.test",
+            subdomain="other-sec", status=Institution.Status.ACTIVE,
+        )
+        foreign_faculty = Faculty.all_objects.create(name="Other Faculty", code="OTH", institution=other)
+        foreign_department = Department.all_objects.create(
+            name="Other Department", code="ODEP", faculty=foreign_faculty, institution=other,
+        )
+        with self.assertRaises(ValidationError):
+            RoleAssignment.objects.create(
+                institution=self.institution, user=self.lecturer, role=User.Role.EXAM_OFFICER,
+                department=foreign_department, assigned_by=self.hod,
+            )
+
+    def test_ai_uses_the_selected_role_not_another_assigned_role(self):
+        RoleAssignment.objects.create(
+            institution=self.institution,
+            user=self.hod,
+            role=User.Role.HOD,
+            department=self.department,
+            assigned_by=self.hod,
+        )
+        User.objects.create_user(
+            username="secure-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=self.department,
+        )
+
+        lecturer_answer = _ai_answer(self.hod, User.Role.LECTURER, "How many students are there?")
+        hod_answer = _ai_answer(self.hod, User.Role.HOD, "How many students are there?")
+
+        self.assertIn("assigned courses", lecturer_answer)
+        self.assertIn("1 student", hod_answer)
+        self.assertNotEqual(lecturer_answer, hod_answer)
+
+    def test_ai_examples_cover_every_institutional_role(self):
+        self.assertEqual(set(AI_ROLE_EXAMPLES), set(User.Role.values))
+
+    def test_ai_automation_url_is_not_exposed(self):
+        self.client.force_login(self.hod)
+        self.assertEqual(self.client.get(reverse("portal:ai-automation")).status_code, 403)
+
+        administrator = User.objects.create_user(
+            username="secure-admin", password="pass1234", role=User.Role.ADMIN,
+        )
+        self.client.force_login(administrator)
+        self.assertEqual(self.client.get(reverse("portal:ai-automation")).status_code, 200)
+
+    def test_ai_automation_requires_analysis_approval_then_execution(self):
+        administrator = User.objects.create_user(
+            username="automation-admin", password="pass1234", role=User.Role.ADMIN,
+        )
+        self.client.force_login(administrator)
+        upload = SimpleUploadedFile(
+            "lecturers.csv",
+            b"name,email,lecturer_id,department_code\nAda Lovelace,ada@example.test,LEC-001,SEC\n",
+            content_type="text/csv",
+        )
+        response = self.client.post(
+            reverse("portal:ai-automation"),
+            {"action": "analyze", "file": upload, "command": "Create lecturer accounts from this file"},
+        )
+        self.assertRedirects(response, reverse("portal:ai-automation"))
+        job = AIAutomationJob.objects.get()
+        self.assertEqual(job.status, AIAutomationJob.Status.ANALYZED)
+        self.assertFalse(User.objects.filter(username="LEC-001").exists())
+
+        response = self.client.post(reverse("portal:ai-automation"), {"action": "approve", "job_id": job.id})
+        self.assertRedirects(response, reverse("portal:ai-automation"))
+        job.refresh_from_db()
+        self.assertEqual(job.status, AIAutomationJob.Status.APPROVED)
+
+        response = self.client.post(reverse("portal:ai-automation"), {"action": "execute", "job_id": job.id})
+        self.assertRedirects(response, reverse("portal:ai-automation"))
+        job.refresh_from_db()
+        self.assertEqual(job.status, AIAutomationJob.Status.EXECUTED)
+        self.assertTrue(User.objects.filter(username="LEC-001", role=User.Role.LECTURER).exists())
+        self.assertTrue(AuditLog.objects.filter(action="ai_automation_executed", object_id=str(job.id)).exists())
 
 class DepartmentAutomationTests(TestCase):
     def setUp(self):
@@ -125,6 +244,20 @@ class DepartmentAutomationTests(TestCase):
 
         self.course.refresh_from_db()
         self.assertEqual(self.course.lecturer, lecturer)
+
+    def test_programme_import_uses_ai_records_and_keeps_the_selected_department(self):
+        with patch("portal.automation._ai_extract", return_value=[
+            {"programme_code": "BSC-CS", "programme_name": "Computer Science", "award": "BSc", "duration_years": "4"},
+        ]):
+            summary = import_programmes(
+                SimpleUploadedFile("programmes.csv", b"programme catalogue", content_type="text/csv"),
+                self.department,
+            )
+
+        programme = Programme.objects.get(code="BSC-CS")
+        self.assertIn("1 created", summary)
+        self.assertEqual(programme.department, self.department)
+        self.assertEqual(programme.duration_years, 4)
 
 
 class CurriculumCohortTests(TestCase):
@@ -698,7 +831,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "Register Courses")
         self.assertNotContains(response, "My Courses")
 
-    def test_sidebar_uses_timetable_and_handbook_label_for_all_roles(self):
+    def test_sidebar_keeps_timetable_and_handbook_outside_institution_admin_navigation(self):
         student_request = self.factory.get(reverse("portal:student-dashboard"))
         student_request.user = self.student
         student_request.resolver_match = None
@@ -711,7 +844,7 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertIn("Timetable and Handbook", [item["label"] for item in sidebar_links(student_request)])
         self.assertIn("Timetable and Handbook", [item["label"] for item in sidebar_links(lecturer_request)])
-        self.assertIn("Timetable and Handbook", [item["label"] for item in sidebar_links(admin_request)])
+        self.assertNotIn("Timetable and Handbook", [item["label"] for item in sidebar_links(admin_request)])
         self.assertNotIn("Documents", [item["label"] for item in sidebar_links(student_request)])
         self.assertNotIn("Documents", [item["label"] for item in sidebar_links(lecturer_request)])
         self.assertNotIn("Documents", [item["label"] for item in sidebar_links(admin_request)])
@@ -808,6 +941,65 @@ class DashboardAndCourseFlowTests(TestCase):
             ["View APIs", "View Fees", "Students"],
         )
 
+    def test_programme_workspace_is_hod_only_and_admin_menu_does_not_expose_it(self):
+        programme = Programme.objects.create(
+            department=self.department,
+            name="Computer Science",
+            code="BSC-CS",
+            award="BSc",
+        )
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+
+        admin_request = self.factory.get(reverse("portal:admin-dashboard"))
+        admin_request.user = self.admin
+        admin_request.resolver_match = None
+        self.assertNotIn("Programmes", [item["label"] for item in sidebar_links(admin_request)])
+
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get(reverse("portal:admin-programmes")).status_code, 403)
+
+        self.client.force_login(self.lecturer)
+        workspace = self.client.get(reverse("portal:hod-programmes"))
+        self.assertEqual(workspace.status_code, 200)
+        self.assertContains(workspace, programme.name)
+        detail = self.client.get(reverse("portal:hod-programme-detail", args=[programme.id]))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, "Upload programme handbook")
+
+        self.client.force_login(self.student)
+        self.assertEqual(self.client.get(reverse("portal:hod-programmes")).status_code, 403)
+
+    def test_student_must_select_a_programme_when_the_department_offers_one(self):
+        programme = Programme.objects.create(
+            department=self.department,
+            name="Computer Science",
+            code="BSC-CS",
+            award="BSc",
+        )
+        payload = {
+            "username": "programme-student",
+            "first_name": "Programme",
+            "last_name": "Student",
+            "email": "programme-student@example.com",
+            "id_number": "STU-PROGRAMME",
+            "department": self.department.id,
+            "level": "100",
+            "phone_number": "08000000000",
+            "password1": "pass1234",
+            "password2": "pass1234",
+        }
+
+        missing_programme = self.client.post(reverse("portal:student-signup"), payload)
+        self.assertEqual(missing_programme.status_code, 200)
+        self.assertContains(missing_programme, "Choose your programme")
+
+        created = self.client.post(
+            reverse("portal:student-signup"), {**payload, "programme": programme.id},
+        )
+        self.assertRedirects(created, reverse("portal:student-dashboard"))
+        self.assertEqual(User.objects.get(username="programme-student").programme, programme)
+
     def test_admin_can_search_departments_and_assign_an_hod(self):
         self.client.force_login(self.admin)
 
@@ -832,15 +1024,22 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertRedirects(response, f'{reverse("portal:admin-hods")}?department={self.department.id}')
         self.department.refresh_from_db()
         self.assertEqual(self.department.head_of_department, self.lecturer)
+        self.assertTrue(self.lecturer.has_role(User.Role.HOD))
+        self.assertTrue(AuditLog.objects.filter(action="hod_assigned", user=self.admin).exists())
 
         request = self.factory.get(reverse("portal:lecturer-dashboard"))
         request.user = self.lecturer
         request.resolver_match = None
-        departmental_link = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
-        labels = [child["label"] for child in departmental_link["children"]]
-        self.assertIn("API and Document", labels)
-        self.assertIn("Set Fee", labels)
-        self.assertNotIn("Payment API", labels)
+        request.session = {"active_role": User.Role.HOD}
+        labels = [item["label"] for item in sidebar_links(request)]
+        self.assertIn("Exam Officer", labels)
+        self.assertIn("Course Allocation", labels)
+        departmental_menu = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
+        self.assertEqual(
+            [item["label"] for item in departmental_menu["children"]],
+            ["Set Departmental Fees", "API & Documents"],
+        )
+        self.assertNotIn("Timetable and Handbook", labels)
 
     def test_only_assigned_hod_can_update_its_departmental_api_and_fees(self):
         self.department.head_of_department = self.lecturer
@@ -865,6 +1064,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(api_and_document_response, "Add Course Allocation")
         self.assertContains(api_and_document_response, "Department Handbook")
         self.assertContains(api_and_document_response, "Upload Handbook")
+        self.assertNotContains(api_and_document_response, "value=\"sk_hod\"", html=False)
 
         course_api_response = self.client.post(
             reverse("portal:hod-api-and-document"),
@@ -878,6 +1078,15 @@ class DashboardAndCourseFlowTests(TestCase):
         course_gateway = DepartmentCoursePaymentGateway.objects.get(department=self.department)
         self.assertEqual(course_gateway.paystack_public_key, "pk_course_hod")
         self.assertEqual(course_gateway.paystack_secret_key, "sk_course_hod")
+
+        public_key_only_response = self.client.post(
+            reverse("portal:hod-api-and-document"),
+            {"paystack_public_key": "pk_hod_updated"},
+        )
+        self.assertRedirects(public_key_only_response, reverse("portal:hod-api-and-document"))
+        gateway.refresh_from_db()
+        self.assertEqual(gateway.paystack_public_key, "pk_hod_updated")
+        self.assertEqual(gateway.paystack_secret_key, "sk_hod")
 
         allocation_response = self.client.post(
             reverse("portal:hod-api-and-document"),

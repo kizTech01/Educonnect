@@ -3,7 +3,7 @@
 {% block super_content %}
 <section class="panel-card narrow-panel">
   <div class="panel-head"><h2>Plan details</h2></div>
-  <p class="muted-note">Edit the plan description, limits, features, and availability. Change each selling amount from its duration link.</p>
+  <p class="muted-note">Edit the plan description, usage limits, and availability. Change each selling amount from its duration link.</p>
   <form method="post" class="stack-form">
     {% csrf_token %}
     {{ form.as_p }}

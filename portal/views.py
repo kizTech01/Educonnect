@@ -12,7 +12,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Count, Max, OuterRef, Prefetch, Subquery, Sum
 from django.db.models import Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
@@ -27,18 +27,24 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 
 from .forms import (
     CourseForm,
+    CourseResultForm,
+    ResultImportForm,
+    ResultReportFilterForm,
     CourseDetailsForm,
     CourseBrowseFilterForm,
     CourseStudentGroupForm,
     CourseMaterialBatchForm,
     AcademicSessionForm,
+    AccommodationApplicationForm,
+    AccommodationDecisionForm,
+    AccommodationSessionForm,
+    AIAutomationUploadForm,
     DepartmentForm,
     DepartmentLecturerUploadForm,
     CourseAllocationUploadForm,
     FacultyForm,
     InstitutionCreateForm,
     InstitutionUpdateForm,
-    SubscriptionAssignmentForm,
     SubscriptionPlanForm,
     SubscriptionPlanEditForm,
     SubscriptionPlanDurationForm,
@@ -55,15 +61,21 @@ from .forms import (
     DepartmentalStudentPaymentForm,
     HandbookForm,
     HandbookFilterForm,
+    HostelBedForm,
+    HostelBlockForm,
+    HostelForm,
+    HostelRoomForm,
     LecturerCourseUpdateForm,
     LecturerProfileForm,
     LecturerUserForm,
     LecturerSignupForm,
     NotificationForm,
     PortalAuthenticationForm,
+    ResultReviewForm,
     StudentCourseFilterForm,
     StudentProfileForm,
     StudentUserForm,
+    StaffUserForm,
     StudentSignupForm,
     TimetableFilterForm,
     TimetableForm,
@@ -74,7 +86,11 @@ from .forms import (
 )
 from .models import (
     AcademicSession,
+    AccommodationAllocation,
+    AccommodationApplication,
+    AccommodationSession,
     Course,
+    CourseResult,
     CoursePaymentGateway,
     CourseMaterial,
     Department,
@@ -91,6 +107,10 @@ from .models import (
     DepartmentalPaymentDocument,
     DepartmentalPaymentItem,
     Handbook,
+    Hostel,
+    HostelBed,
+    HostelBlock,
+    HostelRoom,
     CoursePayment,
     CourseStudentGroup,
     CourseStudentGroupMembership,
@@ -104,17 +124,20 @@ from .models import (
     User,
     UserAlert,
     AuditLog,
+    AIAutomationJob,
+    RoleAssignment,
     Payment,
+    Programme,
     Subscription,
     SubscriptionPlan,
     SubscriptionPlanDuration,
     SubscriptionPaymentGateway,
-    Feature,
-    InstitutionFeature,
+    GuardianRelationship,
     ScreeningIntegration,
     ScreeningApplication,
     TimeStampedModel,
     curriculum_for_department,
+    curriculum_for_programme,
 )
 from .services import (
     TEMPORARY_ACCOUNT_PASSWORD,
@@ -131,9 +154,16 @@ from .services import (
     verify_and_finalize_subscription_payment,
 )
 from .pdf import build_exam_card_pdf, build_pdf_document
-from .automation import import_course_allocations, import_department_lecturers, import_handbook_courses
+from .automation import (
+    analyze_institution_automation,
+    execute_institution_automation,
+    import_course_allocations,
+    import_course_results,
+    import_department_lecturers,
+    import_handbook_courses,
+)
 
-LOGIN_ROLES = {User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN}
+LOGIN_ROLES = set(User.Role.values)
 SCREENING_SIGNATURE_HEADER = "HTTP_X_EDUCONNECT_SIGNATURE"
 SCREENING_TIMESTAMP_HEADER = "HTTP_X_EDUCONNECT_TIMESTAMP"
 SCREENING_INSTITUTION_HEADER = "HTTP_X_EDUCONNECT_INSTITUTION"
@@ -276,7 +306,7 @@ def signup_form_for_role(role, data=None):
 
 def auth_page_context(role, login_form=None, signup_form=None, *, is_super_admin=False):
     ensure_default_admin_user()
-    role_label = "Super Administrator" if is_super_admin else User.Role(role).label
+    role_label = "Super Administrator" if is_super_admin else User.Role(role).label if role else "Institution"
     signup_available = not is_super_admin and role in {User.Role.STUDENT, User.Role.LECTURER}
     signup_form = signup_form if signup_form is not None else signup_form_for_role(role)
     return {
@@ -291,8 +321,8 @@ def auth_page_context(role, login_form=None, signup_form=None, *, is_super_admin
             else f"Use your {role_label.lower()} credentials to enter your dashboard."
         ),
         "login_form": login_form or login_form_for_role(role),
-        "login_action": reverse("portal:super-admin-login") if is_super_admin else reverse("portal:role-login", kwargs={"role": role}),
-        "login_button_label": f"Enter {role_label} Dashboard",
+        "login_action": reverse("portal:super-admin-login") if is_super_admin else reverse("portal:role-login", kwargs={"role": role}) if role else reverse("portal:login"),
+        "login_button_label": "Sign in securely" if not role else f"Enter {role_label} Dashboard",
         "signup_available": signup_available,
         "signup_form": signup_form,
         "signup_action": reverse("portal:student-signup" if role == User.Role.STUDENT else "portal:lecturer-signup")
@@ -327,6 +357,9 @@ def signup_page_context(role, signup_form=None):
         "back_url": reverse("portal:role-login", kwargs={"role": role}),
         "is_student": role == User.Role.STUDENT,
         "is_lecturer": role == User.Role.LECTURER,
+        "programme_departments": list(
+            Programme.objects.filter(is_active=True).values("id", "name", "department_id")
+        ) if role == User.Role.STUDENT else [],
     }
 
 
@@ -342,7 +375,7 @@ def role_required(*roles):
                 return redirect("portal:home")
             if request.user.is_superuser:
                 return redirect("portal:super-admin-dashboard")
-            if request.user.role in roles:
+            if request.user.has_role(*roles):
                 return view_func(request, *args, **kwargs)
             raise PermissionDenied
 
@@ -364,19 +397,6 @@ def super_admin_required(view_func):
     return _wrapped
 
 
-def institution_feature_required(feature_code):
-    """Guard a tenant feature in the backend as well as in navigation."""
-    def decorator(view_func):
-        @wraps(view_func)
-        def _wrapped(request, *args, **kwargs):
-            institution = getattr(request, "institution", None)
-            if not institution or not institution.feature_enabled(feature_code):
-                raise PermissionDenied("This feature is not enabled for your institution.")
-            return view_func(request, *args, **kwargs)
-        return _wrapped
-    return decorator
-
-
 def _client_ip(request):
     return request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR", "")).split(",")[0].strip() or None
 
@@ -395,7 +415,7 @@ def _screening_api_authenticate(request, institution_code):
     if not header_code or header_code.casefold() != institution_code.casefold():
         return None, JsonResponse({"detail": "Institution credentials do not match this endpoint."}, status=403)
     institution = Institution.objects.filter(institution_code__iexact=institution_code).first()
-    if not institution or not institution.feature_enabled("online-screening"):
+    if not institution or not institution.is_operational:
         return None, JsonResponse({"detail": "Online Screening is unavailable for this institution."}, status=403)
     integration = getattr(institution, "screening_integration", None)
     if not integration:
@@ -464,19 +484,53 @@ def course_payment_gateway_for_department(department):
     return DepartmentCoursePaymentGateway.objects.filter(department=department).first()
 
 
+ROLE_MODULES = {
+    User.Role.MIS: (("Student Records", "students"), ("Data Quality", "data-quality"), ("Reports", "reports")),
+    User.Role.BURSARY: (("Payments", "payments"), ("Outstanding Balances", "balances"), ("Finance Reports", "reports")),
+    User.Role.ADMISSION_OFFICER: (("Applications", "applications"), ("Admission Reports", "reports")),
+    User.Role.ACADEMIC_PLANNING: (("Academic Structure", "academic-structure"), ("Course Catalogue", "courses"), ("Curriculum Reports", "reports")),
+    User.Role.HOD: (("Students", "students"), ("Lecturers", "lecturers"), ("Courses", "courses"), ("My Assigned Courses", "my-courses"), ("Course Allocation", "allocations"), ("All Results", "results"), ("Reports", "reports"), ("Exam Officer", "exam-officer")),
+    User.Role.EXAM_OFFICER: (("Exam Eligibility", "eligibility"), ("Course Registrations", "registrations"), ("Exam Cards", "exam-cards"), ("All Results", "results"), ("Reports", "reports")),
+    User.Role.SENATE_MEMBER: (("Academic Reports", "reports"), ("Course Catalogue", "courses")),
+    User.Role.PARENT_GUARDIAN: (("Linked Students", "linked-students"), ("Academic Progress", "progress"), ("Payments", "payments")),
+}
+
+
+def active_role(request):
+    """Use a session role only when it is genuinely assigned to this user."""
+    if not request.user.is_authenticated or request.user.is_superuser:
+        return None
+    roles = request.user.active_roles()
+    # RequestFactory-based integrations and a few internal callers do not add
+    # SessionMiddleware.  They should fall back to the primary role just as a
+    # newly authenticated browser session does.
+    selected = getattr(request, "session", {}).get("active_role")
+    if selected in roles:
+        return selected
+    return request.user.role if request.user.role in roles else sorted(roles)[0]
+
+
+def _role_dashboard_name(role):
+    if role == User.Role.ADMIN:
+        return "portal:admin-dashboard"
+    if role in {User.Role.LECTURER, User.Role.HOD, User.Role.EXAM_OFFICER}:
+        return "portal:lecturer-dashboard"
+    if role == User.Role.STUDENT:
+        return "portal:student-dashboard"
+    return "portal:role-workspace"
+
+
 def sidebar_links(request):
     current = request.resolver_match.url_name if request.resolver_match else ""
+    selected_role = active_role(request)
     unread_message_count = 0
-    if request.user.is_authenticated and request.user.role == User.Role.STUDENT:
+    if request.user.is_authenticated and selected_role == User.Role.STUDENT:
         unread_message_count = NotificationRecipient.objects.filter(
             student=request.user,
             is_deleted=False,
             is_read=False,
         ).count()
-    institution = getattr(request, "institution", None)
-    ai_enabled = bool(institution and institution.feature_enabled("educonnect-ai"))
-    screening_enabled = bool(institution and institution.feature_enabled("online-screening"))
-    if request.user.is_superuser or request.user.role == User.Role.ADMIN:
+    if request.user.is_superuser or selected_role == User.Role.ADMIN:
         links = [
             {"label": "Dashboard", "url_name": "portal:admin-dashboard"},
             {
@@ -497,28 +551,49 @@ def sidebar_links(request):
                 "url": f'{reverse("portal:admin-courses")}?fee_type=paid',
                 "active": current == "admin-courses" and request.GET.get("fee_type") == "paid",
             },
-            {"label": "Timetable and Handbook", "url_name": "portal:admin-documents"},
             {"label": "Users", "url_name": "portal:admin-users"},
             {"label": "Subscription & Billing", "url_name": "portal:billing-overview"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
-        if ai_enabled:
-            links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
-        if screening_enabled:
-            links.insert(-1, {"label": "Online Screening", "url_name": "portal:screening-portal"})
-    elif request.user.role == User.Role.LECTURER:
-        is_hod = Department.objects.filter(
-            head_of_department=request.user,
-            pk=request.user.department_id,
-        ).exists()
+        links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
+    elif selected_role == User.Role.HOD:
+        links = [
+            {"label": "Dashboard", "url_name": "portal:lecturer-dashboard"},
+            {"label": "Programmes", "url_name": "portal:hod-programmes"},
+            {
+                "label": "Departmental",
+                "children": [
+                    {"label": "Set Departmental Fees", "url_name": "portal:hod-departmental-fees"},
+                    {"label": "API & Documents", "url_name": "portal:hod-api-and-document"},
+                ],
+            },
+        ]
+        for label, slug in ROLE_MODULES[User.Role.HOD]:
+            links.append(
+                {"label": label, "url_name": "portal:hod-exam-officer"}
+                if slug == "exam-officer"
+                else {"label": label, "url_name": "portal:department-all-results"}
+                if slug == "results"
+                else {"label": label, "url_name": "portal:hod-reports"}
+                if slug == "reports"
+                else {"label": label, "url_name": "portal:lecturer-courses"}
+                if slug == "my-courses"
+                else {"label": label, "url_name": "portal:role-module", "kwargs": {"module": slug}}
+            )
+    elif selected_role == User.Role.EXAM_OFFICER:
+        links = [{"label": "Dashboard", "url_name": "portal:lecturer-dashboard"}]
+        links.extend(
+            {"label": label, "url_name": "portal:department-all-results"}
+            if slug == "results"
+            else {"label": label, "url_name": "portal:hod-reports"}
+            if slug == "reports"
+            else {"label": label, "url_name": "portal:role-module", "kwargs": {"module": slug}}
+            for label, slug in ROLE_MODULES[User.Role.EXAM_OFFICER]
+        )
+    elif selected_role == User.Role.LECTURER:
         departmental_links = [
             {"label": "Students", "url_name": "portal:lecturer-departmental-download"},
         ]
-        if is_hod:
-            departmental_links.extend([
-                {"label": "API and Document", "url_name": "portal:hod-api-and-document"},
-                {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
-            ])
         links = [
             {"label": "Dashboard", "url_name": "portal:lecturer-dashboard"},
             {
@@ -535,23 +610,36 @@ def sidebar_links(request):
             {"label": "Timetable and Handbook", "url_name": "portal:lecturer-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
-        if ai_enabled:
-            links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
-        if screening_enabled:
-            links.insert(-1, {"label": "Online Screening", "url_name": "portal:screening-portal"})
+        if getattr(request.user, "headed_department", None) or request.user.has_role(User.Role.HOD):
+            links.insert(1, {"label": "Programmes", "url_name": "portal:hod-programmes"})
+        links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
+    elif selected_role in ROLE_MODULES:
+        links = [
+            {"label": "Dashboard", "url_name": "portal:role-workspace"},
+            *[
+                {"label": label, "url_name": "portal:role-module", "kwargs": {"module": slug}}
+                for label, slug in ROLE_MODULES[selected_role]
+            ],
+            {"label": "Profile", "url_name": "portal:profile"},
+        ]
+        links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
+        if selected_role == User.Role.BURSARY:
+            links.insert(-1, {"label": "Accommodation", "url_name": "portal:accommodation-admin"})
     else:
         links = [
             {"label": "Dashboard", "url_name": "portal:student-dashboard"},
             {"label": "Departmental", "url_name": "portal:student-departmental"},
             {"label": "Course Registration", "url_name": "portal:student-courses"},
+            {"label": "Results", "url_name": "portal:student-results"},
+            {"label": "Accommodation", "url_name": "portal:student-accommodation"},
             {"label": "Messages", "url_name": "portal:student-messages", "badge_count": unread_message_count},
             {"label": "Timetable and Handbook", "url_name": "portal:student-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
-        if ai_enabled:
-            links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
-        if screening_enabled:
-            links.insert(-1, {"label": "Online Screening", "url_name": "portal:screening-portal"})
+        links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
+    if selected_role in {User.Role.HOD, User.Role.EXAM_OFFICER}:
+        links.append({"label": "Profile", "url_name": "portal:profile"})
+        links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
     resolved_links = []
     for item in links:
         if "children" in item:
@@ -560,10 +648,10 @@ def sidebar_links(request):
             for child in item["children"]:
                 child_active = current == child["url_name"].split(":")[1]
                 active = active or child_active
-                children.append({"label": child["label"], "url": reverse(child["url_name"]), "active": child_active})
+                children.append({"label": child["label"], "url": reverse(child["url_name"], kwargs=child.get("kwargs")), "active": child_active})
             resolved_links.append({"label": item["label"], "children": children, "active": active})
         else:
-            url = item.get("url") or reverse(item["url_name"])
+            url = item.get("url") or reverse(item["url_name"], kwargs=item.get("kwargs"))
             active = item.get("active")
             if active is None:
                 active = current == item["url_name"].split(":")[1]
@@ -577,9 +665,18 @@ def sidebar_links(request):
 
 
 def dashboard_context(request, title, **extra):
+    selectable_roles = []
+    selected_role = active_role(request)
+    if request.user.is_authenticated and not request.user.is_superuser:
+        selectable_roles = [
+            (value, User.Role(value).label)
+            for value in sorted(request.user.active_roles())
+        ]
     context = {
         "section_title": title,
         "sidebar_links": sidebar_links(request),
+        "active_role": selected_role,
+        "selectable_roles": selectable_roles,
     }
     context.update(extra)
     return context
@@ -1041,9 +1138,28 @@ def _student_curriculum(user):
     """
     if not user.department_id:
         return None
-    if user.curriculum_id and user.curriculum.department_id == user.department_id:
+    current_session = current_departmental_session()
+    if (
+        user.curriculum_id and user.curriculum.department_id == user.department_id
+        and user.curriculum.programme_id == user.programme_id
+    ):
+        # Keep cohorts fixed within a session. A curriculum published for a
+        # newly current session takes effect for its students.
+        if not current_session or user.curriculum.effective_session_id == current_session.id:
+            return user.curriculum
+        replacement = (
+            curriculum_for_programme(user.programme, current_session)
+            if user.programme_id else curriculum_for_department(user.department, current_session)
+        )
+        if replacement and replacement.effective_session_id == current_session.id:
+            user.curriculum = replacement
+            user.save(update_fields=["curriculum"])
+            return replacement
         return user.curriculum
-    curriculum = curriculum_for_department(user.department, current_departmental_session())
+    curriculum = (
+        curriculum_for_programme(user.programme, current_departmental_session())
+        if user.programme_id else curriculum_for_department(user.department, current_departmental_session())
+    )
     if curriculum:
         user.curriculum = curriculum
         user.save(update_fields=["curriculum"])
@@ -1054,15 +1170,22 @@ def _student_course_catalog_queryset(student):
     curriculum = _student_curriculum(student)
     if not curriculum:
         return Course.objects.none()
+    # The many-to-many curriculum relation permits a single shared course to
+    # appear in more than one programme without exposing either programme's
+    # private courses to the other.  The FK fallback preserves pre-migration
+    # course records until they are next saved.
     queryset = Course.objects.select_related("department", "lecturer", "curriculum").filter(
         department=student.department,
-        curriculum=curriculum,
-    )
+    ).filter(Q(curricula=curriculum) | Q(curricula__isnull=True, curriculum=curriculum))
+    if student.programme_id:
+        queryset = queryset.filter(programmes=student.programme)
+    else:
+        queryset = queryset.filter(programmes__isnull=True)
     # A student moves through the same curriculum as their level changes. Old
     # records that predate a stored level remain browsable for compatibility.
     if student.level:
         queryset = queryset.filter(level=student.level)
-    return queryset
+    return queryset.distinct()
 
 
 def _student_course_row_context(registration, payment, group_name=None):
@@ -1135,8 +1258,8 @@ def index(request):
 @never_cache
 def portal_login(request, role=None):
     ensure_default_admin_user()
-    requested_role = role or request.POST.get("role")
-    if requested_role not in LOGIN_ROLES:
+    requested_role = role
+    if requested_role and requested_role not in LOGIN_ROLES:
         messages.error(request, "Please choose a valid login page.")
         return redirect("portal:home")
 
@@ -1151,18 +1274,18 @@ def portal_login(request, role=None):
         messages.error(request, "Please complete the login form correctly.")
         return redirect("portal:home")
 
-    role = form.cleaned_data["role"]
+    submitted_role = form.cleaned_data["role"]
     username = form.cleaned_data["username"]
     password = form.cleaned_data["password"]
 
-    if requested_role != role:
+    if requested_role and requested_role != submitted_role:
         if requested_role:
             form.add_error(None, "Please use the login form for this account type.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
         messages.error(request, "Please use the correct login section for this account.")
         return redirect("portal:home")
 
-    active_role = requested_role
+    active_role = requested_role or submitted_role
 
     if _login_is_throttled(request, username):
         form.add_error(None, "Too many failed sign-in attempts. Please try again in 15 minutes.")
@@ -1185,13 +1308,13 @@ def portal_login(request, role=None):
         if user.is_superuser:
             form.add_error(None, "Super administrator accounts must use the super administrator login.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
-        if user.role != User.Role.ADMIN:
+        if not user.has_role(User.Role.ADMIN):
             if requested_role:
                 form.add_error(None, "This account is not an admin account.")
                 return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
             messages.error(request, "This account is not an admin account.")
             return redirect("portal:home")
-    elif user.role != active_role:
+    elif active_role and not user.has_role(active_role):
         if requested_role:
             form.add_error(None, "Please use the correct login section for this account.")
             return render(request, "portal/auth_login.html", auth_page_context(requested_role, login_form=form))
@@ -1220,13 +1343,16 @@ def portal_login(request, role=None):
 @never_cache
 def student_signup(request):
     if request.method == "GET":
-        return render(request, "portal/auth_signup.html", signup_page_context(User.Role.STUDENT))
-    form = StudentSignupForm(request.POST)
+        return render(request, "portal/auth_signup.html", signup_page_context(
+            User.Role.STUDENT,
+            signup_form=StudentSignupForm(institution=getattr(request, "institution", None)),
+        ))
+    form = StudentSignupForm(request.POST, institution=getattr(request, "institution", None))
     if form.is_valid():
         user = form.save()
-        user.curriculum = curriculum_for_department(
-            user.department,
-            current_departmental_session(),
+        user.curriculum = (
+            curriculum_for_programme(user.programme, current_departmental_session())
+            if user.programme_id else curriculum_for_department(user.department, current_departmental_session())
         )
         user.save(update_fields=["curriculum"])
         authenticated_user = authenticate(
@@ -1247,8 +1373,11 @@ def student_signup(request):
 @never_cache
 def lecturer_signup(request):
     if request.method == "GET":
-        return render(request, "portal/auth_signup.html", signup_page_context(User.Role.LECTURER))
-    form = LecturerSignupForm(request.POST)
+        return render(request, "portal/auth_signup.html", signup_page_context(
+            User.Role.LECTURER,
+            signup_form=LecturerSignupForm(institution=getattr(request, "institution", None)),
+        ))
+    form = LecturerSignupForm(request.POST, institution=getattr(request, "institution", None))
     if form.is_valid():
         form.save()
         messages.success(request, "Lecturer account created successfully.")
@@ -1320,11 +1449,95 @@ def dashboard_redirect(request):
         return redirect("portal:home")
     if request.user.is_superuser:
         return redirect("portal:super-admin-dashboard")
-    if request.user.role == User.Role.ADMIN:
-        return redirect("portal:admin-dashboard")
-    if request.user.role == User.Role.LECTURER:
-        return redirect("portal:lecturer-dashboard")
-    return redirect("portal:student-dashboard")
+    return redirect(_role_dashboard_name(active_role(request)))
+
+
+@require_http_methods(["POST"])
+def switch_role(request):
+    if not request.user.is_authenticated or request.user.is_superuser:
+        raise PermissionDenied
+    requested_role = request.POST.get("role", "")
+    if requested_role not in request.user.active_roles():
+        raise PermissionDenied("You can only switch to a role assigned to your account.")
+    request.session["active_role"] = requested_role
+    return redirect("portal:dashboard")
+
+
+@role_required(*ROLE_MODULES.keys())
+def role_workspace(request):
+    selected_role = active_role(request)
+    roles = [User.Role(value).label for value in sorted(request.user.active_roles())]
+    return render(request, "portal/role_workspace.html", dashboard_context(
+        request, f"{User.Role(selected_role).label} Workspace", assigned_roles=roles,
+        modules=ROLE_MODULES.get(selected_role, ()),
+    ))
+
+
+@role_required(*ROLE_MODULES.keys())
+def role_module(request, module):
+    """Tenant- and role-scoped operational views for the institutional roles."""
+    selected_role = active_role(request)
+    available = dict(ROLE_MODULES.get(selected_role, ()))
+    if module not in available:
+        raise PermissionDenied("This module is not assigned to your active role.")
+    if module == "exam-officer":
+        return redirect("portal:hod-exam-officer")
+
+    title = available[module]
+    department = None
+    if selected_role in {User.Role.HOD, User.Role.EXAM_OFFICER}:
+        department = hod_department_for(request) if selected_role == User.Role.HOD else request.user.department
+    students = User.objects.filter(role=User.Role.STUDENT)
+    lecturers = User.objects.filter(role=User.Role.LECTURER)
+    courses = Course.objects.all()
+    if department:
+        students = students.filter(department=department)
+        lecturers = lecturers.filter(department=department)
+        courses = courses.filter(department=department)
+
+    rows, columns, notice = [], (), ""
+    if module in {"students", "linked-students"}:
+        if module == "linked-students":
+            students = User.objects.filter(guardians__guardian=request.user, guardians__is_active=True)
+        rows = list(students.values_list("full_name", "id_number", "department__name", "level")[:100])
+        columns = ("Student", "ID", "Department", "Level")
+    elif module == "lecturers":
+        rows = list(lecturers.values_list("full_name", "id_number", "department__name", "email")[:100])
+        columns = ("Lecturer", "Staff ID", "Department", "Email")
+    elif module in {"courses", "academic-structure"}:
+        rows = list(courses.values_list("code", "title", "department__name", "level")[:100])
+        columns = ("Code", "Course", "Department", "Level")
+    elif module == "allocations":
+        rows = list(LecturerCourseRegistration.objects.filter(course__in=courses).values_list("course__code", "course__title", "lecturer__full_name")[:100])
+        columns = ("Course", "Title", "Lecturer")
+    elif module in {"payments", "balances", "exam-cards", "eligibility"}:
+        payments = DepartmentalPayment.objects.select_related("student", "department", "session")
+        if department:
+            payments = payments.filter(department=department)
+        if module == "exam-cards":
+            payments = payments.filter(status=DepartmentalPayment.Status.PAID)
+        if module == "balances":
+            payments = payments.exclude(status=DepartmentalPayment.Status.PAID)
+        rows = list(payments.values_list("student__full_name", "department__name", "session__name", "status", "total_amount")[:100])
+        columns = ("Student", "Department", "Session", "Status", "Amount")
+    elif module == "applications":
+        rows = list(ScreeningApplication.objects.values_list("external_application_id", "first_name", "last_name", "programme", "status")[:100])
+        columns = ("Application", "First name", "Last name", "Programme", "Status")
+    elif module == "registrations":
+        rows = list(StudentCourseRegistration.objects.filter(course__in=courses).values_list("student__full_name", "course__code", "course__title", "session__name")[:100])
+        columns = ("Student", "Course", "Title", "Session")
+    elif module == "data-quality":
+        rows = list(User.objects.filter(Q(email="") | Q(id_number__isnull=True) | Q(id_number="")).values_list("full_name", "role", "email", "id_number")[:100])
+        columns = ("User", "Role", "Email", "ID")
+        notice = "Records below need a missing identity field reviewed."
+    elif module in {"reports", "results", "progress"}:
+        notice = "This tenant-scoped summary is read-only. Result entry and publication remain subject to the existing academic approval workflow."
+        rows = [("Students", students.count()), ("Lecturers", lecturers.count()), ("Courses", courses.count())]
+        columns = ("Metric", "Count")
+
+    return render(request, "portal/role_module.html", dashboard_context(
+        request, title, module=module, rows=rows, columns=columns, notice=notice, department=department,
+    ))
 
 
 @ensure_csrf_cookie
@@ -1499,50 +1712,8 @@ def super_admin_institution_status(request, institution_id, status):
 
 @super_admin_required
 @require_http_methods(["GET", "POST"])
-def super_admin_institution_features(request, institution_id):
-    institution = get_object_or_404(Institution, pk=institution_id)
-    features = Feature.objects.filter(is_active=True)
-    for feature in features:
-        InstitutionFeature.objects.get_or_create(institution=institution, feature=feature)
-    if request.method == "POST":
-        feature = get_object_or_404(features, pk=request.POST.get("feature_id"))
-        setting = InstitutionFeature.objects.get(institution=institution, feature=feature)
-        previous = setting.enabled
-        setting.enabled = request.POST.get("enabled") == "true"
-        try:
-            with transaction.atomic():
-                setting.save()
-                if setting.enabled and feature.code == "online-screening":
-                    ScreeningIntegration.objects.get_or_create(institution=institution)
-                AuditLog.objects.create(
-                    user=request.user,
-                    institution=institution,
-                    action="institution_feature_updated",
-                    description=f"{'Enabled' if setting.enabled else 'Disabled'} {feature.name} for {institution.name}.",
-                    object_type="InstitutionFeature",
-                    object_id=str(setting.id),
-                    old_value={"enabled": previous},
-                    new_value={"enabled": setting.enabled},
-                    ip_address=_client_ip(request),
-                )
-        except ValidationError as exc:
-            messages.error(request, "; ".join(exc.messages))
-        else:
-            messages.success(request, f"{feature.name} has been {'enabled' if setting.enabled else 'disabled'}.")
-        return redirect("portal:super-admin-institution-features", institution_id=institution.id)
-    return render(request, "portal/super_admin_institution_features.html", {
-        "institution": institution,
-        "feature_settings": InstitutionFeature.objects.filter(institution=institution).select_related("feature"),
-    })
-
-
-@super_admin_required
-@require_http_methods(["GET", "POST"])
 def super_admin_screening_configuration(request, institution_id):
     institution = get_object_or_404(Institution, pk=institution_id)
-    if not institution.feature_enabled("online-screening"):
-        messages.error(request, "Enable Online Screening before configuring it.")
-        return redirect("portal:super-admin-institution-features", institution_id=institution.id)
     integration, _ = ScreeningIntegration.objects.get_or_create(institution=institution)
     if request.method == "POST":
         if request.POST.get("action") == "rotate-secret":
@@ -1581,7 +1752,7 @@ def super_admin_reset_institution_admin_password(request, user_id):
     )
     if not administrator.email:
         messages.error(request, "This institution administrator has no email address, so a verified reset cannot be sent.")
-        return redirect("portal:super-admin-institutions")
+        return redirect("portal:super-admin-users" if request.POST.get("return_to") == "users" else "portal:super-admin-institutions")
 
     administrator.set_password(TEMPORARY_ACCOUNT_PASSWORD)
     administrator.save(update_fields=["password"])
@@ -1598,7 +1769,7 @@ def super_admin_reset_institution_admin_password(request, user_id):
         request,
         f"{administrator.email}'s password was reset to '{TEMPORARY_ACCOUNT_PASSWORD}' and a verification link was sent.",
     )
-    return redirect("portal:super-admin-institutions")
+    return redirect("portal:super-admin-users" if request.POST.get("return_to") == "users" else "portal:super-admin-institutions")
 
 
 @super_admin_required
@@ -1714,22 +1885,10 @@ def super_admin_plan_delete(request, plan_id):
 
 
 @super_admin_required
+@require_http_methods(["GET"])
 def super_admin_subscriptions(request):
-    form = SubscriptionAssignmentForm()
-    if request.method == "POST":
-        form = SubscriptionAssignmentForm(request.POST)
-        institution_id = request.POST.get("institution")
-        institution = get_object_or_404(Institution, pk=institution_id)
-        if form.is_valid():
-            subscription = form.save(commit=False)
-            subscription.institution = institution
-            subscription.save()
-            AuditLog.objects.create(user=request.user, institution=institution, action="subscription_created", description="Subscription assigned by super admin.")
-            messages.success(request, "Subscription assigned.")
-            return redirect("portal:super-admin-subscriptions")
     return render(request, "portal/super_admin_subscriptions.html", {
         "subscriptions": Subscription.objects.select_related("institution", "plan")[:100],
-        "institutions": Institution.objects.all(), "form": form,
     })
 
 
@@ -1759,14 +1918,23 @@ def super_admin_users(request):
             AuditLog.objects.create(user=request.user, action="platform_administrator_created", description=f"Created platform administrator {administrator.username}.")
             messages.success(request, "Platform administrator created.")
             return redirect("portal:super-admin-users")
-    return render(request, "portal/super_admin_users.html", {"users": User.all_objects.filter(is_superuser=True), "form": form})
+    return render(request, "portal/super_admin_users.html", {
+        "users": User.all_objects.filter(is_superuser=True),
+        "institution_admins": User.all_objects.filter(
+            role=User.Role.ADMIN, is_superuser=False,
+        ).select_related("institution").order_by("institution__name", "username"),
+        "form": form,
+    })
 
 
 @super_admin_required
 def super_admin_reports(request):
     return render(request, "portal/super_admin_reports.html", {
         "institution_rows": Institution.objects.annotate(
-            users_total=Count("users"), revenue=Sum("subscription_payments__amount", filter=Q(subscription_payments__status=Payment.Status.SUCCESS)),
+            users_total=Count("users", distinct=True),
+            student_total=Count("users", filter=Q(users__role=User.Role.STUDENT), distinct=True),
+            lecturer_total=Count("users", filter=Q(users__role=User.Role.LECTURER), distinct=True),
+            revenue=Sum("subscription_payments__amount", filter=Q(subscription_payments__status=Payment.Status.SUCCESS)),
         ),
     })
 
@@ -1810,17 +1978,14 @@ def super_admin_ai(request):
     answer = None
     if request.method == "POST":
         question = request.POST.get("question", "").casefold()
-        if "screening" in question:
-            answer = f"{Institution.objects.filter(feature_settings__feature__code='online-screening', feature_settings__enabled=True).distinct().count()} institution(s) have Online Screening enabled."
-        elif "expir" in question or "subscription" in question:
+        if "expir" in question or "subscription" in question:
             answer = f"{Subscription.objects.filter(end_date__lte=timezone.localdate() + timedelta(days=60)).count()} subscription(s) expire within 60 days."
         else:
             answer = f"There are {Institution.objects.filter(status=Institution.Status.ACTIVE).count()} active institutions on the platform."
     return render(request, "portal/super_admin_ai.html", {"answer": answer})
 
 
-@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
-@institution_feature_required("online-screening")
+@role_required(User.Role.ADMIN, User.Role.ADMISSION_OFFICER)
 def screening_portal(request):
     institution = request.institution
     integration = get_object_or_404(ScreeningIntegration, institution=institution)
@@ -1828,31 +1993,127 @@ def screening_portal(request):
     return redirect(url_template.format(subdomain=institution.subdomain, base_domain=settings.PLATFORM_BASE_DOMAIN, institution_code=institution.institution_code))
 
 
-def _ai_answer(user, question):
+AI_ROLE_EXAMPLES = {
+    User.Role.ADMIN: ("How many students are in this institution?", "Which departments are configured?"),
+    User.Role.MIS: ("How many student records need a department?", "How many student records are active?"),
+    User.Role.BURSARY: ("How many payments are pending?", "What is the paid total?"),
+    User.Role.ADMISSION_OFFICER: ("How many applications are pending?", "How many applicants have been admitted?"),
+    User.Role.ACADEMIC_PLANNING: ("Which academic session is current?", "How many courses are in the catalogue?"),
+    User.Role.HOD: ("How many students are in my department?", "Which lecturers are in my department?"),
+    User.Role.EXAM_OFFICER: ("How many students have registrations in my department?", "How many department courses are available?"),
+    User.Role.LECTURER: ("What are my assigned courses?", "How many materials have I uploaded?"),
+    User.Role.SENATE_MEMBER: ("How many departments does this institution have?", "Which academic session is current?"),
+    User.Role.STUDENT: ("What are my registered courses?", "What is my department?"),
+    User.Role.PARENT_GUARDIAN: ("Which students are linked to me?", "Can I view linked-student finance information?"),
+}
+
+
+def _role_department(user, role):
+    """Return only the department assigned to an active departmental role."""
+    if role == User.Role.HOD:
+        department = Department.objects.filter(head_of_department=user, pk=user.department_id).first()
+        if department:
+            return department
+    assignment = RoleAssignment.objects.filter(
+        user=user, role=role, is_active=True, department__isnull=False,
+    ).select_related("department").first()
+    return assignment.department if assignment else user.department
+
+
+def _ai_answer(user, role, question):
+    """Use an explicit role allow-list; never use the union of user roles."""
     question = question.casefold()
-    if user.role == User.Role.STUDENT:
+    institution_id = user.institution_id
+    if not institution_id:
+        return "Your account is not attached to an institution, so no institutional information is available."
+
+    students = User.all_objects.filter(institution_id=institution_id, role=User.Role.STUDENT)
+    courses = Course.objects.filter(institution_id=institution_id)
+    faculties = Faculty.objects.filter(institution_id=institution_id)
+    departments = Department.objects.filter(institution_id=institution_id)
+
+    if role == User.Role.STUDENT:
         if "course" in question:
-            courses = StudentCourseRegistration.objects.filter(student=user).select_related("course")[:8]
-            names = ", ".join(registration.course.code for registration in courses)
+            names = ", ".join(StudentCourseRegistration.objects.filter(student=user).select_related("course").values_list("course__code", flat=True)[:12])
             return f"Your registered courses are: {names or 'none yet'}."
         if "department" in question:
             return f"Your department is {user.department.name if user.department else 'not assigned yet'}."
-        return "I can help with your registered courses, department, timetable, documents, and course registration."
-    if user.role == User.Role.LECTURER:
-        if "course" in question or "class" in question:
-            courses = LecturerCourseRegistration.objects.filter(lecturer=user).select_related("course")[:8]
-            return "Your assigned courses are: " + (", ".join(item.course.code for item in courses) or "none yet") + "."
-        return "I can help with your assigned courses, materials, students, and messages."
-    if "feature" in question:
-        enabled = InstitutionFeature.objects.filter(institution=user.institution, enabled=True).select_related("feature")
-        return "Enabled features: " + (", ".join(item.feature.name for item in enabled) or "none") + "."
-    if "department" in question:
-        return "Departments: " + (", ".join(Department.objects.values_list("name", flat=True)[:20]) or "none") + "."
-    return "I can help with institution users, departments, enabled features, and administration workflows."
+        return "I can help with your own courses, payments, timetable, documents, and course registration."
+
+    if role == User.Role.LECTURER:
+        assignments = LecturerCourseRegistration.objects.filter(lecturer=user).select_related("course")
+        if "material" in question:
+            return f"You have uploaded {CourseMaterial.objects.filter(lecturer=user).count()} course material(s)."
+        if "student" in question:
+            return f"{StudentCourseRegistration.objects.filter(course_id__in=assignments.values('course_id')).values('student_id').distinct().count()} student(s) are registered on your assigned courses."
+        names = ", ".join(assignments.values_list("course__code", flat=True)[:12])
+        return f"Your assigned courses are: {names or 'none yet'}. I can also help with your materials and messages."
+
+    if role in {User.Role.HOD, User.Role.EXAM_OFFICER}:
+        department = _role_department(user, role)
+        if not department:
+            return f"No department is assigned to your {User.Role(role).label} role."
+        department_courses = courses.filter(department=department)
+        if "lecturer" in question and role == User.Role.HOD:
+            count = User.all_objects.filter(institution_id=institution_id, department=department, role=User.Role.LECTURER).count()
+            return f"{count} lecturer(s) belong to {department.name}."
+        if "student" in question or "registration" in question:
+            if role == User.Role.EXAM_OFFICER:
+                count = StudentCourseRegistration.objects.filter(course__department=department).values("student_id").distinct().count()
+            else:
+                count = students.filter(department=department).count()
+            return f"{count} student(s) are within your authorised {department.name} scope."
+        return f"{department_courses.count()} course(s) are within your authorised {department.name} scope."
+
+    if role == User.Role.PARENT_GUARDIAN:
+        links = user.guarded_students.filter(is_active=True).select_related("student")
+        if "finance" in question or "payment" in question or "fee" in question:
+            names = ", ".join(link.student.full_name for link in links if link.can_view_finance)
+            return f"You may view finance information for: {names or 'no linked students'}."
+        if "result" in question:
+            names = ", ".join(link.student.full_name for link in links if link.can_view_results)
+            return f"You may view permitted results for: {names or 'no linked students'}."
+        return "Your linked students are: " + (", ".join(link.student.full_name for link in links) or "none yet") + "."
+
+    if role == User.Role.BURSARY:
+        if "pending" in question or "outstanding" in question or "failed" in question:
+            count = DepartmentalPayment.objects.exclude(status=DepartmentalPayment.Status.PAID).count() + CoursePayment.objects.exclude(status=CoursePayment.Status.PAID).count()
+            return f"There are {count} non-paid departmental or course-payment record(s) requiring authorised follow-up."
+        total = (DepartmentalPayment.objects.filter(status=DepartmentalPayment.Status.PAID).aggregate(total=Sum("total_amount"))["total"] or Decimal("0")) + (CoursePayment.objects.filter(status=CoursePayment.Status.PAID).aggregate(total=Sum("amount"))["total"] or Decimal("0"))
+        return f"Authorised paid departmental and course-payment total: ₦{total:,.2f}."
+
+    if role == User.Role.ADMISSION_OFFICER:
+        applications = ScreeningApplication.objects.filter(institution_id=institution_id)
+        if "pending" in question:
+            return f"{applications.filter(status=ScreeningApplication.Status.PENDING).count()} application(s) are pending."
+        return f"{applications.filter(status=ScreeningApplication.Status.ADMITTED).count()} application(s) have been admitted."
+
+    if role == User.Role.ACADEMIC_PLANNING:
+        if "session" in question:
+            current = AcademicSession.objects.filter(is_current=True).values_list("name", flat=True).first()
+            return f"The current academic session is {current or 'not configured'}."
+        return f"The academic structure contains {faculties.count()} facult(ies), {departments.count()} department(s), and {courses.count()} course(s)."
+
+    if role == User.Role.MIS:
+        if "missing" in question or "quality" in question:
+            return f"{students.filter(department__isnull=True).count()} student record(s) have no department assignment."
+        return f"There are {students.count()} student record(s) in your authorised MIS scope."
+
+    if role == User.Role.SENATE_MEMBER:
+        current = AcademicSession.objects.filter(is_current=True).values_list("name", flat=True).first()
+        return f"Academic summary: {faculties.count()} facult(ies), {departments.count()} department(s), {courses.count()} course(s); current session: {current or 'not configured'}."
+
+    # Institution Admin receives tenant-wide operational summaries only.
+    if role == User.Role.ADMIN:
+        if "department" in question:
+            return "Departments: " + (", ".join(departments.values_list("name", flat=True)[:20]) or "none") + "."
+        staff_count = User.all_objects.filter(institution_id=institution_id).exclude(role=User.Role.STUDENT).count()
+        return f"This institution has {students.count()} student(s), {staff_count} staff account(s), and {courses.count()} course(s). AI Automation is not available."
+
+    return "No AI scope is configured for this active role."
 
 
-@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
-@institution_feature_required("educonnect-ai")
+@role_required(*User.Role.values)
 @require_http_methods(["GET", "POST"])
 def ai_assistant(request):
     answer = None
@@ -1860,13 +2121,98 @@ def ai_assistant(request):
     if request.method == "POST":
         question = request.POST.get("question", "").strip()
         if question:
-            answer = _ai_answer(request.user, question)
+            selected_role = active_role(request)
+            answer = _ai_answer(request.user, selected_role, question)
             AuditLog.objects.create(
                 user=request.user, institution=request.institution, action="ai_assistant_query",
-                description="A user queried the institution-scoped EduConnect AI assistant.", object_type="EduConnectAI",
+                description="A user queried the active-role, institution-scoped EduConnect AI assistant.", object_type="EduConnectAI",
+                new_value={"active_role": selected_role},
                 ip_address=_client_ip(request),
             )
-    return render(request, "portal/ai_assistant.html", dashboard_context(request, "EduConnect AI", answer=answer, question=question))
+    selected_role = active_role(request)
+    return render(request, "portal/ai_assistant.html", dashboard_context(
+        request, "EduConnect AI", answer=answer, question=question,
+        ai_role_label=User.Role(selected_role).label,
+        ai_examples=AI_ROLE_EXAMPLES.get(selected_role, ()),
+    ))
+
+
+@role_required(User.Role.ADMIN, User.Role.MIS)
+@require_http_methods(["GET", "POST"])
+def ai_automation(request):
+    """Tenant-scoped, human-approved document automation workflow."""
+    is_institution_admin = request.user.has_role(User.Role.ADMIN)
+    jobs = AIAutomationJob.objects.select_related("requested_by", "approved_by").order_by("-created_at")
+    if not is_institution_admin:
+        jobs = jobs.filter(requested_by=request.user)
+
+    form = AIAutomationUploadForm()
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action == "analyze":
+            form = AIAutomationUploadForm(request.POST, request.FILES)
+            if form.is_valid():
+                upload = form.cleaned_data["file"]
+                command = form.cleaned_data["command"]
+                try:
+                    proposal = analyze_institution_automation(upload, command)
+                except (ValueError, ValidationError) as exc:
+                    form.add_error(None, str(exc))
+                else:
+                    job = AIAutomationJob.objects.create(
+                        file=upload,
+                        command=command,
+                        action=proposal["action"],
+                        analysis=proposal["analysis"],
+                        proposed_changes=proposal["proposed_changes"],
+                        requested_by=request.user,
+                    )
+                    AuditLog.objects.create(
+                        institution=request.institution, user=request.user,
+                        action="ai_automation_analyzed", object_type="AIAutomationJob", object_id=str(job.id),
+                        new_value={"action": job.action, "proposed_count": len(job.proposed_changes)},
+                        description="AI/document automation proposal generated; no records were changed.",
+                        ip_address=_client_ip(request),
+                    )
+                    messages.success(request, "Proposal analyzed. Review it before an Institution Admin approves execution.")
+                    return redirect("portal:ai-automation")
+        elif action in {"approve", "execute"}:
+            if not is_institution_admin:
+                raise PermissionDenied("Only an Institution Admin may approve or execute automation.")
+            job = get_object_or_404(AIAutomationJob.objects, pk=request.POST.get("job_id"))
+            if action == "approve":
+                if job.status != AIAutomationJob.Status.ANALYZED:
+                    messages.error(request, "Only an analyzed proposal can be approved.")
+                else:
+                    job.status = AIAutomationJob.Status.APPROVED
+                    job.approved_by = request.user
+                    job.approved_at = timezone.now()
+                    job.save(update_fields=["status", "approved_by", "approved_at", "updated_at"])
+                    AuditLog.objects.create(
+                        institution=request.institution, user=request.user,
+                        action="ai_automation_approved", object_type="AIAutomationJob", object_id=str(job.id),
+                        new_value={"action": job.action, "proposed_count": len(job.proposed_changes)},
+                        description="Institution Admin approved a reviewed automation proposal.", ip_address=_client_ip(request),
+                    )
+                    messages.success(request, "Proposal approved. Execute it only after confirming the displayed changes.")
+            else:
+                try:
+                    summary = execute_institution_automation(job, request.user)
+                except ValueError as exc:
+                    messages.error(request, str(exc))
+                else:
+                    AuditLog.objects.create(
+                        institution=request.institution, user=request.user,
+                        action="ai_automation_executed", object_type="AIAutomationJob", object_id=str(job.id),
+                        new_value=summary,
+                        description="Institution Admin executed a previously approved automation proposal.", ip_address=_client_ip(request),
+                    )
+                    messages.success(request, f"Automation executed: {summary['created']} account(s) created; {summary['skipped']} skipped.")
+            return redirect("portal:ai-automation")
+
+    return render(request, "portal/ai_automation.html", dashboard_context(
+        request, "AI Import Review", form=form, jobs=jobs, is_institution_admin=is_institution_admin,
+    ))
 
 
 @csrf_exempt
@@ -1880,7 +2226,7 @@ def api_institution_detail(request, institution_code):
         "institution_code": institution.institution_code,
         "name": institution.name,
         "status": institution.status,
-        "online_screening_enabled": True,
+        "screening_configured": True,
         "screening_open": integration.is_accepting_applications,
         "admission_session": integration.admission_session.name if integration.admission_session else None,
         "available_programmes": integration.available_programmes,
@@ -2115,13 +2461,19 @@ def profile(request):
     if request.method == "POST":
         previous_level = request.user.level
         previous_department_id = request.user.department_id
+        previous_programme_id = request.user.programme_id
         form = form_class(request.POST, request.FILES, instance=request.user)
         if form.is_valid():
             form.save()
-            if request.user.role == User.Role.STUDENT and request.user.department_id != previous_department_id:
-                request.user.curriculum = curriculum_for_department(
-                    request.user.department,
-                    current_departmental_session(),
+            if (
+                request.user.role == User.Role.STUDENT
+                and (request.user.department_id != previous_department_id or request.user.programme_id != previous_programme_id)
+            ):
+                request.user.curriculum = (
+                    curriculum_for_programme(request.user.programme, current_departmental_session())
+                    if request.user.programme_id else curriculum_for_department(
+                        request.user.department, current_departmental_session(),
+                    )
                 )
                 request.user.save(update_fields=["curriculum"])
             if (
@@ -2340,6 +2692,7 @@ def student_dashboard(request):
         handbook_count=Handbook.objects.filter(department=request.user.department).count(),
         paid_downloads=paid_downloads,
         outstanding_download_payments=pending_paid_courses,
+        programme=request.user.programme,
     )
     return render(request, "portal/student_dashboard.html", context)
 
@@ -3271,6 +3624,309 @@ def lecturer_documents(request):
     return render(request, "portal/lecturer_documents.html", context)
 
 
+@role_required(User.Role.STUDENT)
+@require_http_methods(["GET", "POST"])
+def student_accommodation(request):
+    """Let a student apply once per open accommodation session.
+
+    The application is intentionally separated from allocation: students never
+    submit a bed identifier, so a crafted request cannot reserve or replace a
+    bed.  Allocation remains an authorised staff workflow below.
+    """
+    applications = AccommodationApplication.objects.filter(student=request.user).select_related(
+        "accommodation_session__academic_session", "preferred_hostel", "allocation__bed__room__block__hostel"
+    )
+    form = AccommodationApplicationForm(student=request.user)
+    if request.method == "POST":
+        form = AccommodationApplicationForm(request.POST, student=request.user)
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    application = form.save(commit=False)
+                    application.student = request.user
+                    application.institution = request.institution
+                    application.full_clean()
+                    application.save()
+            except IntegrityError:
+                form.add_error("accommodation_session", "You already have an application for that accommodation session.")
+            else:
+                AuditLog.objects.create(
+                    institution=request.institution, user=request.user,
+                    action="accommodation_application_created", object_type="AccommodationApplication",
+                    object_id=str(application.pk), description="Student submitted an accommodation application.",
+                    ip_address=_client_ip(request),
+                )
+                messages.success(request, "Your accommodation application has been submitted for review.")
+                return redirect("portal:student-accommodation")
+    return render(request, "portal/student_accommodation.html", dashboard_context(
+        request, "Accommodation", form=form, applications=applications,
+    ))
+
+
+@role_required(User.Role.ADMIN, User.Role.BURSARY)
+@require_http_methods(["GET", "POST"])
+def accommodation_admin(request):
+    """Tenant-scoped control centre for inventory and applications."""
+    forms_by_action = {
+        "session": AccommodationSessionForm,
+        "hostel": HostelForm,
+        "block": HostelBlockForm,
+        "room": HostelRoomForm,
+        "bed": HostelBedForm,
+    }
+    active_form = None
+    if request.method == "POST":
+        action = request.POST.get("action", "")
+        form_class = forms_by_action.get(action)
+        if not form_class:
+            raise PermissionDenied("Unsupported accommodation action.")
+        active_form = form_class(request.POST)
+        if active_form.is_valid():
+            record = active_form.save(commit=False)
+            record.institution = request.institution
+            record.full_clean()
+            record.save()
+            AuditLog.objects.create(
+                institution=request.institution, user=request.user,
+                action=f"accommodation_{action}_created", object_type=record.__class__.__name__,
+                object_id=str(record.pk), description=f"Created accommodation {action} {record}.",
+                ip_address=_client_ip(request),
+            )
+            messages.success(request, f"{action.title()} saved.")
+            return redirect("portal:accommodation-admin")
+
+    beds = HostelBed.objects.filter(is_available=True, room__is_available=True, room__block__hostel__is_active=True)
+    occupied = AccommodationAllocation.objects.filter(status=AccommodationAllocation.Status.ACTIVE).count()
+    context = dashboard_context(
+        request, "Accommodation Management",
+        session_form=active_form if isinstance(active_form, AccommodationSessionForm) else AccommodationSessionForm(),
+        hostel_form=active_form if isinstance(active_form, HostelForm) else HostelForm(),
+        block_form=active_form if isinstance(active_form, HostelBlockForm) else HostelBlockForm(),
+        room_form=active_form if isinstance(active_form, HostelRoomForm) else HostelRoomForm(),
+        bed_form=active_form if isinstance(active_form, HostelBedForm) else HostelBedForm(),
+        accommodation_sessions=AccommodationSession.objects.select_related("academic_session")[:20],
+        hostels=Hostel.objects.prefetch_related("blocks__rooms__beds")[:30],
+        applications=AccommodationApplication.objects.select_related(
+            "student", "accommodation_session", "preferred_hostel"
+        ).order_by("status", "-created_at")[:100],
+        total_beds=beds.count(), occupied_beds=occupied, available_beds=max(beds.count() - occupied, 0),
+        pending_applications=AccommodationApplication.objects.filter(status=AccommodationApplication.Status.PENDING).count(),
+    )
+    return render(request, "portal/accommodation_admin.html", context)
+
+
+@role_required(User.Role.ADMIN, User.Role.BURSARY)
+@require_http_methods(["POST"])
+def accommodation_application_decision(request, application_id):
+    """Approve/reject an application and atomically allocate a free bed."""
+    application = get_object_or_404(AccommodationApplication.objects.select_related("student"), pk=application_id)
+    action = request.POST.get("action")
+    if action not in {"approve", "reject", "cancel-allocation"}:
+        raise PermissionDenied("Unsupported accommodation decision.")
+    form = AccommodationDecisionForm(request.POST, application=application)
+    if action == "approve" and not form.is_valid():
+        messages.error(request, "Choose an available bed before approving this application.")
+        return redirect("portal:accommodation-admin")
+
+    try:
+        with transaction.atomic():
+            application = AccommodationApplication.objects.select_for_update().get(pk=application.pk)
+            if action == "approve":
+                if application.status in {AccommodationApplication.Status.REJECTED, AccommodationApplication.Status.CANCELLED}:
+                    raise ValidationError("This application cannot be approved in its current state.")
+                bed = HostelBed.objects.select_for_update().get(pk=form.cleaned_data["bed"].pk)
+                if not bed.is_available or not bed.room.is_available or not bed.room.block.hostel.is_active:
+                    raise ValidationError("The selected bed is unavailable.")
+                if AccommodationAllocation.objects.filter(bed=bed, status=AccommodationAllocation.Status.ACTIVE).exists():
+                    raise ValidationError("The selected bed has just been allocated to another student.")
+                allocation, created = AccommodationAllocation.objects.get_or_create(
+                    application=application,
+                    defaults={"student": application.student, "bed": bed, "institution": request.institution, "allocated_by": request.user},
+                )
+                if not created and allocation.status == AccommodationAllocation.Status.CANCELLED:
+                    allocation.bed = bed
+                    allocation.status = AccommodationAllocation.Status.ACTIVE
+                    allocation.cancelled_at = None
+                    allocation.cancellation_reason = ""
+                    allocation.allocated_by = request.user
+                    allocation.full_clean()
+                    allocation.save()
+                elif not created and allocation.status == AccommodationAllocation.Status.ACTIVE:
+                    raise ValidationError("This application already has an active allocation.")
+                application.status = AccommodationApplication.Status.APPROVED
+            elif action == "reject":
+                if hasattr(application, "allocation") and application.allocation.status == AccommodationAllocation.Status.ACTIVE:
+                    raise ValidationError("Cancel the active allocation before rejecting this application.")
+                application.status = AccommodationApplication.Status.REJECTED
+            else:
+                allocation = getattr(application, "allocation", None)
+                if not allocation or allocation.status != AccommodationAllocation.Status.ACTIVE:
+                    raise ValidationError("This application has no active allocation to cancel.")
+                allocation.cancel(reason=request.POST.get("decision_note", ""))
+                application.status = AccommodationApplication.Status.CANCELLED
+            application.reviewed_by = request.user
+            application.reviewed_at = timezone.now()
+            application.decision_note = request.POST.get("decision_note", "").strip()
+            application.full_clean()
+            application.save(update_fields=["status", "reviewed_by", "reviewed_at", "decision_note", "updated_at"])
+    except (IntegrityError, ValidationError) as exc:
+        messages.error(request, getattr(exc, "message", str(exc)))
+    else:
+        AuditLog.objects.create(
+            institution=request.institution, user=request.user,
+            action=f"accommodation_application_{action}", object_type="AccommodationApplication",
+            object_id=str(application.pk), new_value={"status": application.status},
+            description=f"Accommodation application was {action}d.", ip_address=_client_ip(request),
+        )
+        messages.success(request, "Accommodation application updated.")
+    return redirect("portal:accommodation-admin")
+
+
+@role_required(User.Role.LECTURER)
+@require_http_methods(["GET", "POST"])
+def lecturer_results(request):
+    """Enter results only for courses assigned to the active lecturer."""
+    if active_role(request) != User.Role.LECTURER:
+        raise PermissionDenied("Switch to your Lecturer role to enter results.")
+    assigned_courses = lecturer_registered_courses_queryset(request.user)
+    edit_result = None
+    if request.GET.get("edit"):
+        edit_result = get_object_or_404(CourseResult.objects.filter(course__in=assigned_courses), pk=request.GET["edit"])
+    form = CourseResultForm(user=request.user, instance=edit_result)
+    import_form = ResultImportForm(user=request.user)
+    if request.method == "POST":
+        action = request.POST.get("action", "save")
+        if action == "import":
+            import_form = ResultImportForm(request.POST, request.FILES, user=request.user)
+            if import_form.is_valid():
+                try:
+                    summary = import_course_results(
+                        import_form.cleaned_data["file"],
+                        course=import_form.cleaned_data["course"],
+                        session=import_form.cleaned_data["session"],
+                        semester=import_form.cleaned_data["semester"],
+                        lecturer=request.user,
+                        institution=request.institution,
+                    )
+                except ValueError as exc:
+                    import_form.add_error("file", str(exc))
+                else:
+                    AuditLog.objects.create(
+                        institution=request.institution, user=request.user, action="result_file_imported",
+                        object_type="CourseResult", description=summary, ip_address=_client_ip(request),
+                    )
+                    messages.success(request, summary)
+                    return redirect("portal:lecturer-results")
+            form = CourseResultForm(user=request.user, instance=edit_result)
+        elif action not in {"save", "submit"}:
+            raise PermissionDenied("Unsupported result action.")
+        else:
+            candidate = CourseResultForm(request.POST, user=request.user, instance=edit_result)
+            if candidate.is_valid():
+                existing = CourseResult.objects.filter(
+                    student=candidate.cleaned_data["student"], course=candidate.cleaned_data["course"],
+                    session=candidate.cleaned_data["session"], semester=candidate.cleaned_data["semester"],
+                ).first()
+                if existing and existing.pk != getattr(edit_result, "pk", None) and existing.status not in {CourseResult.Status.DRAFT, CourseResult.Status.RETURNED}:
+                    candidate.add_error(None, "This result has already been submitted for review and can no longer be edited.")
+                else:
+                    form = CourseResultForm(request.POST, user=request.user, instance=existing or edit_result)
+                    if form.is_valid():
+                        result = form.save(commit=False)
+                        result.institution = request.institution
+                        result.submitted_by = request.user
+                        if action == "submit":
+                            result.status = CourseResult.Status.SUBMITTED
+                            result.submitted_at = timezone.now()
+                        else:
+                            result.status = CourseResult.Status.DRAFT
+                        result.save()
+                        AuditLog.objects.create(
+                            institution=request.institution, user=request.user,
+                            action=f"result_{'submitted' if action == 'submit' else 'saved'}",
+                            object_type="CourseResult", object_id=str(result.pk),
+                            new_value={"score": str(result.score), "grade": result.grade, "status": result.status},
+                            description=f"Lecturer {action}d a course result.", ip_address=_client_ip(request),
+                        )
+                        messages.success(request, "Result saved." if action == "save" else "Result submitted for Exam Officer review.")
+                        return redirect("portal:lecturer-results")
+                    candidate = form
+            form = candidate
+    results = CourseResult.objects.filter(
+        course__in=assigned_courses
+    ).select_related("student", "course", "session")[:150]
+    return render(request, "portal/lecturer_results.html", dashboard_context(
+        request, "Result Entry", form=form, import_form=import_form, edit_result=edit_result, results=results,
+    ))
+
+
+@role_required(User.Role.EXAM_OFFICER, User.Role.HOD)
+@require_http_methods(["GET", "POST"])
+def exam_results(request):
+    """Department-scoped review and publication gate for results."""
+    selected_role = active_role(request)
+    if selected_role == User.Role.HOD:
+        department = hod_department_for(request)
+    else:
+        assignment = request.user.role_assignments.filter(
+            role=User.Role.EXAM_OFFICER, is_active=True, department__isnull=False,
+        ).select_related("department").first()
+        department = assignment.department if assignment else request.user.department
+    if not department:
+        raise PermissionDenied("An Exam Officer must be assigned to a department.")
+    results = CourseResult.objects.filter(course__department=department).select_related("student", "course", "session")
+    if request.method == "POST":
+        if selected_role != User.Role.EXAM_OFFICER:
+            raise PermissionDenied("Only an active Exam Officer may approve or publish results.")
+        result = get_object_or_404(results, pk=request.POST.get("result_id"))
+        action = request.POST.get("action")
+        review_form = ResultReviewForm(request.POST)
+        if action not in {"approve", "publish", "return"} or not review_form.is_valid():
+            raise PermissionDenied("Invalid result-review action.")
+        if action == "approve" and result.status != CourseResult.Status.SUBMITTED:
+            messages.error(request, "Only submitted results can be approved.")
+        elif action == "publish" and result.status != CourseResult.Status.APPROVED:
+            messages.error(request, "Only approved results can be published.")
+        elif action == "return" and result.status not in {CourseResult.Status.SUBMITTED, CourseResult.Status.APPROVED}:
+            messages.error(request, "Only submitted or approved results can be returned.")
+        else:
+            result.status = {
+                "approve": CourseResult.Status.APPROVED,
+                "publish": CourseResult.Status.PUBLISHED,
+                "return": CourseResult.Status.RETURNED,
+            }[action]
+            result.reviewed_by = request.user
+            result.reviewed_at = timezone.now()
+            result.review_note = review_form.cleaned_data["note"]
+            if action == "publish":
+                result.published_at = timezone.now()
+            result.save()
+            AuditLog.objects.create(
+                institution=request.institution, user=request.user, action=f"result_{action}d",
+                object_type="CourseResult", object_id=str(result.pk),
+                new_value={"status": result.status}, description=f"Exam Officer {action}d a result.",
+                ip_address=_client_ip(request),
+            )
+            messages.success(request, "Result workflow updated.")
+        return redirect("portal:exam-results")
+    return render(request, "portal/exam_results.html", dashboard_context(
+        request, "Result Review", results=results[:200], department=department,
+        can_review=selected_role == User.Role.EXAM_OFFICER,
+    ))
+
+
+@role_required(User.Role.STUDENT)
+def student_results(request):
+    """Show only the signed-in student's published academic results."""
+    results = CourseResult.objects.filter(student=request.user, status=CourseResult.Status.PUBLISHED).select_related("course", "session")
+    total_units = sum(result.credit_units for result in results)
+    quality_points = sum(result.credit_units * result.grade_point for result in results)
+    gpa = (quality_points / total_units) if total_units else None
+    return render(request, "portal/student_results.html", dashboard_context(
+        request, "Academic Results", results=results, total_units=total_units, gpa=gpa,
+    ))
+
+
 @role_required(User.Role.ADMIN)
 def admin_dashboard(request):
     lecturer_messages = (
@@ -3330,12 +3986,142 @@ def hod_department_for(request):
         head_of_department=request.user,
         pk=request.user.department_id,
     ).first()
+    if department is None and request.user.has_role(User.Role.HOD):
+        assignment = request.user.role_assignments.filter(
+            role=User.Role.HOD, is_active=True, department__isnull=False,
+        ).select_related("department").first()
+        department = assignment.department if assignment else None
     if department is None:
         raise PermissionDenied
     return department
 
 
-@role_required(User.Role.LECTURER)
+@role_required(User.Role.LECTURER, User.Role.HOD)
+def hod_programmes(request):
+    """Show only the programmes owned by the signed-in HOD's department."""
+    department = hod_department_for(request)
+    programmes = Programme.objects.filter(department=department).annotate(
+        student_total=Count("students", distinct=True),
+        course_total=Count("courses", distinct=True),
+        handbook_total=Count("handbooks", distinct=True),
+    ).order_by("name")
+    return render(request, "portal/hod_programmes.html", dashboard_context(
+        request, "Programmes", department=department, programmes=programmes,
+    ))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
+@require_http_methods(["GET", "POST"])
+def hod_programme_detail(request, programme_id):
+    """Manage a programme's handbook and its exclusive/shared curriculum."""
+    department = hod_department_for(request)
+    programme = get_object_or_404(Programme, pk=programme_id, department=department)
+    current_session = current_departmental_session()
+    active_curriculum = curriculum_for_programme(programme, current_session)
+    handbook_form = HandbookForm(initial={"department": department, "programme": programme})
+
+    if request.method == "POST" and request.POST.get("action") == "upload-handbook":
+        form_data = request.POST.copy()
+        form_data["department"] = str(department.pk)
+        form_data["programme"] = str(programme.pk)
+        handbook_form = HandbookForm(form_data, request.FILES)
+        if handbook_form.is_valid():
+            handbook = handbook_form.save()
+            try:
+                summary = import_handbook_courses(handbook)
+            except ValueError as exc:
+                messages.warning(request, f"Handbook uploaded, but course automation could not run: {exc}")
+            else:
+                AuditLog.objects.create(
+                    institution=request.institution, user=request.user, action="programme_handbook_uploaded",
+                    object_type="Handbook", object_id=str(handbook.pk), description=summary,
+                    new_value={"programme_id": programme.pk}, ip_address=_client_ip(request),
+                )
+                messages.success(request, summary)
+            return redirect("portal:hod-programme-detail", programme_id=programme.pk)
+        messages.error(request, "Choose a valid handbook file.")
+
+    elif request.method == "POST" and request.POST.get("action") == "share-course":
+        course = get_object_or_404(Course.objects.filter(department=department), pk=request.POST.get("course_id"))
+        course.programmes.add(programme)
+        if active_curriculum:
+            course.curricula.add(active_curriculum)
+        AuditLog.objects.create(
+            institution=request.institution, user=request.user, action="programme_course_shared",
+            object_type="Course", object_id=str(course.pk), description=f"Shared {course.code} with {programme.code}.",
+            new_value={"programme_id": programme.pk}, ip_address=_client_ip(request),
+        )
+        messages.success(request, f"{course.code} is now available to {programme.name} students in this curriculum.")
+        return redirect("portal:hod-programme-detail", programme_id=programme.pk)
+
+    programme_courses = Course.objects.filter(
+        department=department, programmes=programme,
+    ).filter(Q(curricula=active_curriculum) | Q(curricula__isnull=True, curriculum=active_curriculum)).select_related(
+        "lecturer",
+    ).prefetch_related("programmes").distinct()
+    shareable_courses = Course.objects.filter(department=department).exclude(
+        programmes=programme,
+    ).order_by("code")
+    students = User.objects.filter(role=User.Role.STUDENT, programme=programme).order_by(
+        "level", "last_name", "first_name", "username",
+    )
+    handbooks = Handbook.objects.filter(programme=programme).order_by("-created_at")
+    return render(request, "portal/hod_programme_detail.html", dashboard_context(
+        request,
+        programme.name,
+        department=department,
+        programme=programme,
+        active_curriculum=active_curriculum,
+        programme_courses=programme_courses,
+        shareable_courses=shareable_courses,
+        students=students,
+        handbooks=handbooks,
+        handbook_form=handbook_form,
+    ))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
+@require_http_methods(["GET", "POST"])
+def hod_exam_officer(request):
+    """Allow only a department HOD to add Exam Officer to a lecturer account."""
+    department = hod_department_for(request)
+    lecturers = User.objects.filter(department=department).filter(
+        Q(role=User.Role.LECTURER) | Q(role_assignments__role=User.Role.LECTURER, role_assignments__is_active=True)
+    ).distinct().order_by("first_name", "last_name", "username")
+    if request.method == "POST":
+        lecturer = get_object_or_404(lecturers, pk=request.POST.get("lecturer_id"))
+        assignment, created = RoleAssignment.objects.get_or_create(
+            institution=request.institution,
+            user=lecturer,
+            role=User.Role.EXAM_OFFICER,
+            department=department,
+            defaults={"assigned_by": request.user},
+        )
+        if not assignment.is_active:
+            assignment.is_active = True
+            assignment.assigned_by = request.user
+            assignment.save(update_fields=["is_active", "assigned_by", "updated_at"])
+            created = True
+        if created:
+            AuditLog.objects.create(
+                institution=request.institution, user=request.user, action="exam_officer_assigned",
+                object_type="RoleAssignment", object_id=str(assignment.pk),
+                new_value={"lecturer_id": lecturer.id, "department_id": department.id, "role": User.Role.EXAM_OFFICER},
+                description="HOD assigned Exam Officer while retaining the lecturer account and role.", ip_address=_client_ip(request),
+            )
+            messages.success(request, f"{lecturer.full_name} is now an Exam Officer for {department.name}.")
+        else:
+            messages.info(request, f"{lecturer.full_name} is already the Exam Officer for this department.")
+        return redirect("portal:hod-exam-officer")
+    exam_officer_ids = set(RoleAssignment.objects.filter(
+        department=department, role=User.Role.EXAM_OFFICER, is_active=True,
+    ).values_list("user_id", flat=True))
+    return render(request, "portal/hod_exam_officer.html", dashboard_context(
+        request, "Exam Officer", department=department, lecturers=lecturers, exam_officer_ids=exam_officer_ids,
+    ))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
 def hod_departmental_apis(request):
     department = hod_department_for(request)
     gateway = ensure_department_gateway_credentials(department)
@@ -3438,7 +4224,7 @@ def admin_departmental_fees(request):
     return render(request, "portal/admin_departmental_fees.html", context)
 
 
-@role_required(User.Role.LECTURER)
+@role_required(User.Role.LECTURER, User.Role.HOD)
 def hod_departmental_fees(request):
     department = hod_department_for(request)
     ensure_departmental_defaults()
@@ -3544,6 +4330,30 @@ def admin_hods(request):
         )
         selected_department.head_of_department = lecturer
         selected_department.save(update_fields=["head_of_department", "updated_at"])
+        # Keep the legacy department pointer while granting the additive HOD
+        # role required by the role switcher and HOD-only permissions.
+        RoleAssignment.objects.filter(
+            institution=request.institution,
+            department=selected_department,
+            role=User.Role.HOD,
+        ).exclude(user=lecturer).update(is_active=False)
+        RoleAssignment.objects.update_or_create(
+            institution=request.institution,
+            user=lecturer,
+            role=User.Role.HOD,
+            department=selected_department,
+            defaults={"assigned_by": request.user, "is_active": True},
+        )
+        AuditLog.objects.create(
+            institution=request.institution,
+            user=request.user,
+            action="hod_assigned",
+            object_type="Department",
+            object_id=str(selected_department.pk),
+            new_value={"hod_id": lecturer.id, "department_id": selected_department.id},
+            description="Institution Admin assigned an HOD and activated the HOD role.",
+            ip_address=_client_ip(request),
+        )
         messages.success(request, f"{lecturer.full_name} is now HOD of {selected_department.name}.")
         return redirect(f'{reverse("portal:admin-hods")}?department={selected_department.id}')
 
@@ -3610,6 +4420,20 @@ def admin_faculties(request):
             messages.success(request, "Faculty created. You can now create departments under it.")
             return redirect("portal:admin-faculties")
     return render(request, "portal/admin_faculties.html", dashboard_context(request, "Manage Faculties", form=form, faculties=faculties))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
+@require_http_methods(["GET", "POST"])
+def admin_programmes(request):
+    """Compatibility endpoint for old programme URLs.
+
+    Programme administration belongs to the HOD.  Keep the old URL name so
+    existing bookmarks do not become broken links, but send an authorised HOD
+    to the department-scoped programme workspace instead of exposing a second
+    institution-wide management surface.
+    """
+    hod_department_for(request)
+    return redirect("portal:hod-programmes")
 
 
 @role_required(User.Role.ADMIN)
@@ -3795,6 +4619,7 @@ def admin_delete_material(request, material_id):
 def admin_users(request):
     student_form = StudentUserForm(prefix="student")
     lecturer_form = LecturerUserForm(prefix="lecturer")
+    staff_form = StaffUserForm(prefix="staff")
     search = request.GET.get("search", "").strip()
     students = User.objects.filter(role=User.Role.STUDENT).select_related("department")
     lecturers = User.objects.filter(role=User.Role.LECTURER).select_related("department")
@@ -3814,11 +4639,31 @@ def admin_users(request):
                 lecturer_form.save()
                 messages.success(request, "Lecturer account created and marked pending approval.")
                 return redirect(_redirect_with_query(request, "portal:admin-users"))
+        elif action == "create-staff":
+            staff_form = StaffUserForm(request.POST, prefix="staff")
+            if staff_form.is_valid():
+                user = staff_form.save()
+                assigned_role = staff_form.cleaned_data["assigned_role"]
+                RoleAssignment.objects.get_or_create(
+                    institution=request.institution, user=user, role=assigned_role,
+                    department=user.department, defaults={"assigned_by": request.user},
+                )
+                if assigned_role == User.Role.HOD:
+                    user.department.head_of_department = user
+                    user.department.save(update_fields=["head_of_department"])
+                AuditLog.objects.create(
+                    institution=request.institution, user=request.user, action="staff_role_assigned",
+                    object_type="User", object_id=str(user.pk), new_value={"role": assigned_role},
+                    description="Institution Admin created a staff account and assigned an institutional role.", ip_address=_client_ip(request),
+                )
+                messages.success(request, f"Staff account created with the {User.Role(assigned_role).label} role.")
+                return redirect(_redirect_with_query(request, "portal:admin-users"))
     context = dashboard_context(
         request,
         "Manage Users",
         student_form=student_form,
         lecturer_form=lecturer_form,
+        staff_form=staff_form,
         students=students,
         lecturers=lecturers,
     )

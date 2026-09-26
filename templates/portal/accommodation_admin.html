@@ -1,0 +1,44 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Accommodation Management | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="stats-grid">
+    <article class="stat-card"><span>Total available beds</span><strong>{{ total_beds }}</strong></article>
+    <article class="stat-card"><span>Occupied beds</span><strong>{{ occupied_beds }}</strong></article>
+    <article class="stat-card"><span>Unallocated beds</span><strong>{{ available_beds }}</strong></article>
+    <article class="stat-card"><span>Pending applications</span><strong>{{ pending_applications }}</strong></article>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>Accommodation inventory</h2></div>
+    <div class="form-grid">
+        <form method="post">{% csrf_token %}<input type="hidden" name="action" value="session"><h3>Allocation session</h3>{% for field in session_form %}<label>{{ field.label }} {{ field }}{{ field.errors }}</label>{% endfor %}<button class="primary-btn" type="submit">Save session</button></form>
+        <form method="post">{% csrf_token %}<input type="hidden" name="action" value="hostel"><h3>Hostel</h3>{% for field in hostel_form %}<label>{{ field.label }} {{ field }}{{ field.errors }}</label>{% endfor %}<button class="primary-btn" type="submit">Save hostel</button></form>
+        <form method="post">{% csrf_token %}<input type="hidden" name="action" value="block"><h3>Block</h3>{% for field in block_form %}<label>{{ field.label }} {{ field }}{{ field.errors }}</label>{% endfor %}<button class="primary-btn" type="submit">Save block</button></form>
+        <form method="post">{% csrf_token %}<input type="hidden" name="action" value="room"><h3>Room</h3>{% for field in room_form %}<label>{{ field.label }} {{ field }}{{ field.errors }}</label>{% endfor %}<button class="primary-btn" type="submit">Save room</button></form>
+        <form method="post">{% csrf_token %}<input type="hidden" name="action" value="bed"><h3>Bed</h3>{% for field in bed_form %}<label>{{ field.label }} {{ field }}{{ field.errors }}</label>{% endfor %}<button class="primary-btn" type="submit">Save bed</button></form>
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>Accommodation applications</h2></div>
+    {% if applications %}<div class="table-wrap"><table>
+        <thead><tr><th>Student</th><th>Session</th><th>Preference</th><th>Status</th><th>Decision</th></tr></thead>
+        <tbody>{% for application in applications %}<tr>
+            <td>{{ application.student.full_name }}<br><small>{{ application.student.id_number }}</small></td><td>{{ application.accommodation_session }}</td><td>{{ application.preferred_hostel|default:"No preference" }}</td><td>{{ application.get_status_display }}</td>
+            <td>
+                {% if application.status == "pending" or application.status == "approved" %}
+                    <form method="post" action="{% url 'portal:accommodation-application-decision' application.pk %}" class="inline-form">{% csrf_token %}
+                        <input type="hidden" name="action" value="approve"><select name="bed" required><option value="">Choose available bed</option>{% for hostel in hostels %}{% for block in hostel.blocks.all %}{% for room in block.rooms.all %}{% for bed in room.beds.all %}{% if bed.is_available and room.is_available and hostel.is_active and not bed.has_active_allocation %}<option value="{{ bed.pk }}">{{ bed }}</option>{% endif %}{% endfor %}{% endfor %}{% endfor %}{% endfor %}</select>
+                        <input name="decision_note" placeholder="Decision note"><button class="primary-btn" type="submit">Approve & allocate</button>
+                    </form>
+                    <form method="post" action="{% url 'portal:accommodation-application-decision' application.pk %}" class="inline-form">{% csrf_token %}<input type="hidden" name="action" value="reject"><input name="decision_note" placeholder="Reason"><button class="secondary-btn" type="submit">Reject</button></form>
+                {% elif application.allocation and application.allocation.status == "active" %}
+                    <form method="post" action="{% url 'portal:accommodation-application-decision' application.pk %}" class="inline-form">{% csrf_token %}<input type="hidden" name="action" value="cancel-allocation"><input name="decision_note" placeholder="Reason"><button class="secondary-btn" type="submit">Cancel allocation</button></form>
+                {% else %}—{% endif %}
+            </td>
+        </tr>{% endfor %}</tbody>
+    </table></div>{% else %}<p class="muted-note">No accommodation applications have been submitted.</p>{% endif %}
+</section>
+{% endblock %}

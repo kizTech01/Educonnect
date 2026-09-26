@@ -1,5 +1,6 @@
 from decimal import Decimal
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 from django import forms
@@ -12,6 +13,7 @@ from django.utils.text import slugify
 from .models import (
     AcademicSession,
     Course,
+    CourseResult,
     CoursePaymentGateway,
     CourseMaterial,
     Department,
@@ -32,12 +34,19 @@ from .models import (
     StudentCourseRegistration,
     Timetable,
     User,
-    Subscription,
     SubscriptionPlan,
     SubscriptionPlanDuration,
     SubscriptionPaymentGateway,
     ScreeningIntegration,
+    AccommodationApplication,
+    AccommodationSession,
+    Hostel,
+    HostelBlock,
+    HostelRoom,
+    HostelBed,
+    Programme,
     LEVEL_CHOICES,
+    curriculum_for_programme,
 )
 
 
@@ -48,13 +57,37 @@ SEMESTER_FILTER_CHOICES = tuple([("", "All semesters")] + list(Course.Semester.c
 class PortalAuthenticationForm(forms.Form):
     username = forms.CharField(max_length=150)
     password = forms.CharField(widget=forms.PasswordInput)
-    role = forms.ChoiceField(choices=User.Role.choices, widget=forms.HiddenInput)
+    # Route-specific pages still submit a role, while /login/ is the secure
+    # institution login that determines a permitted dashboard after auth.
+    role = forms.ChoiceField(choices=User.Role.choices, widget=forms.HiddenInput, required=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         for name, field in self.fields.items():
             if name != "role":
                 field.widget.attrs["class"] = "input-field"
+
+
+class AIAutomationUploadForm(forms.Form):
+    """Input for a reviewable automation proposal, never direct execution."""
+
+    file = forms.FileField(
+        label="Source file",
+        validators=[FileExtensionValidator(allowed_extensions=["csv", "xlsx", "pdf", "docx"])],
+        widget=forms.ClearableFileInput(attrs={"accept": ".csv,.xlsx,.pdf,.docx"}),
+    )
+    command = forms.CharField(
+        label="Requested operation",
+        max_length=500,
+        help_text="For example: Create lecturer accounts from this file.",
+        widget=forms.Textarea(attrs={"rows": 3, "placeholder": "Create staff accounts from this file."}),
+    )
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data["file"]
+        if uploaded_file.size > 10 * 1024 * 1024:
+            raise forms.ValidationError("Files must be 10 MB or smaller.")
+        return uploaded_file
 
 
 class StyledModelForm(forms.ModelForm):
@@ -282,18 +315,11 @@ class SubscriptionPlanForm(StyledModelForm):
         model = SubscriptionPlan
         fields = [
             "name", "description", "price",
-            "max_students", "max_staff", "max_storage_mb", "features", "is_active",
+            "max_students", "max_staff", "max_storage_mb", "is_active",
         ]
         widgets = {
             "price": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
-            "features": forms.Textarea(attrs={"rows": 4, "placeholder": '["Feature one", "Feature two"]'}),
         }
-
-    def clean_features(self):
-        features = self.cleaned_data["features"]
-        if not isinstance(features, list) or not all(isinstance(item, str) for item in features):
-            raise forms.ValidationError("Features must be a JSON array of text values.")
-        return features
 
     def save(self, commit=True):
         plan = super().save(commit=False)
@@ -317,17 +343,8 @@ class SubscriptionPlanEditForm(StyledModelForm):
         model = SubscriptionPlan
         fields = [
             "name", "description", "max_students", "max_staff", "max_storage_mb",
-            "features", "is_active",
+            "is_active",
         ]
-        widgets = {
-            "features": forms.Textarea(attrs={"rows": 4, "placeholder": '["Feature one", "Feature two"]'}),
-        }
-
-    def clean_features(self):
-        features = self.cleaned_data["features"]
-        if not isinstance(features, list) or not all(isinstance(item, str) for item in features):
-            raise forms.ValidationError("Features must be a JSON array of text values.")
-        return features
 
 
 class SubscriptionPlanDurationForm(StyledModelForm):
@@ -360,17 +377,6 @@ class SubscriptionPlanDurationEditForm(StyledModelForm):
         if price <= 0:
             raise forms.ValidationError("A subscription duration must have an amount greater than zero.")
         return price
-
-
-class SubscriptionAssignmentForm(StyledModelForm):
-    class Meta:
-        model = Subscription
-        fields = ["plan", "start_date", "end_date", "status", "amount"]
-        widgets = {
-            "start_date": forms.DateInput(attrs={"type": "date"}),
-            "end_date": forms.DateInput(attrs={"type": "date"}),
-            "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
-        }
 
 
 class SubscriptionRenewalForm(forms.Form):
@@ -450,9 +456,14 @@ class CourseAllocationUploadForm(StyledModelForm):
 
 
 class CourseForm(CoursePricingMixin, StyledModelForm):
+    programmes = forms.ModelMultipleChoiceField(
+        queryset=Programme.objects.none(), required=False,
+        help_text="Choose one programme for an exclusive course, or several to share it.",
+    )
+
     class Meta:
         model = Course
-        fields = ["department", "title", "code", "lecturer", "level", "semester", "file", "is_free", "amount"]
+        fields = ["department", "title", "code", "lecturer", "level", "semester", "file", "is_free", "amount", "programmes"]
         widgets = {
             "amount": forms.NumberInput(attrs={"step": "0.01"}),
         }
@@ -460,6 +471,29 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["amount"].required = False
+        self.fields["programmes"].queryset = Programme.objects.select_related("department").filter(is_active=True)
+        if self.instance.pk:
+            self.initial["programmes"] = self.instance.programmes.all()
+
+    def clean(self):
+        cleaned = super().clean()
+        department = cleaned.get("department")
+        programmes = cleaned.get("programmes")
+        if department and programmes and programmes.exclude(department=department).exists():
+            self.add_error("programmes", "Every selected programme must belong to the selected department.")
+        return cleaned
+
+    def save(self, commit=True):
+        course = super().save(commit=commit)
+        if commit:
+            programmes = self.cleaned_data.get("programmes")
+            course.programmes.set(programmes)
+            session = course.academic_session or AcademicSession.objects.filter(is_current=True).first()
+            for programme in programmes:
+                curriculum = curriculum_for_programme(programme, session)
+                if curriculum:
+                    course.curricula.add(curriculum)
+        return course
 
 
 class CourseDetailsForm(CoursePricingMixin, StyledModelForm):
@@ -632,11 +666,19 @@ class HandbookFilterForm(forms.Form):
 class HandbookForm(StyledModelForm):
     class Meta:
         model = Handbook
-        fields = ["department", "file"]
+        fields = ["department", "programme", "file"]
+
+    def clean(self):
+        cleaned = super().clean()
+        programme = cleaned.get("programme")
+        department = cleaned.get("department")
+        if programme and department and programme.department_id != department.id:
+            self.add_error("programme", "Choose a programme under the selected department.")
+        return cleaned
 
     def save(self, commit=True):
         handbook = super().save(commit=False)
-        handbook.title = f"{handbook.department.name} Handbook"
+        handbook.title = f"{handbook.programme.name if handbook.programme_id else handbook.department.name} Handbook"
         session = AcademicSession.objects.filter(is_current=True).first()
         if session is None:
             year = date.today().year
@@ -756,6 +798,7 @@ class BaseProfileForm(StyledModelForm):
             "email",
             "id_number",
             "department",
+            "programme",
             "level",
             "phone_number",
             "passport_photo",
@@ -771,7 +814,7 @@ class StudentProfileForm(BaseProfileForm):
 
 class LecturerProfileForm(BaseProfileForm):
     class Meta(BaseProfileForm.Meta):
-        fields = [field for field in BaseProfileForm.Meta.fields if field != "level"]
+        fields = [field for field in BaseProfileForm.Meta.fields if field not in {"level", "programme"}]
 
 
 class AdminProfileForm(StyledModelForm):
@@ -823,9 +866,30 @@ class BaseUserForm(StyledModelForm):
             "email",
             "id_number",
             "department",
+            "programme",
             "level",
             "phone_number",
         ]
+
+    def __init__(self, *args, institution=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set this before ModelForm validation so a duplicate student ID is a
+        # field error instead of an IntegrityError after a successful-looking
+        # signup submission.
+        if institution:
+            self.instance.institution = institution
+            self.fields["faculty"].queryset = Faculty.objects.filter(institution=institution)
+            self.fields["department"].queryset = Department.objects.filter(institution=institution)
+            if "programme" in self.fields:
+                self.fields["programme"].queryset = Programme.objects.filter(
+                    institution=institution, is_active=True,
+                )
+        if "programme" in self.fields:
+            selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+            if selected_department:
+                self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
+                    department_id=selected_department,
+                )
 
     def clean(self):
         cleaned_data = super().clean()
@@ -840,6 +904,15 @@ class BaseUserForm(StyledModelForm):
             cleaned_data["faculty"] = faculty
         if faculty and department and department.faculty_id != faculty.id:
             self.add_error("department", "Choose a department under the selected faculty.")
+        programme = cleaned_data.get("programme")
+        if programme and department and programme.department_id != department.id:
+            self.add_error("programme", "Choose a programme under the selected department.")
+        if (
+            "programme" in self.fields and department
+            and Programme.objects.filter(department=department, is_active=True).exists()
+            and not programme
+        ):
+            self.add_error("programme", "Choose your programme before creating a student account.")
         return cleaned_data
 
     def save(self, commit=True):
@@ -865,12 +938,41 @@ class StudentUserForm(BaseUserForm):
 
 class LecturerUserForm(BaseUserForm):
     class Meta(BaseUserForm.Meta):
-        fields = [field for field in BaseUserForm.Meta.fields if field != "level"]
+        fields = [field for field in BaseUserForm.Meta.fields if field not in {"level", "programme"}]
 
     def save(self, commit=True):
         user = super().save(commit=False)
         user.role = User.Role.LECTURER
         user.is_approved = False
+        if commit:
+            user.save()
+        return user
+
+
+class StaffUserForm(BaseUserForm):
+    """Institution-admin staff creation without exposing platform privileges."""
+    STAFF_ROLES = [
+        User.Role.MIS, User.Role.BURSARY, User.Role.ADMISSION_OFFICER,
+        User.Role.ACADEMIC_PLANNING, User.Role.HOD, User.Role.LECTURER,
+        User.Role.SENATE_MEMBER,
+    ]
+    assigned_role = forms.ChoiceField(choices=[(role, User.Role(role).label) for role in STAFF_ROLES])
+
+    class Meta(BaseUserForm.Meta):
+        fields = [field for field in BaseUserForm.Meta.fields if field not in {"level", "programme"}]
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("assigned_role") == User.Role.HOD and not cleaned.get("department"):
+            self.add_error("department", "An HOD must be assigned to a department.")
+        return cleaned
+
+    def save(self, commit=True):
+        user = super().save(commit=False)
+        selected = self.cleaned_data["assigned_role"]
+        # HOD is an additional academic responsibility of a lecturer.
+        user.role = User.Role.LECTURER if selected == User.Role.HOD else selected
+        user.is_approved = selected != User.Role.LECTURER
         if commit:
             user.save()
         return user
@@ -918,8 +1020,13 @@ class DepartmentPaymentGatewayForm(StyledModelForm):
         model = DepartmentPaymentGateway
         fields = ["paystack_public_key", "paystack_secret_key"]
         widgets = {
-            "paystack_secret_key": forms.PasswordInput(render_value=True),
+            # A configured secret must never be sent back to the browser.
+            # Leaving this field blank keeps the existing key unchanged.
+            "paystack_secret_key": forms.PasswordInput(),
         }
+
+    def clean_paystack_secret_key(self):
+        return self.cleaned_data["paystack_secret_key"] or self.instance.paystack_secret_key
 
 
 class DepartmentCoursePaymentGatewayForm(StyledModelForm):
@@ -927,8 +1034,11 @@ class DepartmentCoursePaymentGatewayForm(StyledModelForm):
         model = DepartmentCoursePaymentGateway
         fields = ["paystack_public_key", "paystack_secret_key"]
         widgets = {
-            "paystack_secret_key": forms.PasswordInput(render_value=True),
+            "paystack_secret_key": forms.PasswordInput(),
         }
+
+    def clean_paystack_secret_key(self):
+        return self.cleaned_data["paystack_secret_key"] or self.instance.paystack_secret_key
 
 
 class CoursePaymentGatewayForm(StyledModelForm):
@@ -936,14 +1046,269 @@ class CoursePaymentGatewayForm(StyledModelForm):
         model = CoursePaymentGateway
         fields = ["paystack_public_key", "paystack_secret_key"]
         widgets = {
-            "paystack_secret_key": forms.PasswordInput(render_value=True),
+            "paystack_secret_key": forms.PasswordInput(),
         }
+
+    def clean_paystack_secret_key(self):
+        return self.cleaned_data["paystack_secret_key"] or self.instance.paystack_secret_key
 
 
 class AcademicSessionForm(StyledModelForm):
     class Meta:
         model = AcademicSession
         fields = ["name", "is_current"]
+
+
+class ProgrammeFacultyFormMixin:
+    """Keep programme departments inside the faculty selected by the admin."""
+
+    def __init__(self, *args, institution=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        faculties = Faculty.objects.filter(institution=institution) if institution else Faculty.objects.none()
+        departments = Department.objects.filter(institution=institution) if institution else Department.objects.none()
+        selected_faculty = self.data.get(self.add_prefix("faculty")) or self.initial.get("faculty")
+        if not selected_faculty and getattr(self, "instance", None) and self.instance.department_id:
+            selected_faculty = self.instance.department.faculty_id
+            self.initial["faculty"] = selected_faculty
+        self.fields["faculty"].queryset = faculties
+        self.fields["department"].queryset = departments
+        if selected_faculty:
+            self.fields["department"].queryset = departments.filter(faculty_id=selected_faculty)
+        self.order_fields(["faculty", "department"])
+        for field in self.fields.values():
+            field.widget.attrs["class"] = f'{field.widget.attrs.get("class", "")} input-field'.strip()
+
+    def clean(self):
+        cleaned_data = super().clean()
+        faculty = cleaned_data.get("faculty")
+        department = cleaned_data.get("department")
+        if faculty and department and department.faculty_id != faculty.id:
+            self.add_error("department", "Choose a department under the selected faculty.")
+        return cleaned_data
+
+
+class ProgrammeForm(ProgrammeFacultyFormMixin, StyledModelForm):
+    faculty = forms.ModelChoiceField(queryset=Faculty.objects.none(), required=True)
+
+    class Meta:
+        model = Programme
+        fields = ["department", "name", "code", "award", "duration_years", "is_active"]
+
+
+class ProgrammeImportForm(ProgrammeFacultyFormMixin, forms.Form):
+    """A tenant-scoped Programme catalogue import request."""
+
+    # The department is authoritative. Keeping faculty optional preserves the
+    # established import endpoint for administrators and API clients that
+    # submit a department directly; the browser UI still filters departments
+    # by its selected faculty.
+    faculty = forms.ModelChoiceField(queryset=Faculty.objects.none(), required=False)
+    department = forms.ModelChoiceField(queryset=Department.objects.none())
+    file = forms.FileField(
+        label="Programme list file",
+        validators=[FileExtensionValidator(allowed_extensions=["csv", "xlsx", "docx", "pdf", "txt", "jpg", "jpeg", "png", "webp"])],
+        widget=forms.ClearableFileInput(attrs={"accept": ".csv,.xlsx,.docx,.pdf,.txt,.jpg,.jpeg,.png,.webp"}),
+    )
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data["file"]
+        if uploaded_file.size > 10 * 1024 * 1024:
+            raise forms.ValidationError("Programme lists must be 10 MB or smaller.")
+        return uploaded_file
+
+
+class AccommodationSessionForm(StyledModelForm):
+    class Meta:
+        model = AccommodationSession
+        fields = ["academic_session", "name", "opens_at", "closes_at", "is_open"]
+        widgets = {
+            "opens_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            "closes_at": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+        }
+
+
+class HostelForm(StyledModelForm):
+    class Meta:
+        model = Hostel
+        fields = ["name", "code", "gender_restriction", "address", "manager", "is_active"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["manager"].queryset = User.objects.exclude(role=User.Role.STUDENT)
+
+
+class HostelBlockForm(StyledModelForm):
+    class Meta:
+        model = HostelBlock
+        fields = ["hostel", "name"]
+
+
+class HostelRoomForm(StyledModelForm):
+    class Meta:
+        model = HostelRoom
+        fields = ["block", "code", "floor", "is_available"]
+
+
+class HostelBedForm(StyledModelForm):
+    class Meta:
+        model = HostelBed
+        fields = ["room", "code", "is_available"]
+
+
+class AccommodationApplicationForm(StyledModelForm):
+    class Meta:
+        model = AccommodationApplication
+        fields = ["accommodation_session", "preferred_hostel", "note"]
+
+    def __init__(self, *args, student=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.student = student
+        self.fields["accommodation_session"].queryset = AccommodationSession.objects.filter(is_open=True)
+        self.fields["preferred_hostel"].queryset = Hostel.objects.filter(is_active=True)
+
+    def clean_accommodation_session(self):
+        session = self.cleaned_data["accommodation_session"]
+        if not session.accepting_applications:
+            raise forms.ValidationError("This accommodation application period is not currently open.")
+        return session
+
+
+class AccommodationDecisionForm(forms.Form):
+    decision_note = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 2}))
+    bed = forms.ModelChoiceField(queryset=HostelBed.objects.none(), required=False)
+
+    def __init__(self, *args, application=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.application = application
+        beds = HostelBed.objects.filter(
+            is_available=True,
+            room__is_available=True,
+            room__block__hostel__is_active=True,
+        ).select_related("room__block__hostel")
+        if application and application.preferred_hostel_id:
+            beds = beds.filter(room__block__hostel=application.preferred_hostel)
+        self.fields["bed"].queryset = beds.exclude(allocations__status="active")
+        for field in self.fields.values():
+            field.widget.attrs["class"] = f'{field.widget.attrs.get("class", "")} input-field'.strip()
+
+    def clean_bed(self):
+        bed = self.cleaned_data.get("bed")
+        if bed and bed.has_active_allocation:
+            raise forms.ValidationError("That bed is no longer available.")
+        return bed
+
+
+class CourseResultForm(StyledModelForm):
+    class Meta:
+        model = CourseResult
+        fields = [
+            "student", "course", "session", "semester", "ca_score", "test_score",
+            "other_assessment_score", "exam_score", "assessment_breakdown", "score",
+        ]
+        widgets = {
+            "ca_score": forms.NumberInput(attrs={"step": "0.01", "min": "0", "max": "100"}),
+            "test_score": forms.NumberInput(attrs={"step": "0.01", "min": "0", "max": "100"}),
+            "other_assessment_score": forms.NumberInput(attrs={"step": "0.01", "min": "0", "max": "100"}),
+            "exam_score": forms.NumberInput(attrs={"step": "0.01", "min": "0", "max": "100"}),
+            "score": forms.NumberInput(attrs={"step": "0.01", "min": "0", "max": "100"}),
+            "assessment_breakdown": forms.Textarea(attrs={"rows": 2, "placeholder": '{"assignment": 10, "practical": 5}'}),
+        }
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        courses = Course.objects.none()
+        if user is not None:
+            courses = Course.objects.filter(
+                Q(lecturer=user) | Q(lecturer_registrations__lecturer=user)
+            ).distinct()
+        self.fields["course"].queryset = courses
+        self.fields["session"].queryset = AcademicSession.objects.all()
+        self.fields["student"].queryset = User.objects.filter(role=User.Role.STUDENT)
+        self.fields["semester"].required = False
+        self.fields["score"].required = False
+        for field_name in (
+            "ca_score", "test_score", "other_assessment_score", "exam_score",
+        ):
+            self.fields[field_name].required = False
+
+    def clean(self):
+        cleaned = super().clean()
+        student, course, session = cleaned.get("student"), cleaned.get("course"), cleaned.get("session")
+        if course and not cleaned.get("semester"):
+            cleaned["semester"] = course.semester
+        components = sum((cleaned.get(name) or Decimal("0.00")) for name in (
+            "ca_score", "test_score", "other_assessment_score", "exam_score",
+        ))
+        breakdown = cleaned.get("assessment_breakdown") or {}
+        if not isinstance(breakdown, dict):
+            self.add_error("assessment_breakdown", "Enter assessment marks as a JSON object.")
+        else:
+            try:
+                components += sum(Decimal(str(value)) for value in breakdown.values())
+            except (InvalidOperation, TypeError, ValueError):
+                self.add_error("assessment_breakdown", "Every additional assessment mark must be a number.")
+            else:
+                if components:
+                    cleaned["score"] = components
+                if cleaned.get("score") is None:
+                    self.add_error("score", "Enter a total score or at least one assessment score.")
+                elif not Decimal("0") <= cleaned["score"] <= Decimal("100"):
+                    self.add_error("score", "The combined result score must be between 0 and 100.")
+        if student and course and session and not StudentCourseRegistration.objects.filter(
+            student=student, course=course, session=session,
+        ).exists():
+            self.add_error("student", "The student is not registered for this course in the selected session.")
+        return cleaned
+
+
+class ResultImportForm(forms.Form):
+    course = forms.ModelChoiceField(queryset=Course.objects.none())
+    session = forms.ModelChoiceField(queryset=AcademicSession.objects.all())
+    semester = forms.ChoiceField(choices=Course.Semester.choices, required=False)
+    file = forms.FileField(
+        validators=[FileExtensionValidator(allowed_extensions=["csv", "xlsx", "pdf", "docx", "txt"])],
+        widget=forms.ClearableFileInput(attrs={"accept": ".csv,.xlsx,.pdf,.docx,.txt"}),
+    )
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if user is not None:
+            self.fields["course"].queryset = Course.objects.filter(
+                Q(lecturer=user) | Q(lecturer_registrations__lecturer=user)
+            ).distinct()
+        for field in self.fields.values():
+            field.widget.attrs["class"] = f'{field.widget.attrs.get("class", "")} input-field'.strip()
+
+    def clean(self):
+        cleaned = super().clean()
+        course = cleaned.get("course")
+        if course and not cleaned.get("semester"):
+            cleaned["semester"] = course.semester
+        if course and cleaned.get("semester") and course.semester != cleaned["semester"]:
+            self.add_error("semester", "Choose the semester assigned to this course.")
+        uploaded_file = cleaned.get("file")
+        if uploaded_file and uploaded_file.size > 10 * 1024 * 1024:
+            self.add_error("file", "Result files must be 10 MB or smaller.")
+        return cleaned
+
+
+class ResultReviewForm(forms.Form):
+    note = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 2}))
+
+
+class ResultReportFilterForm(forms.Form):
+    session = forms.ModelChoiceField(queryset=AcademicSession.objects.all(), required=False)
+    semester = forms.ChoiceField(choices=SEMESTER_FILTER_CHOICES, required=False)
+    course = forms.ModelChoiceField(queryset=Course.objects.none(), required=False)
+    student = forms.CharField(required=False, label="Student search")
+
+    def __init__(self, *args, department=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if department is not None:
+            self.fields["course"].queryset = Course.objects.filter(department=department)
+        for field in self.fields.values():
+            field.widget.attrs["class"] = f'{field.widget.attrs.get("class", "")} input-field'.strip()
+        self.fields["student"].widget.attrs["placeholder"] = "Name, matric number, or email"
 
 
 class DepartmentalAssociationForm(StyledModelForm):

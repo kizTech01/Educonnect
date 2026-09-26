@@ -1,0 +1,41 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Exam Officer | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head">
+        <div>
+            <h2>Exam Officer</h2>
+            <p class="muted-note">Department: {{ department.name }}. Assigning this duty retains each lecturer's existing Lecturer role.</p>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Lecturer</th><th>Staff ID</th><th>Designation</th><th>Action</th></tr></thead>
+            <tbody>
+            {% for lecturer in lecturers %}
+                <tr>
+                    <td>{{ lecturer.full_name }}</td>
+                    <td>{{ lecturer.id_number|default:lecturer.username }}</td>
+                    <td>Lecturer{% if lecturer.id in exam_officer_ids %} · Exam Officer{% endif %}</td>
+                    <td>
+                        {% if lecturer.id in exam_officer_ids %}
+                            <span class="status-chip success">Assigned</span>
+                        {% else %}
+                            <form method="post">
+                                {% csrf_token %}
+                                <input type="hidden" name="lecturer_id" value="{{ lecturer.id }}">
+                                <button class="primary-btn small" type="submit">Assign as Exam Officer</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% empty %}
+                <tr><td colspan="4" class="empty-text">No lecturers belong to this department.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

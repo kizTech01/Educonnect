@@ -1,0 +1,21 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}{{ section_title }} | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>{{ section_title }}</h2></div>
+    {% if department %}<p class="muted-note">Scope: {{ department.name }}. Records outside this department are not included.</p>{% endif %}
+    {% if notice %}<p class="muted-note">{{ notice }}</p>{% endif %}
+    {% if rows %}
+        <div class="table-wrap">
+            <table>
+                <thead><tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+                <tbody>{% for row in rows %}<tr>{% for value in row %}<td>{{ value|default:"—" }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+            </table>
+        </div>
+    {% else %}
+        <p class="muted-note">There are no authorised records to display.</p>
+    {% endif %}
+</section>
+{% endblock %}

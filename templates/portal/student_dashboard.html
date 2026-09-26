@@ -22,6 +22,13 @@
     </article>
 </section>
 
+{% if programme %}
+<section class="panel-card">
+    <div class="panel-head"><h2>My programme</h2></div>
+    <p class="muted-note"><strong>{{ programme.name }}</strong> ({{ programme.code }}){% if programme.award %} · {{ programme.award }}{% endif %} · {{ programme.duration_years }} year{{ programme.duration_years|pluralize }}.</p>
+</section>
+{% endif %}
+
 <section class="split-layout">
     <div class="panel-card">
         <div class="panel-head">

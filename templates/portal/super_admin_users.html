@@ -32,4 +32,29 @@
     </div>
   </section>
 </section>
+<section class="panel-card">
+  <div class="panel-head"><h2>Institution administrators</h2></div>
+  <p class="muted-note">Reset an institution administrator's password when they cannot sign in.</p>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Institution</th><th>Name</th><th>Email</th><th>Action</th></tr>
+      {% for administrator in institution_admins %}
+        <tr>
+          <td>{{ administrator.institution.name }}</td>
+          <td>{{ administrator.full_name }}</td>
+          <td>{{ administrator.email|default:administrator.username }}</td>
+          <td>
+            <form method="post" action="{% url 'portal:super-admin-reset-institution-admin-password' administrator.id %}">
+              {% csrf_token %}
+              <input type="hidden" name="return_to" value="users">
+              <button class="ghost-btn small" type="submit">Reset password</button>
+            </form>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">No institution administrators found.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</section>
 {% endblock %}

@@ -10,6 +10,7 @@ EduConnect is a Django-based university portal for managing students, lecturers,
 - Lecturer dashboard for course management, free or paid materials, access control, student visibility, and targeted messaging
 - Lecturer messages are delivered to the student's inbox, browser alerts (when enabled), and email address
 - Admin dashboard for departments, users, approvals, courses, timetables, handbooks, and material management
+- Multi-institution tenant isolation, auditable multi-role assignments, HOD-to-Exam-Officer workflow, and role-scoped EduConnect AI
 - SQLite by default for quick local testing, with optional MySQL support
 
 ## Quick start
@@ -68,6 +69,12 @@ To create the first administrator, set `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP
 - If your local `.env` also contains a Render `DATABASE_URL`, set `DJANGO_USE_LOCAL_SQLITE=True` so local commands and tests keep using `db.sqlite3`.
 - Set `DB_ENGINE=mysql` to use MySQL.
 - `PyMySQL` is wired in through `config/__init__.py` so the project can connect to MySQL without extra adapter code.
+
+## Institutional roles and EduConnect AI
+
+Existing Admin, Lecturer, and Student accounts are preserved. New institution roles are additive role assignments, so a lecturer can also be an HOD or Exam Officer without a second account. HODs assign Exam Officers only from their own department; the assignment is audited. Institution Admin navigation intentionally has no timetable or handbook operation—those existing records remain in the academic/HOD workspace.
+
+Every institutional role has **EduConnect AI** according to its server-side role assignment. The assistant uses the user's active role (not merely any role assigned to the account), the current institution, and a small allow-list of role-relevant queries. It never provides cross-institution data or performs administrative actions. Institution Admin AI Automation has been removed.
 
 ## Email and scale
 

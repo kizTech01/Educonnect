@@ -1,0 +1,11 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Role Workspace | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>Authorized workspace</h2></div>
+    <p>Your assigned role{{ assigned_roles|length|pluralize }}: {{ assigned_roles|join:", " }}.</p>
+    <p class="muted-note">This workspace intentionally exposes only modules authorised for your institution and role. EduConnect AI is available from the navigation according to your role permissions.</p>
+</section>
+{% endblock %}

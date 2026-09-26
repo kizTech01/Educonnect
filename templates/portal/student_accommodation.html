@@ -1,0 +1,28 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Accommodation | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>Apply for accommodation</h2></div>
+    <p class="muted-note">Applications are reviewed by authorised university staff. You cannot select or reserve a bed yourself.</p>
+    <form method="post" class="form-grid">
+        {% csrf_token %}
+        {% for field in form %}<label>{{ field.label }} {{ field }}{% if field.help_text %}<small>{{ field.help_text }}</small>{% endif %}{{ field.errors }}</label>{% endfor %}
+        <button class="primary-btn" type="submit">Submit application</button>
+    </form>
+</section>
+<section class="panel-card">
+    <div class="panel-head"><h2>Your applications</h2></div>
+    {% if applications %}
+        <div class="table-wrap"><table>
+            <thead><tr><th>Session</th><th>Preferred hostel</th><th>Status</th><th>Allocation</th><th>Decision note</th></tr></thead>
+            <tbody>{% for application in applications %}<tr>
+                <td>{{ application.accommodation_session }}</td><td>{{ application.preferred_hostel|default:"No preference" }}</td><td>{{ application.get_status_display }}</td>
+                <td>{% if application.allocation and application.allocation.status == "active" %}{{ application.allocation.bed }}{% else %}—{% endif %}</td>
+                <td>{{ application.decision_note|default:"—" }}</td>
+            </tr>{% endfor %}</tbody>
+        </table></div>
+    {% else %}<p class="muted-note">You have not submitted an accommodation application.</p>{% endif %}
+</section>
+{% endblock %}

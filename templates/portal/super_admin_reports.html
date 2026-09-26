@@ -7,16 +7,18 @@
   <div class="panel-head"><h2>Institution overview</h2></div>
   <div class="table-wrap">
     <table>
-      <tr><th>Institution</th><th>Status</th><th>Users</th><th>Revenue</th></tr>
+      <tr><th>Institution</th><th>Status</th><th>Users</th><th>Students</th><th>Lecturers</th><th>Revenue</th></tr>
       {% for institution in institution_rows %}
         <tr>
           <td>{{ institution.name }}</td>
           <td>{{ institution.get_status_display }}</td>
           <td>{{ institution.users_total }}</td>
+          <td>{{ institution.student_total }}</td>
+          <td>{{ institution.lecturer_total }}</td>
           <td>&#8358;{{ institution.revenue|default:"0.00" }}</td>
         </tr>
       {% empty %}
-        <tr><td colspan="4">No institution data is available yet.</td></tr>
+        <tr><td colspan="6">No institution data is available yet.</td></tr>
       {% endfor %}
     </table>
   </div>

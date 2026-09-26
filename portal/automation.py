@@ -11,15 +11,16 @@ import os
 import re
 import urllib.request
 import zipfile
+from decimal import Decimal, InvalidOperation
 from io import BytesIO, StringIO
 from xml.etree import ElementTree
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
 
-from .models import AcademicSession, Course, Curriculum, LecturerCourseRegistration, User
+from .models import AcademicSession, Course, CourseResult, Curriculum, Department, LecturerCourseRegistration, Programme, RoleAssignment, StudentCourseRegistration, User
 from .services import TEMPORARY_ACCOUNT_PASSWORD
 
 
@@ -28,10 +29,17 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def extract_text(uploaded_file):
-    """Read the common departmental file types without exposing a shell parser."""
+    """Read an uploaded file while leaving it usable by Django storage.
+
+    Automation analysis happens before ``AIAutomationJob.file`` is saved.  An
+    ``InMemoryUploadedFile`` is the same object Django later passes to the
+    storage backend, so closing it here makes ``FileField.save()`` fail while
+    iterating over ``chunks()``.  Resetting its cursor is sufficient for both
+    in-memory and temporary upload handlers.
+    """
     uploaded_file.open("rb")
     data = uploaded_file.read()
-    uploaded_file.close()
+    uploaded_file.seek(0)
     suffix = os.path.splitext(uploaded_file.name)[1].lower()
     if suffix in {".txt", ".csv"}:
         return data.decode("utf-8", errors="replace")
@@ -131,7 +139,9 @@ def _ai_extract_image(uploaded_file, task):
         return None
     uploaded_file.open("rb")
     data = uploaded_file.read()
-    uploaded_file.close()
+    # Keep the upload open and rewound: callers may persist it after vision
+    # analysis (as the AI automation workflow does).
+    uploaded_file.seek(0)
     suffix = os.path.splitext(uploaded_file.name)[1].lower()
     media_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}[suffix]
     prompt = (
@@ -187,10 +197,31 @@ def import_handbook_courses(handbook):
         # Uploading a handbook creates a new version only for this department.
         # Students already assigned to an earlier version keep it; students who
         # join from this session onwards receive this one at signup.
-        curriculum, _ = Curriculum.objects.get_or_create(
+        # Each upload is a curriculum snapshot. Existing students retain the
+        # snapshot on their account; students created after this upload get
+        # the newest version only.
+        curriculum_scope = Curriculum.objects.filter(
             department=handbook.department,
+            programme=handbook.programme,
             effective_session=session,
         )
+        latest_version = curriculum_scope.aggregate(max_version=Max("version"))["max_version"] or 0
+        # A programme can receive its first student before its first handbook.
+        # That account gets an empty placeholder curriculum; populate it on
+        # the first handbook rather than immediately making those students
+        # stale. Every later handbook remains a new immutable version.
+        curriculum = None
+        if handbook.programme_id:
+            latest = curriculum_scope.order_by("-version", "-created_at").first()
+            if latest and not Course.objects.filter(curriculum=latest).exists():
+                curriculum = latest
+        if curriculum is None:
+            curriculum = Curriculum.objects.create(
+                department=handbook.department,
+                programme=handbook.programme,
+                effective_session=session,
+                version=latest_version + 1,
+            )
         for record in records:
             code = re.sub(r"[^A-Z0-9]", "", str(record.get("code", "")).upper())[:20]
             title = str(record.get("title", "")).strip()[:200]
@@ -212,13 +243,15 @@ def import_handbook_courses(handbook):
                 Course.objects.filter(pk=existing.pk).update(**values)
                 updated += 1
             else:
-                Course.objects.create(
+                course = Course.objects.create(
                     department=handbook.department,
                     academic_session=session,
                     curriculum=curriculum,
                     code=code,
                     **values,
                 )
+                if handbook.programme_id:
+                    course.programmes.add(handbook.programme)
                 created += 1
     return f"Course automation finished: {created} created, {updated} updated, {skipped} skipped."
 
@@ -258,6 +291,78 @@ def _records_from_upload(upload, task):
         # preceding lecturer name forward to each of them.
         usable_rows = [row for row in local_rows if _field(row, "course_code", "course", "code")]
     return usable_rows or _ai_extract(text, task) or local_rows
+
+
+def _programme_records(uploaded_file):
+    """Extract programme rows without allowing an AI response to choose a department."""
+    suffix = os.path.splitext(uploaded_file.name)[1].lower()
+    task = "programmes with programme_code, programme_name, award, duration_years, and is_active"
+    if suffix in IMAGE_SUFFIXES:
+        return _ai_extract_image(uploaded_file, task) or []
+
+    text = extract_text(uploaded_file)
+    # Prefer structured AI extraction when configured. Creation below still
+    # validates every row and binds it to the Institution Admin's selection.
+    ai_records = _ai_extract(text, task)
+    if ai_records:
+        return ai_records
+    return _rows(text)
+
+
+def _programme_duration(value):
+    match = re.search(r"\d+", str(value or ""))
+    duration = int(match.group()) if match else 4
+    return duration if 1 <= duration <= 15 else 4
+
+
+def import_programmes(uploaded_file, department):
+    """Create or update programmes only within the selected department."""
+    if not department or not department.institution_id:
+        raise ValueError("Select a valid department before importing programmes.")
+    records = _programme_records(uploaded_file)
+    if not records:
+        raise ValueError("No programme records were found in the uploaded file.")
+
+    created = updated = skipped = 0
+    with transaction.atomic():
+        for record in records:
+            code = _field(record, "programme_code", "program_code", "code").upper().replace(" ", "")[:30]
+            name = _field(record, "programme_name", "program_name", "programme", "program", "name")[:180]
+            if not code or not name:
+                skipped += 1
+                continue
+            award = _field(record, "award", "degree", "qualification")[:80]
+            duration = _programme_duration(_field(record, "duration_years", "duration", "years", "programme_duration"))
+            raw_active = _field(record, "is_active", "active", "status").casefold()
+            is_active = raw_active not in {"false", "0", "no", "inactive", "disabled"}
+            existing = Programme.all_objects.filter(institution=department.institution, code__iexact=code).first()
+            if existing and existing.department_id != department.id:
+                skipped += 1
+                continue
+            if existing:
+                existing.name = name
+                existing.award = award
+                existing.duration_years = duration
+                existing.is_active = is_active
+                existing.full_clean()
+                existing.save(update_fields=["name", "award", "duration_years", "is_active", "updated_at"])
+                updated += 1
+                continue
+            programme = Programme(
+                institution=department.institution,
+                department=department,
+                code=code,
+                name=name,
+                award=award,
+                duration_years=duration,
+                is_active=is_active,
+            )
+            programme.full_clean()
+            programme.save()
+            created += 1
+    if not created and not updated:
+        raise ValueError("No valid new programmes could be imported. Check the programme code and name columns.")
+    return f"Programme import finished: {created} created, {updated} updated, {skipped} skipped."
 
 
 def _person_key(value):
@@ -403,3 +508,147 @@ def import_course_allocations(upload):
             LecturerCourseRegistration.objects.get_or_create(lecturer=lecturer, course=course)
             assigned += 1
     return f"Course-allocation automation finished: {assigned} allocations assigned, {created_courses} courses created, {skipped} rows could not be matched."
+
+
+def import_course_results(uploaded_file, *, course, session, semester, lecturer, institution):
+    """Read a result sheet into editable drafts for one lecturer-owned course.
+
+    The selected course/session/semester stay authoritative; file data can only
+    identify registered students and their marks, never redirect records to a
+    different department or course.
+    """
+    text = extract_text(uploaded_file)
+    rows = _ai_extract(text, "student result rows with student_id, CA, test, other assessment, exam and total score") or _rows(text)
+    if not rows:
+        raise ValueError("No result rows were found in the uploaded file.")
+    created = updated = skipped = protected = 0
+    with transaction.atomic():
+        for row in rows:
+            student_id = _field(row, "student_id", "matric_no", "matric_number", "id_number", "student number", "id")
+            if not student_id:
+                skipped += 1
+                continue
+            student = User.objects.filter(
+                role=User.Role.STUDENT, department=course.department,
+            ).filter(Q(id_number__iexact=student_id) | Q(username__iexact=student_id)).first()
+            if not student or not StudentCourseRegistration.objects.filter(student=student, course=course, session=session).exists():
+                skipped += 1
+                continue
+            def mark(*names):
+                value = _field(row, *names).replace("%", "").strip()
+                try:
+                    return Decimal(value) if value else Decimal("0.00")
+                except InvalidOperation:
+                    return Decimal("0.00")
+            ca = mark("ca", "continuous assessment")
+            test = mark("test", "tests")
+            other = mark("other", "assignment", "practical", "other assessment")
+            exam = mark("exam", "exam score", "examination")
+            total = mark("score", "total", "total score")
+            total = total if total else ca + test + other + exam
+            if not Decimal("0") <= total <= Decimal("100"):
+                skipped += 1
+                continue
+            existing = CourseResult.objects.filter(student=student, course=course, session=session, semester=semester).first()
+            if existing and existing.status not in {CourseResult.Status.DRAFT, CourseResult.Status.RETURNED}:
+                protected += 1
+                continue
+            result = existing or CourseResult(
+                institution=institution, student=student, course=course, session=session, semester=semester,
+            )
+            result.ca_score, result.test_score = ca, test
+            result.other_assessment_score, result.exam_score, result.score = other, exam, total
+            result.assessment_breakdown = {}
+            result.status = CourseResult.Status.DRAFT
+            result.submitted_by = lecturer
+            result.save()
+            if existing:
+                updated += 1
+            else:
+                created += 1
+    return f"Result import finished: {created} drafts created, {updated} drafts updated, {protected} locked result(s) left unchanged, {skipped} row(s) skipped."
+
+
+def analyze_institution_automation(upload, command):
+    """Produce a non-mutating account-import proposal from a supplied file.
+
+    This is intentionally deterministic at the execution boundary: AI/document
+    extraction can suggest rows, but account creation uses only the reviewed
+    proposal stored on the job.  That prevents a later model response from
+    changing the approved operation.
+    """
+    command = (command or "").strip()
+    lowered = command.casefold()
+    if not any(token in lowered for token in ("account", "staff", "lecturer", "student", "import")):
+        raise ValueError("The initial automation release supports reviewed account imports. State whether to create staff, lecturers, or students.")
+    if "student" in lowered:
+        role = User.Role.STUDENT
+    elif "lecturer" in lowered:
+        role = User.Role.LECTURER
+    else:
+        role = User.Role.LECTURER if "lecturer" in lowered else User.Role.MIS
+    text = extract_text(upload)
+    rows = _rows(text)
+    proposed, errors, duplicates = [], [], []
+    seen = set()
+    for row_number, row in enumerate(rows, start=2):
+        email = _field(row, "email")
+        staff_id = _field(row, "staff_id", "lecturer_id", "student_id", "id_number", "id")
+        name = _field(row, "full_name", "name", "lecturer_name", "student_name")
+        department_code = _field(row, "department", "department_code")
+        username = _field(row, "username") or staff_id or email
+        key = (email.casefold() or username.casefold())
+        if not name or not username:
+            errors.append({"row": row_number, "error": "Name and a username, ID, or email are required."})
+            continue
+        if key in seen or User.all_objects.filter(username__iexact=username).exists() or (email and User.all_objects.filter(email__iexact=email).exists()):
+            duplicates.append({"row": row_number, "identifier": email or username})
+            continue
+        seen.add(key)
+        department = Department.objects.filter(code__iexact=department_code).first() if department_code else None
+        if department_code and not department:
+            errors.append({"row": row_number, "error": f"Department '{department_code}' does not exist in this institution."})
+            continue
+        proposed.append({
+            "row": row_number, "username": username[:150], "email": email[:254],
+            "id_number": staff_id[:30], "name": name[:300], "department_id": department.id if department else None,
+            "role": role,
+        })
+    return {
+        "action": "create_accounts",
+        "analysis": {"records_found": len(rows), "valid_records": len(proposed), "duplicates": duplicates, "errors": errors},
+        "proposed_changes": proposed,
+    }
+
+
+@transaction.atomic
+def execute_institution_automation(job, approver):
+    """Execute exactly one reviewed proposal, once, under a transaction."""
+    if job.status == job.Status.EXECUTED:
+        return job.execution_summary
+    if job.status != job.Status.APPROVED or job.approved_by_id != approver.id:
+        raise ValueError("Only the approving Institution Admin can execute this approved operation.")
+    if job.action != "create_accounts":
+        raise ValueError("This approved operation has no registered executor.")
+    created = skipped = 0
+    for record in job.proposed_changes:
+        if User.all_objects.filter(username__iexact=record["username"]).exists():
+            skipped += 1
+            continue
+        name_parts = record["name"].split(maxsplit=1)
+        user = User.objects.create_user(
+            username=record["username"], email=record.get("email", ""), id_number=record.get("id_number") or None,
+            first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
+            department_id=record.get("department_id"), role=record["role"],
+            password=TEMPORARY_ACCOUNT_PASSWORD, is_approved=True,
+        )
+        RoleAssignment.objects.get_or_create(
+            institution=job.institution, user=user, role=record["role"], department_id=record.get("department_id"),
+            defaults={"assigned_by": approver},
+        )
+        created += 1
+    job.status = job.Status.EXECUTED
+    job.executed_at = timezone.now()
+    job.execution_summary = {"created": created, "skipped": skipped, "temporary_password_required": True}
+    job.save(update_fields=["status", "executed_at", "execution_summary", "updated_at"])
+    return job.execution_summary

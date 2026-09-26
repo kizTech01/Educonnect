@@ -1,0 +1,32 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+  <div class="panel-head"><h2>AI import review</h2></div>
+  <p class="muted-note">Upload a file to prepare a proposal. No accounts are changed until an Institution Admin approves and executes it.</p>
+  <form method="post" enctype="multipart/form-data" class="stack-form">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="analyze">
+    {{ form.as_p }}
+    <button class="primary-btn" type="submit">Analyze file</button>
+  </form>
+</section>
+
+<section class="panel-card">
+  <div class="panel-head"><h2>Reviewed proposals</h2></div>
+  {% for job in jobs %}
+    <article class="list-card">
+      <h3>{{ job.action|default:"Import proposal" }}</h3>
+      <p class="muted-note">{{ job.get_status_display }} · {{ job.created_at }}</p>
+      {% if job.proposed_changes %}<p>{{ job.proposed_changes|length }} proposed change{{ job.proposed_changes|length|pluralize }}.</p>{% endif %}
+      {% if is_institution_admin and job.status == "analyzed" %}
+        <form method="post">{% csrf_token %}<input type="hidden" name="action" value="approve"><input type="hidden" name="job_id" value="{{ job.id }}"><button class="primary-btn" type="submit">Approve</button></form>
+      {% elif is_institution_admin and job.status == "approved" %}
+        <form method="post">{% csrf_token %}<input type="hidden" name="action" value="execute"><input type="hidden" name="job_id" value="{{ job.id }}"><button class="primary-btn" type="submit">Execute approved import</button></form>
+      {% endif %}
+    </article>
+  {% empty %}
+    <p class="muted-note">No proposals yet.</p>
+  {% endfor %}
+</section>
+{% endblock %}

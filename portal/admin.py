@@ -2,7 +2,11 @@ from django.contrib import admin
 
 from .models import (
     AcademicSession,
+    AccommodationAllocation,
+    AccommodationApplication,
+    AccommodationSession,
     Course,
+    CourseResult,
     CoursePayment,
     CourseStudentGroup,
     CourseStudentGroupMembership,
@@ -19,6 +23,10 @@ from .models import (
     DepartmentalPaymentDocument,
     DepartmentalPaymentItem,
     Handbook,
+    Hostel,
+    HostelBed,
+    HostelBlock,
+    HostelRoom,
     Faculty,
     InstitutionProfile,
     Institution,
@@ -31,11 +39,12 @@ from .models import (
     Timetable,
     User,
     AuditLog,
+    GuardianRelationship,
+    RoleAssignment,
     Payment,
+    Programme,
     Subscription,
     SubscriptionPlan,
-    Feature,
-    InstitutionFeature,
     ScreeningIntegration,
     ScreeningApplication,
 )
@@ -93,6 +102,14 @@ class CourseAdmin(admin.ModelAdmin):
     list_display = ("code", "title", "department", "lecturer", "level", "semester", "is_free", "amount", "venue")
     list_filter = ("department", "level", "semester", "is_free")
     search_fields = ("code", "title", "venue", "department__name", "lecturer__username")
+
+
+@admin.register(CourseResult)
+class CourseResultAdmin(admin.ModelAdmin):
+    list_display = ("student", "course", "session", "score", "grade", "status", "reviewed_by")
+    list_filter = ("status", "session", "course__department")
+    search_fields = ("student__username", "student__id_number", "course__code")
+    readonly_fields = ("grade", "grade_point", "credit_units", "submitted_at", "reviewed_at", "published_at")
 
 
 @admin.register(StudentCourseRegistration)
@@ -189,6 +206,62 @@ class AcademicSessionAdmin(admin.ModelAdmin):
     search_fields = ("name",)
 
 
+@admin.register(Programme)
+class ProgrammeAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "department", "award", "duration_years", "is_active")
+    list_filter = ("is_active", "department")
+    search_fields = ("name", "code", "department__name")
+
+
+@admin.register(AccommodationSession)
+class AccommodationSessionAdmin(admin.ModelAdmin):
+    list_display = ("name", "academic_session", "is_open", "opens_at", "closes_at", "institution")
+    list_filter = ("is_open", "institution")
+    search_fields = ("name", "academic_session__name")
+
+
+@admin.register(Hostel)
+class HostelAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "gender_restriction", "manager", "is_active", "institution")
+    list_filter = ("gender_restriction", "is_active", "institution")
+    search_fields = ("name", "code", "manager__username")
+
+
+@admin.register(HostelBlock)
+class HostelBlockAdmin(admin.ModelAdmin):
+    list_display = ("name", "hostel", "institution")
+    list_filter = ("hostel", "institution")
+    search_fields = ("name", "hostel__name")
+
+
+@admin.register(HostelRoom)
+class HostelRoomAdmin(admin.ModelAdmin):
+    list_display = ("code", "block", "floor", "is_available", "institution")
+    list_filter = ("is_available", "institution")
+    search_fields = ("code", "block__hostel__name")
+
+
+@admin.register(HostelBed)
+class HostelBedAdmin(admin.ModelAdmin):
+    list_display = ("code", "room", "is_available", "institution")
+    list_filter = ("is_available", "institution")
+    search_fields = ("code", "room__code", "room__block__hostel__name")
+
+
+@admin.register(AccommodationApplication)
+class AccommodationApplicationAdmin(admin.ModelAdmin):
+    list_display = ("student", "accommodation_session", "preferred_hostel", "status", "reviewed_by", "institution")
+    list_filter = ("status", "institution")
+    search_fields = ("student__username", "student__id_number", "preferred_hostel__name")
+
+
+@admin.register(AccommodationAllocation)
+class AccommodationAllocationAdmin(admin.ModelAdmin):
+    list_display = ("student", "bed", "status", "allocated_by", "allocated_at", "institution")
+    list_filter = ("status", "institution")
+    search_fields = ("student__username", "student__id_number", "bed__code")
+
+
 @admin.register(DepartmentalAssociation)
 class DepartmentalAssociationAdmin(admin.ModelAdmin):
     list_display = ("name", "code", "is_constant", "created_at")
@@ -257,18 +330,18 @@ class AuditLogAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
 
 
-@admin.register(Feature)
-class FeatureAdmin(admin.ModelAdmin):
-    list_display = ("name", "code", "is_active", "requires_subscription")
-    list_filter = ("is_active", "requires_subscription")
-    search_fields = ("name", "code")
+@admin.register(RoleAssignment)
+class RoleAssignmentAdmin(admin.ModelAdmin):
+    list_display = ("user", "role", "department", "institution", "is_active", "assigned_by", "assigned_at")
+    list_filter = ("role", "is_active", "institution")
+    search_fields = ("user__username", "user__email", "department__name")
 
 
-@admin.register(InstitutionFeature)
-class InstitutionFeatureAdmin(admin.ModelAdmin):
-    list_display = ("institution", "feature", "enabled", "activated_at", "updated_at")
-    list_filter = ("enabled", "feature")
-    search_fields = ("institution__name", "feature__name")
+@admin.register(GuardianRelationship)
+class GuardianRelationshipAdmin(admin.ModelAdmin):
+    list_display = ("guardian", "student", "relationship", "institution", "is_active")
+    list_filter = ("is_active", "institution")
+    search_fields = ("guardian__username", "student__username")
 
 
 @admin.register(ScreeningIntegration)

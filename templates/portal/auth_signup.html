@@ -34,6 +34,7 @@
                     <label>Faculty {{ signup_form.faculty }} {{ signup_form.faculty.errors }}</label>
                     <label>Department {{ signup_form.department }} {{ signup_form.department.errors }}</label>
                     {% if is_student %}
+                        <label>Programme {{ signup_form.programme }} {{ signup_form.programme.errors }}</label>
                         <label>Level {{ signup_form.level }} {{ signup_form.level.errors }}</label>
                     {% endif %}
                     <label>Phone number {{ signup_form.phone_number }} {{ signup_form.phone_number.errors }}</label>
@@ -69,4 +70,28 @@
         </div>
     </div>
 </section>
+{% if is_student %}
+{{ programme_departments|json_script:"signup-programmes" }}
+<script>
+(() => {
+  const department = document.getElementById("id_department");
+  const programme = document.getElementById("id_programme");
+  const dataNode = document.getElementById("signup-programmes");
+  if (!department || !programme || !dataNode) return;
+  const programmes = JSON.parse(dataNode.textContent);
+  const chosen = programme.value;
+  const update = () => {
+    const departmentId = department.value;
+    programme.replaceChildren(new Option("Select your programme", ""));
+    if (!departmentId) { programme.disabled = true; return; }
+    programme.disabled = false;
+    programmes.filter(item => String(item.department_id) === departmentId).forEach(item => {
+      programme.add(new Option(item.name, item.id, false, String(item.id) === chosen));
+    });
+  };
+  department.addEventListener("change", update);
+  update();
+})();
+</script>
+{% endif %}
 {% endblock %}

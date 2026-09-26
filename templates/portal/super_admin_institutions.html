@@ -40,7 +40,6 @@
             <td class="institution-actions-cell">
               <div class="institution-actions" aria-label="Actions for {{ institution.name }}">
                 <a class="ghost-btn small" href="{% url 'portal:super-admin-institution-edit' institution.id %}">Edit</a>
-                <a class="ghost-btn small" href="{% url 'portal:super-admin-institution-features' institution.id %}">Features</a>
               {% if institution.status == 'suspended' %}
                 <form method="post" action="{% url 'portal:super-admin-institution-status' institution.id 'active' %}">
               {% else %}

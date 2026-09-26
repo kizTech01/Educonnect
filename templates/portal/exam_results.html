@@ -1,0 +1,21 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Result Review | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>{{ department.name }} result workflow</h2></div>
+    <p class="muted-note">Only an active Exam Officer can approve, publish, or return submitted results. HOD access is view-only.</p>
+    {% if results %}<div class="table-wrap"><table>
+        <thead><tr><th>Student</th><th>Course</th><th>Session</th><th>Score</th><th>Grade</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>{% for result in results %}<tr>
+            <td>{{ result.student.full_name }}</td><td>{{ result.course.code }}</td><td>{{ result.session.name }}</td><td>{{ result.score }}</td><td>{{ result.grade }}</td><td>{{ result.get_status_display }}</td>
+            <td>{% if can_review %}
+                {% if result.status == "submitted" %}<form class="inline-form" method="post">{% csrf_token %}<input type="hidden" name="result_id" value="{{ result.pk }}"><input name="note" placeholder="Review note"><button class="primary-btn" name="action" value="approve">Approve</button><button class="secondary-btn" name="action" value="return">Return</button></form>
+                {% elif result.status == "approved" %}<form class="inline-form" method="post">{% csrf_token %}<input type="hidden" name="result_id" value="{{ result.pk }}"><input name="note" placeholder="Publication note"><button class="primary-btn" name="action" value="publish">Publish</button><button class="secondary-btn" name="action" value="return">Return</button></form>
+                {% else %}—{% endif %}
+            {% else %}View only{% endif %}</td>
+        </tr>{% endfor %}</tbody>
+    </table></div>{% else %}<p class="muted-note">No results exist for this department.</p>{% endif %}
+</section>
+{% endblock %}

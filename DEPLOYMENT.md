@@ -16,7 +16,7 @@
    Use a transactional email provider and verify the sender domain with that provider before going live.
 4. Deploy. The web service applies migrations before deploy.
 5. Set `CORE_DOMAIN` to the bare platform hostname, for example `educonnect.example.edu.ng`, and redeploy. Django derives both the core host and its institution subdomains, plus their HTTPS CSRF origins, from this one value.
-6. Test password-reset and lecturer-message emails. When you are ready to pay for automated class reminders, add a Render cron service that runs `python manage.py send_due_course_reminders` every minute.
+6. Test password-reset, lecturer-message, and class-reminder emails. The blueprint includes the `educonnect-course-reminders` cron service, which runs `python manage.py send_due_course_reminders` every minute.
 7. Before accepting payments, have each department's HOD enter that department's Paystack public and secret keys in **Departmental → API and Document**. Gateways intentionally start unconfigured; no payment key is stored in the repository.
 
 For the Docker/Caddy deployment, start by copying `.env.production.example` to
@@ -25,6 +25,6 @@ For the Docker/Caddy deployment, start by copying `.env.production.example` to
 ## Important production notes
 
 - The application uses PostgreSQL through `DATABASE_URL` in production. Do not use SQLite on Render.
-- Class reminders are disabled in this deployment blueprint. When a cron service is added later, delivery uses private BCC batching and retries failed SMTP batches until the class begins.
+- Class reminders are processed every minute by the `educonnect-course-reminders` cron service. Delivery uses private BCC batching and retries failed SMTP batches until the class begins.
 - Static files are served by WhiteNoise. The Render blueprint mounts a persistent disk at the application's media directory so uploaded course files, passport photos, and documents survive deploys. Back up this disk regularly; use object storage if you need multi-region or multi-instance media access.
 - Browser alerts require HTTPS, browser permission, and an open EduConnect page. Email remains the reliable notification channel when the browser is closed.

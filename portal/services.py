@@ -6,11 +6,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.urls import reverse
 from django.utils import timezone
 
@@ -250,6 +251,14 @@ def finalize_subscription_payment(*, reference, verification):
         subscription.status = Subscription.Status.ACTIVE
         subscription.payment_reference = payment.reference
         subscription.save()
+
+        # A new tenant is often provisioned as Pending.  A verified first
+        # payment must activate it as well as its subscription, otherwise the
+        # middleware would keep redirecting its administrator back to billing.
+        institution = payment.institution
+        if institution.status in {institution.Status.PENDING, institution.Status.EXPIRED}:
+            institution.status = institution.Status.ACTIVE
+            institution.save(update_fields=["status", "updated_at"])
 
         payment.status = Payment.Status.SUCCESS
         payment.paid_at = timezone.now()
@@ -540,7 +549,17 @@ def create_alert(recipient, alert_type, title, body, target_url, dedupe_key):
     )
 
 
-def _course_occurrence_datetime(course, now):
+def _course_timezone(course):
+    timezone_name = getattr(getattr(course, "department", None), "institution", None)
+    timezone_name = getattr(timezone_name, "timezone", "") or settings.TIME_ZONE
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        logger.warning("Invalid institution timezone %r for course %s; using %s.", timezone_name, course.pk, settings.TIME_ZONE)
+        return timezone.get_current_timezone()
+
+
+def _course_occurrence_datetime(course, now, course_timezone=None):
     if not course.schedule_day or not course.schedule_time:
         return None
     weekday_lookup = {
@@ -558,21 +577,28 @@ def _course_occurrence_datetime(course, now):
     days_ahead = weekday - now.weekday()
     target_date = now.date() + timedelta(days=days_ahead)
     naive = datetime.combine(target_date, course.schedule_time)
-    return timezone.make_aware(naive, timezone.get_current_timezone())
+    return timezone.make_aware(naive, course_timezone or timezone.get_current_timezone())
 
 
 def dispatch_due_course_reminders(now=None):
-    now = now or timezone.localtime()
-    candidate_courses = Course.objects.select_related("lecturer", "department").filter(
-        schedule_day=now.strftime("%A"),
+    now = now or timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now, timezone.get_current_timezone())
+    # Institutions may use different timezones.  Filter by their local day
+    # inside the loop rather than the server's day, so a midnight boundary
+    # never skips an otherwise due reminder.
+    candidate_courses = Course.objects.select_related("lecturer", "department__institution").filter(
         schedule_time__isnull=False,
-    )
+    ).filter(Q(academic_session__is_current=True) | Q(academic_session__isnull=True))
     for course in candidate_courses:
-        class_starts_at = _course_occurrence_datetime(course, now)
+        local_now = now.astimezone(_course_timezone(course))
+        if course.schedule_day != local_now.strftime("%A"):
+            continue
+        class_starts_at = _course_occurrence_datetime(course, local_now, local_now.tzinfo)
         if not class_starts_at:
             continue
         reminder_at = class_starts_at - timedelta(minutes=30)
-        if not (reminder_at <= now < class_starts_at):
+        if not (reminder_at <= local_now < class_starts_at):
             continue
 
         recipients = []
@@ -582,6 +608,7 @@ def dispatch_due_course_reminders(now=None):
             User.objects.filter(
                 role=User.Role.STUDENT,
                 student_registrations__course=course,
+                student_registrations__session__is_current=True,
             ).distinct()
         )
 

@@ -32,8 +32,6 @@ from .models import (
     SubscriptionPaymentGateway,
     SubscriptionNotification,
     StudentCourseRegistration,
-    Feature,
-    InstitutionFeature,
     ScreeningIntegration,
     ScreeningApplication,
     AuditLog,
@@ -108,6 +106,33 @@ class MultiInstitutionSaaSTests(TestCase):
         self.client.force_login(admin)
         response = self.client.get("/admin-portal/", HTTP_HOST=f"second.{settings.CORE_DOMAIN}")
         self.assertEqual(response.status_code, 403)
+
+    def test_unknown_tenant_host_does_not_inherit_the_signed_in_users_institution(self):
+        institution = self.make_institution("FIRST", "first")
+        user = User.all_objects.create_user(
+            "first-student",
+            password="safe-password-123",
+            role=User.Role.STUDENT,
+            institution=institution,
+        )
+        self.client.force_login(user)
+
+        response = self.client.get(
+            "/dashboard/",
+            HTTP_HOST=f"unknown.{settings.CORE_DOMAIN}",
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_custom_domain_resolves_its_institution(self):
+        institution = self.make_institution("CUSTOM", "custom")
+        institution.custom_domain = f"portal.{settings.CORE_DOMAIN}"
+        institution.save(update_fields=["custom_domain"])
+
+        response = self.client.get("/", HTTP_HOST=institution.custom_domain)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["institution"], institution)
 
     def test_institutions_can_use_the_same_session_and_gateway_names(self):
         first = self.make_institution("FIRST", "first")
@@ -340,7 +365,7 @@ class InstitutionAdministratorAuthenticationTests(TestCase):
         self.assertRedirects(super_response, reverse("portal:super-admin-dashboard"))
 
 
-class InstitutionFeatureAndScreeningTests(TestCase):
+class ScreeningIntegrationTests(TestCase):
     def setUp(self):
         self.super_admin = User.all_objects.create_user(
             username="platform-admin", email="platform-admin@example.test", password="platform-admin-password",
@@ -367,13 +392,6 @@ class InstitutionFeatureAndScreeningTests(TestCase):
         )
         self.session = AcademicSession.all_objects.create(name="2026/2027", is_current=True, institution=self.institution)
 
-    def enable(self, code):
-        feature = Feature.objects.get(code=code)
-        setting, _ = InstitutionFeature.objects.get_or_create(institution=self.institution, feature=feature)
-        setting.enabled = True
-        setting.save()
-        return setting
-
     def signed_headers(self, integration, body):
         timestamp = str(int(timezone.now().timestamp()))
         signature = hmac.new(
@@ -385,14 +403,34 @@ class InstitutionFeatureAndScreeningTests(TestCase):
             "HTTP_X_EDUCONNECT_SIGNATURE": signature,
         }
 
-    def test_disabled_feature_is_enforced_even_when_a_user_enters_the_url(self):
+    def test_ai_is_available_to_an_authorized_role_without_module_activation(self):
         user = User.all_objects.create_user("student", password="safe-password-123", role=User.Role.STUDENT, institution=self.institution)
         self.client.force_login(user)
         response = self.client.get(reverse("portal:ai-assistant"), HTTP_HOST=f"screen.{settings.CORE_DOMAIN}")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+
+    def test_online_screening_portal_requires_an_admissions_role(self):
+        integration = ScreeningIntegration.objects.create(institution=self.institution)
+        student = User.all_objects.create_user(
+            "screen-student", password="safe-password-123", role=User.Role.STUDENT,
+            institution=self.institution,
+        )
+        self.client.force_login(student)
+        self.assertEqual(
+            self.client.get(reverse("portal:screening-portal"), HTTP_HOST=f"screen.{settings.CORE_DOMAIN}").status_code,
+            403,
+        )
+
+        admission_officer = User.all_objects.create_user(
+            "screen-officer", password="safe-password-123", role=User.Role.ADMISSION_OFFICER,
+            institution=self.institution,
+        )
+        self.client.force_login(admission_officer)
+        response = self.client.get(reverse("portal:screening-portal"), HTTP_HOST=f"screen.{settings.CORE_DOMAIN}")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(self.institution.subdomain, response["Location"])
 
     def test_screening_api_transfers_one_admitted_applicant_into_its_own_tenant(self):
-        self.enable("online-screening")
         integration = ScreeningIntegration.objects.create(institution=self.institution, admission_session=self.session)
         payload = json.dumps({
             "application_id": "APP-100", "first_name": "Ada", "last_name": "Okafor", "email": "ada@example.test",
@@ -417,7 +455,6 @@ class InstitutionFeatureAndScreeningTests(TestCase):
         self.assertEqual(application.student.department, self.department)
 
     def test_screening_api_rejects_a_signature_from_another_institution(self):
-        self.enable("online-screening")
         integration = ScreeningIntegration.objects.create(institution=self.institution)
         other = Institution.objects.create(
             name="Other University", institution_code="OTHER", institution_type=Institution.Type.UNIVERSITY,
@@ -429,25 +466,18 @@ class InstitutionFeatureAndScreeningTests(TestCase):
         response = self.client.post(reverse("portal:api-screening-applications"), data=body, content_type="application/json", **headers)
         self.assertEqual(response.status_code, 403)
 
-    def test_disabling_a_feature_required_by_another_feature_is_rejected(self):
-        prerequisite = Feature.objects.get(code="new-educonnect-features")
-        dependent = Feature.objects.get(code="online-screening")
-        dependent.dependencies = [prerequisite.code]
-        dependent.save()
-        self.enable(prerequisite.code)
-        self.enable(dependent.code)
+    def test_screening_configuration_is_available_without_module_activation(self):
+        self.client.force_login(self.super_admin)
 
-        prerequisite_setting = InstitutionFeature.objects.get(
-            institution=self.institution, feature=prerequisite
+        response = self.client.get(
+            reverse("portal:super-admin-screening-configuration", args=[self.institution.id]),
+            HTTP_HOST=settings.CORE_DOMAIN,
         )
-        prerequisite_setting.enabled = False
 
-        with self.assertRaisesMessage(ValidationError, "Disable dependent feature"):
-            prerequisite_setting.save()
-        self.assertTrue(self.institution.feature_enabled(dependent.code))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(ScreeningIntegration.objects.filter(institution=self.institution).exists())
 
     def test_screening_configuration_cannot_use_another_institutions_session(self):
-        self.enable("online-screening")
         other = Institution.objects.create(
             name="Other University", institution_code="OTHER", institution_type=Institution.Type.UNIVERSITY,
             email="other@example.test", subdomain="other", status=Institution.Status.ACTIVE,
@@ -913,11 +943,6 @@ class InstitutionDeletionStorageTests(TransactionTestCase):
             reference=f"{prefix}-PAYMENT",
             amount=self.plan.price,
         )
-        feature, _ = Feature.objects.get_or_create(
-            code="online-screening",
-            defaults={"name": "Online Screening"},
-        )
-        InstitutionFeature.objects.create(institution=institution, feature=feature, enabled=False)
         integration = ScreeningIntegration.objects.create(institution=institution)
         screening = ScreeningApplication.objects.create(
             institution=institution,
@@ -1012,7 +1037,6 @@ class SubscriptionPlanManagementTests(TestCase):
                 "max_students": "1000",
                 "max_staff": "100",
                 "max_storage_mb": "20480",
-                "features": '["communication"]',
                 "is_active": "on",
             },
         )
@@ -1026,7 +1050,7 @@ class SubscriptionPlanManagementTests(TestCase):
         self.plan.refresh_from_db()
         self.duration.refresh_from_db()
         self.assertEqual(self.plan.name, "Standard Plus")
-        self.assertEqual(self.plan.features, ["communication"])
+        self.assertEqual(self.plan.max_students, 1000)
         self.assertEqual(self.duration.price, Decimal("15000.00"))
 
     def test_super_admin_can_deactivate_or_delete_an_unused_plan_but_not_history(self):
@@ -1224,3 +1248,13 @@ class ProductionMediaConfigurationTests(TestCase):
         self.assertIn("send_subscription_expiry_notifications", compose_file)
         self.assertIn("educonnect-subscription-notifications", render_file)
         self.assertIn("send_subscription_expiry_notifications", render_file)
+
+    def test_production_schedulers_include_course_reminders(self):
+        compose_file = (settings.BASE_DIR / "compose.production.yaml").read_text(encoding="utf-8")
+        render_file = (settings.BASE_DIR / "render.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("reminders", compose_file)
+        self.assertIn("send_due_course_reminders", compose_file)
+        self.assertIn("educonnect-course-reminders", render_file)
+        self.assertIn('schedule: "* * * * *"', render_file)
+        self.assertIn("send_due_course_reminders", render_file)

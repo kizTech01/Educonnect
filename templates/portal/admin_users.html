@@ -93,6 +93,24 @@
 
 <section class="panel-card">
     <div class="panel-head">
+        <div>
+            <h2>Add Institutional Staff</h2>
+            <p class="muted-note">Create MIS, Bursary, Admission, Academic Planning, HOD, Lecturer, or Senate accounts. HOD assignment also retains a Lecturer role.</p>
+        </div>
+    </div>
+    <form method="post" class="stack-form" action="{% url 'portal:admin-users' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="create-staff">
+        {{ staff_form.non_field_errors }}
+        {% for field in staff_form %}
+            <label>{{ field.label }} {{ field }} {{ field.errors }}</label>
+        {% endfor %}
+        <button type="submit" class="primary-btn">Create Staff Account</button>
+    </form>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
         <h2>Lecturers</h2>
     </div>
     <div class="table-wrap">

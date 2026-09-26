@@ -1,0 +1,17 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Academic Results | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="stats-grid">
+    <article class="stat-card"><span>Published credit units</span><strong>{{ total_units }}</strong></article>
+    <article class="stat-card"><span>GPA across published results</span><strong>{% if gpa is not None %}{{ gpa|floatformat:2 }}{% else %}—{% endif %}</strong></article>
+</section>
+<section class="panel-card">
+    <div class="panel-head"><h2>Published results</h2></div>
+    {% if results %}<div class="table-wrap"><table>
+        <thead><tr><th>Session</th><th>Course</th><th>Title</th><th>Units</th><th>Score</th><th>Grade</th><th>Grade point</th></tr></thead>
+        <tbody>{% for result in results %}<tr><td>{{ result.session.name }}</td><td>{{ result.course.code }}</td><td>{{ result.course.title }}</td><td>{{ result.credit_units }}</td><td>{{ result.score }}</td><td>{{ result.grade }}</td><td>{{ result.grade_point }}</td></tr>{% endfor %}</tbody>
+    </table></div>{% else %}<p class="muted-note">No approved results have been published to your account.</p>{% endif %}
+</section>
+{% endblock %}

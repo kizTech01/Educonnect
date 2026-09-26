@@ -1,0 +1,29 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Programmes | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>{{ department.name }} programmes</h2></div>
+    <p class="muted-note">Open a programme to manage its handbook, curriculum, students, and shared courses.</p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Programme</th><th>Award</th><th>Students</th><th>Courses</th><th>Handbooks</th><th></th></tr></thead>
+            <tbody>
+            {% for programme in programmes %}
+                <tr>
+                    <td><strong>{{ programme.name }}</strong><br><span class="table-cell-subtext">{{ programme.code }} · {{ programme.duration_years }} year{{ programme.duration_years|pluralize }}</span></td>
+                    <td>{{ programme.award|default:"—" }}</td>
+                    <td>{{ programme.student_total }}</td>
+                    <td>{{ programme.course_total }}</td>
+                    <td>{{ programme.handbook_total }}</td>
+                    <td><a class="ghost-btn small" href="{% url 'portal:hod-programme-detail' programme.id %}">Open</a></td>
+                </tr>
+            {% empty %}
+                <tr><td colspan="6">No programmes are configured for this department. Ask the institution administrator to add them.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
