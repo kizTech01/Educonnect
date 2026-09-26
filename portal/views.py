@@ -53,6 +53,8 @@ from .forms import (
     ScreeningIntegrationForm,
     SubscriptionRenewalForm,
     PlatformAdminForm,
+    ProgrammeForm,
+    ProgrammeImportForm,
     DepartmentPaymentGatewayForm,
     DepartmentCoursePaymentGatewayForm,
     DepartmentalAdditionalDocumentForm,
@@ -161,6 +163,7 @@ from .automation import (
     import_course_results,
     import_department_lecturers,
     import_handbook_courses,
+    import_programmes,
 )
 
 LOGIN_ROLES = set(User.Role.values)
@@ -544,6 +547,7 @@ def sidebar_links(request):
             {"label": "Departments", "url_name": "portal:admin-departments"},
             {"label": "HODs", "url_name": "portal:admin-hods"},
             {"label": "Faculty", "url_name": "portal:admin-faculties"},
+            {"label": "Programmes", "url_name": "portal:admin-programmes"},
             {"label": "Academic Sessions", "url_name": "portal:admin-about"},
             {"label": "Courses", "url_name": "portal:admin-courses"},
             {
@@ -563,8 +567,8 @@ def sidebar_links(request):
             {
                 "label": "Departmental",
                 "children": [
-                    {"label": "Set Departmental Fees", "url_name": "portal:hod-departmental-fees"},
-                    {"label": "API & Documents", "url_name": "portal:hod-api-and-document"},
+                    {"label": "API and Document", "url_name": "portal:hod-api-and-document"},
+                    {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
                 ],
             },
         ]
@@ -676,6 +680,7 @@ def dashboard_context(request, title, **extra):
         "section_title": title,
         "sidebar_links": sidebar_links(request),
         "active_role": selected_role,
+        "active_role_label": User.Role(selected_role).label if selected_role else "Administrator",
         "selectable_roles": selectable_roles,
     }
     context.update(extra)
@@ -1329,6 +1334,10 @@ def portal_login(request, role=None):
 
     _clear_failed_logins(request, username)
     login(request, user)
+    # HOD is an additive responsibility of a lecturer account.  Retain the
+    # role used at sign-in so the HOD workspace and Departmental submenu do
+    # not incorrectly fall back to the lecturer navigation.
+    request.session["active_role"] = active_role
     AuditLog.objects.create(
         institution=user.institution,
         user=user,
@@ -2392,11 +2401,13 @@ def billing_overview(request):
     institution = getattr(request, "institution", None)
     if institution is None:
         raise PermissionDenied
-    return render(request, "portal/billing_overview.html", {
-        "subscription": institution.current_subscription,
-        "payments": Payment.objects.filter(institution=institution).select_related("plan")[:30],
-        "plans": SubscriptionPlan.objects.filter(is_active=True),
-    })
+    return render(request, "portal/billing_overview.html", dashboard_context(
+        request,
+        "Subscription & Billing",
+        subscription=institution.current_subscription,
+        payments=Payment.objects.filter(institution=institution).select_related("plan")[:30],
+        plans=SubscriptionPlan.objects.filter(is_active=True),
+    ))
 
 
 @role_required(User.Role.ADMIN)
@@ -2420,7 +2431,12 @@ def billing_renew(request):
                 return redirect(checkout["authorization_url"])
             except ValueError as exc:
                 form.add_error(None, str(exc))
-    return render(request, "portal/billing_renew.html", {"form": form, "institution": institution})
+    return render(request, "portal/billing_renew.html", dashboard_context(
+        request,
+        "Renew Subscription",
+        form=form,
+        institution=institution,
+    ))
 
 
 @role_required(User.Role.ADMIN)
@@ -4422,18 +4438,63 @@ def admin_faculties(request):
     return render(request, "portal/admin_faculties.html", dashboard_context(request, "Manage Faculties", form=form, faculties=faculties))
 
 
-@role_required(User.Role.LECTURER, User.Role.HOD)
+@role_required(User.Role.ADMIN)
 @require_http_methods(["GET", "POST"])
 def admin_programmes(request):
-    """Compatibility endpoint for old programme URLs.
+    """Maintain this institution's programme catalogue by faculty and department."""
+    institution = request.institution or request.user.institution
+    if institution is None:
+        raise PermissionDenied("An institution context is required to manage programmes.")
 
-    Programme administration belongs to the HOD.  Keep the old URL name so
-    existing bookmarks do not become broken links, but send an authorised HOD
-    to the department-scoped programme workspace instead of exposing a second
-    institution-wide management surface.
-    """
-    hod_department_for(request)
-    return redirect("portal:hod-programmes")
+    form = ProgrammeForm(prefix="programme", institution=institution)
+    import_form = ProgrammeImportForm(institution=institution)
+    if request.method == "POST":
+        if request.POST.get("action") == "upload-programmes":
+            import_form = ProgrammeImportForm(request.POST, request.FILES, institution=institution)
+            if import_form.is_valid():
+                department = import_form.cleaned_data["department"]
+                if department.institution_id != institution.id:
+                    raise PermissionDenied("You can only import programmes for your institution.")
+                try:
+                    summary = import_programmes(import_form.cleaned_data["file"], department)
+                except ValueError as exc:
+                    import_form.add_error("file", str(exc))
+                else:
+                    AuditLog.objects.create(
+                        institution=institution, user=request.user, action="programmes_imported",
+                        object_type="Programme", object_id=str(department.pk),
+                        new_value={"department_id": department.id, "file_name": import_form.cleaned_data["file"].name},
+                        description=summary, ip_address=_client_ip(request),
+                    )
+                    messages.success(request, summary)
+                    return redirect("portal:admin-programmes")
+        else:
+            form = ProgrammeForm(request.POST, prefix="programme", institution=institution)
+            if form.is_valid():
+                programme = form.save(commit=False)
+                programme.institution = institution
+                programme.full_clean()
+                programme.save()
+                AuditLog.objects.create(
+                    institution=institution, user=request.user, action="programme_created",
+                    object_type="Programme", object_id=str(programme.pk),
+                    new_value={"code": programme.code, "department": programme.department.code},
+                    description="Institution Admin created a programme.", ip_address=_client_ip(request),
+                )
+                messages.success(request, "Programme created.")
+                return redirect("portal:admin-programmes")
+
+    programmes = Programme.objects.filter(institution=institution).select_related("department", "department__faculty")
+    return render(request, "portal/admin_programmes.html", dashboard_context(
+        request,
+        "Programmes",
+        form=form,
+        import_form=import_form,
+        programmes=programmes,
+        programme_departments=list(
+            Department.objects.filter(institution=institution).values("id", "name", "faculty_id")
+        ),
+    ))
 
 
 @role_required(User.Role.ADMIN)

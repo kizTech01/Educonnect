@@ -1,0 +1,66 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Programmes | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>Add programme</h2></div>
+    <p class="muted-note">Create a programme for a department in {{ institution.name }}. Students will see only programmes in their selected department.</p>
+    <form method="post" class="form-grid">
+        {% csrf_token %}
+        {% for field in form %}<label>{{ field.label }} {{ field }}{{ field.errors }}</label>{% endfor %}
+        {{ form.non_field_errors }}
+        <button class="primary-btn" type="submit">Add programme</button>
+    </form>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>Import programmes</h2></div>
+    <p class="muted-note">Choose the faculty and department, then upload a CSV, XLSX, DOCX, PDF, TXT, or image programme list. The selected department is always authoritative.</p>
+    <form method="post" enctype="multipart/form-data" class="form-grid">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="upload-programmes">
+        {% for field in import_form %}<label>{{ field.label }} {{ field }}{{ field.errors }}</label>{% endfor %}
+        {{ import_form.non_field_errors }}
+        <button class="primary-btn" type="submit">Import programmes</button>
+    </form>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>Programme catalogue</h2></div>
+    {% if programmes %}
+        <div class="table-wrap"><table>
+            <thead><tr><th>Code</th><th>Programme</th><th>Department</th><th>Award</th><th>Duration</th><th>Status</th></tr></thead>
+            <tbody>{% for programme in programmes %}<tr><td>{{ programme.code }}</td><td>{{ programme.name }}</td><td>{{ programme.department.name }}</td><td>{{ programme.award|default:"—" }}</td><td>{{ programme.duration_years }} year{{ programme.duration_years|pluralize }}</td><td>{% if programme.is_active %}Active{% else %}Inactive{% endif %}</td></tr>{% endfor %}</tbody>
+        </table></div>
+    {% else %}
+        <p class="muted-note">No programmes have been created for this institution.</p>
+    {% endif %}
+</section>
+
+{{ programme_departments|json_script:"programme-departments" }}
+<script>
+(() => {
+  const dataNode = document.getElementById("programme-departments");
+  if (!dataNode) return;
+  const departments = JSON.parse(dataNode.textContent);
+  for (const prefix of ["programme", "import"]) {
+    const faculty = document.getElementById(`id_${prefix}-faculty`);
+    const department = document.getElementById(`id_${prefix}-department`);
+    if (!faculty || !department) continue;
+    const chosen = department.value;
+    const updateDepartments = () => {
+      const previous = department.value;
+      department.replaceChildren(new Option("Select a department", ""));
+      if (!faculty.value) { department.disabled = true; return; }
+      department.disabled = false;
+      departments
+        .filter(item => String(item.faculty_id) === faculty.value)
+        .forEach(item => department.add(new Option(item.name, item.id, false, String(item.id) === previous || String(item.id) === chosen)));
+    };
+    faculty.addEventListener("change", updateDepartments);
+    updateDepartments();
+  }
+})();
+</script>
+{% endblock %}

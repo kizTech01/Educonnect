@@ -779,6 +779,26 @@ textarea {
     padding: 0.6rem 0.9rem;
 }
 
+.role-switcher {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: white;
+    border-radius: 999px;
+    box-shadow: var(--shadow);
+    padding: 0.35rem 0.7rem;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.role-switcher select {
+    border: 0;
+    background: transparent;
+    color: var(--secondary);
+    font: inherit;
+    cursor: pointer;
+}
+
 .metrics {
     grid-template-columns: repeat(4, 1fr);
     margin-bottom: 1.5rem;

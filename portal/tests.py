@@ -7,6 +7,7 @@ from decimal import Decimal
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from django.conf import settings
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError
@@ -941,23 +942,49 @@ class DashboardAndCourseFlowTests(TestCase):
             ["View APIs", "View Fees", "Students"],
         )
 
-    def test_programme_workspace_is_hod_only_and_admin_menu_does_not_expose_it(self):
-        programme = Programme.objects.create(
-            department=self.department,
-            name="Computer Science",
-            code="BSC-CS",
-            award="BSc",
-        )
+    def test_admin_can_manage_programmes_while_hod_has_its_department_workspace(self):
         self.department.head_of_department = self.lecturer
         self.department.save(update_fields=["head_of_department", "updated_at"])
 
         admin_request = self.factory.get(reverse("portal:admin-dashboard"))
         admin_request.user = self.admin
         admin_request.resolver_match = None
-        self.assertNotIn("Programmes", [item["label"] for item in sidebar_links(admin_request)])
+        self.assertIn("Programmes", [item["label"] for item in sidebar_links(admin_request)])
 
         self.client.force_login(self.admin)
-        self.assertEqual(self.client.get(reverse("portal:admin-programmes")).status_code, 403)
+        created = self.client.post(
+            reverse("portal:admin-programmes"),
+            {
+                "programme-faculty": self.department.faculty_id,
+                "programme-department": self.department.id,
+                "programme-name": "Computer Science",
+                "programme-code": "BSC-CS",
+                "programme-award": "BSc",
+                "programme-duration_years": 4,
+                "programme-is_active": "on",
+            },
+        )
+        self.assertRedirects(created, reverse("portal:admin-programmes"))
+        programme = Programme.objects.get(code="BSC-CS")
+        self.assertEqual(programme.department, self.department)
+        self.assertTrue(AuditLog.objects.filter(action="programme_created", user=self.admin).exists())
+
+        institution = Institution.objects.create(
+            name="Programme University",
+            institution_code="PROGRAMMES",
+            email="admin@programmes.example.test",
+            subdomain="programmes",
+            status=Institution.Status.ACTIVE,
+        )
+        self.admin.institution = institution
+        self.admin.save(update_fields=["institution"])
+        billing = self.client.get(
+            reverse("portal:billing-overview"),
+            HTTP_HOST=f"{institution.subdomain}.{settings.CORE_DOMAIN}",
+        )
+        self.assertEqual(billing.status_code, 200)
+        self.assertContains(billing, reverse("portal:admin-programmes"))
+        self.assertContains(billing, "Subscription &amp; Billing", html=False)
 
         self.client.force_login(self.lecturer)
         workspace = self.client.get(reverse("portal:hod-programmes"))
@@ -969,6 +996,26 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.client.force_login(self.student)
         self.assertEqual(self.client.get(reverse("portal:hod-programmes")).status_code, 403)
+
+    def test_hod_login_keeps_the_departmental_submenu_visible(self):
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        RoleAssignment.objects.create(
+            institution=self.lecturer.institution,
+            user=self.lecturer,
+            role=User.Role.HOD,
+            department=self.department,
+        )
+
+        response = self.client.post(
+            reverse("portal:role-login", kwargs={"role": User.Role.HOD}),
+            {"role": User.Role.HOD, "username": self.lecturer.username, "password": "pass1234"},
+        )
+
+        self.assertRedirects(response, reverse("portal:dashboard"), fetch_redirect_response=False)
+        page = self.client.get(reverse("portal:hod-api-and-document"))
+        self.assertContains(page, "API and Document")
+        self.assertContains(page, "Set Fee")
 
     def test_student_must_select_a_programme_when_the_department_offers_one(self):
         programme = Programme.objects.create(
@@ -1037,7 +1084,7 @@ class DashboardAndCourseFlowTests(TestCase):
         departmental_menu = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
         self.assertEqual(
             [item["label"] for item in departmental_menu["children"]],
-            ["Set Departmental Fees", "API & Documents"],
+            ["API and Document", "Set Fee"],
         )
         self.assertNotIn("Timetable and Handbook", labels)
 

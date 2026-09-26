@@ -42,6 +42,7 @@ urlpatterns = [
     path("billing/receipts/<int:payment_id>/", views.billing_receipt, name="billing-receipt"),
     path("logout/", views.portal_logout, name="logout"),
     path("dashboard/", views.dashboard_redirect, name="dashboard"),
+    path("switch-role/", views.switch_role, name="switch-role"),
     path("workspace/", views.role_workspace, name="role-workspace"),
     path("workspace/<slug:module>/", views.role_module, name="role-module"),
     path("profile/", views.profile, name="profile"),
