@@ -154,9 +154,9 @@ class CoursePaymentGatewayAdmin(admin.ModelAdmin):
 
 @admin.register(Timetable)
 class TimetableAdmin(admin.ModelAdmin):
-    list_display = ("title", "department", "level", "academic_session", "semester")
-    list_filter = ("department", "level", "semester", "academic_session")
-    search_fields = ("title", "department__name")
+    list_display = ("title", "department", "programme", "level", "academic_session", "semester")
+    list_filter = ("department", "programme", "level", "semester", "academic_session")
+    search_fields = ("title", "department__name", "programme__name", "programme__code")
 
 
 @admin.register(Handbook)

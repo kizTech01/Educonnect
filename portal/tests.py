@@ -49,6 +49,7 @@ from .models import (
     LecturerCourseRegistration,
     Programme,
     StudentCourseRegistration,
+    Timetable,
     User,
     UserAlert,
     RoleAssignment,
@@ -1278,8 +1279,77 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Upload Timetable")
+        self.assertContains(response, "Programme")
         self.assertNotContains(response, "Upload Handbook")
         self.assertContains(response, "Filter Handbooks")
+
+    def test_timetable_programme_upload_filter_and_student_access(self):
+        programme = Programme.objects.create(
+            department=self.department,
+            name="Computer Science",
+            code="BSC-CS",
+        )
+        other_programme = Programme.objects.create(
+            department=self.department,
+            name="Software Engineering",
+            code="BSC-SE",
+        )
+        self.student.programme = programme
+        self.student.save(update_fields=["programme"])
+        timetable = Timetable.objects.create(
+            department=self.department,
+            programme=programme,
+            title="Computer Science 100 first Timetable",
+            academic_session="2026/2027",
+            semester=Course.Semester.FIRST,
+            level="100",
+            file=SimpleUploadedFile("cs-timetable.pdf", b"programme timetable", content_type="application/pdf"),
+        )
+        other_timetable = Timetable.objects.create(
+            department=self.department,
+            programme=other_programme,
+            title="Software Engineering 100 first Timetable",
+            academic_session="2026/2027",
+            semester=Course.Semester.FIRST,
+            level="100",
+            file=SimpleUploadedFile("se-timetable.pdf", b"other programme timetable", content_type="application/pdf"),
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("portal:student-documents"))
+
+        self.assertContains(response, "Programme")
+        self.assertContains(
+            response,
+            reverse("portal:download-document", args=["timetable", timetable.id]),
+        )
+        self.assertNotContains(response, other_timetable.title)
+        self.assertEqual(
+            self.client.get(reverse("portal:download-document", args=["timetable", other_timetable.id])).status_code,
+            403,
+        )
+
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            reverse("portal:admin-documents"),
+            {
+                "action": "create-timetable",
+                "department": self.department.id,
+                "programme": programme.id,
+                "semester": Course.Semester.SECOND,
+                "level": "200",
+                "file": SimpleUploadedFile("new-timetable.pdf", b"new timetable", content_type="application/pdf"),
+            },
+        )
+        self.assertRedirects(response, reverse("portal:admin-documents"))
+        self.assertTrue(Timetable.objects.filter(programme=programme, level="200").exists())
+
+    def test_admin_users_page_does_not_offer_institutional_staff_creation(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(reverse("portal:admin-users"))
+
+        self.assertNotContains(response, "Add Institutional Staff")
+        self.assertNotContains(response, 'value="create-staff"', html=False)
 
     def test_lecturer_users_page_lists_departmental_students_only(self):
         self.client.force_login(self.lecturer)

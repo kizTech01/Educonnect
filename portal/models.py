@@ -1153,6 +1153,19 @@ class DepartmentDocument(TimeStampedModel):
 
 class Timetable(DepartmentDocument):
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES)
+    # Blank keeps existing department-wide timetables available to every
+    # programme in that department.
+    programme = models.ForeignKey(
+        "Programme",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="timetables",
+    )
+
+    def clean(self):
+        if self.programme_id and self.department_id and self.programme.department_id != self.department_id:
+            raise ValidationError({"programme": "The timetable programme must belong to its department."})
 
 
 class Handbook(DepartmentDocument):

@@ -77,7 +77,6 @@ from .forms import (
     StudentCourseFilterForm,
     StudentProfileForm,
     StudentUserForm,
-    StaffUserForm,
     StudentSignupForm,
     TimetableFilterForm,
     TimetableForm,
@@ -2632,14 +2631,17 @@ def _append_querystring(url, request):
 
 def _filtered_timetables(request, prefix="tt"):
     form = TimetableFilterForm(request.GET or None, prefix=prefix)
-    queryset = Timetable.objects.select_related("department")
+    queryset = Timetable.objects.select_related("department", "programme")
     if form.is_valid():
         department = form.cleaned_data.get("department")
+        programme = form.cleaned_data.get("programme")
         semester = form.cleaned_data.get("semester")
         level = form.cleaned_data.get("level")
         search = form.cleaned_data.get("search")
         if department:
             queryset = queryset.filter(department=department)
+        if programme:
+            queryset = queryset.filter(programme=programme)
         if semester:
             queryset = queryset.filter(semester=semester)
         if level:
@@ -3249,9 +3251,15 @@ def student_documents(request):
     if request.user.department_id:
         timetable_filter_form.fields["department"].queryset = Department.objects.filter(id=request.user.department_id)
         timetable_filter_form.fields["department"].initial = request.user.department_id
+        timetable_filter_form.fields["programme"].queryset = Programme.objects.filter(
+            pk=request.user.programme_id,
+            is_active=True,
+        )
         handbook_filter_form.fields["department"].queryset = Department.objects.filter(id=request.user.department_id)
         handbook_filter_form.fields["department"].initial = request.user.department_id
-        timetables = timetables.filter(department=request.user.department)
+        timetables = timetables.filter(department=request.user.department).filter(
+            Q(programme__isnull=True) | Q(programme=request.user.programme)
+        )
         handbooks = handbooks.filter(department=request.user.department)
     context = dashboard_context(
         request,
@@ -4736,7 +4744,6 @@ def admin_delete_material(request, material_id):
 def admin_users(request):
     student_form = StudentUserForm(prefix="student")
     lecturer_form = LecturerUserForm(prefix="lecturer")
-    staff_form = StaffUserForm(prefix="staff")
     search = request.GET.get("search", "").strip()
     students = User.objects.filter(role=User.Role.STUDENT).select_related("department")
     lecturers = User.objects.filter(role=User.Role.LECTURER).select_related("department")
@@ -4756,31 +4763,11 @@ def admin_users(request):
                 lecturer_form.save()
                 messages.success(request, "Lecturer account created and marked pending approval.")
                 return redirect(_redirect_with_query(request, "portal:admin-users"))
-        elif action == "create-staff":
-            staff_form = StaffUserForm(request.POST, prefix="staff")
-            if staff_form.is_valid():
-                user = staff_form.save()
-                assigned_role = staff_form.cleaned_data["assigned_role"]
-                RoleAssignment.objects.get_or_create(
-                    institution=request.institution, user=user, role=assigned_role,
-                    department=user.department, defaults={"assigned_by": request.user},
-                )
-                if assigned_role == User.Role.HOD:
-                    user.department.head_of_department = user
-                    user.department.save(update_fields=["head_of_department"])
-                AuditLog.objects.create(
-                    institution=request.institution, user=request.user, action="staff_role_assigned",
-                    object_type="User", object_id=str(user.pk), new_value={"role": assigned_role},
-                    description="Institution Admin created a staff account and assigned an institutional role.", ip_address=_client_ip(request),
-                )
-                messages.success(request, f"Staff account created with the {User.Role(assigned_role).label} role.")
-                return redirect(_redirect_with_query(request, "portal:admin-users"))
     context = dashboard_context(
         request,
         "Manage Users",
         student_form=student_form,
         lecturer_form=lecturer_form,
-        staff_form=staff_form,
         students=students,
         lecturers=lecturers,
     )
@@ -5039,9 +5026,12 @@ def download_notification_attachment(request, attachment_id):
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
 def download_document(request, kind, document_id):
     model = Timetable if kind == "timetable" else Handbook
-    document = get_object_or_404(model.objects.select_related("department"), pk=document_id)
-    if request.user.role == User.Role.STUDENT and request.user.department_id != document.department_id:
-        raise PermissionDenied
+    document = get_object_or_404(model.objects.select_related("department", "programme"), pk=document_id)
+    if request.user.role == User.Role.STUDENT:
+        if request.user.department_id != document.department_id:
+            raise PermissionDenied
+        if kind == "timetable" and document.programme_id and document.programme_id != request.user.programme_id:
+            raise PermissionDenied
     if not document.file:
         raise Http404
     return FileResponse(document.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=document.file.name.rsplit("/", 1)[-1])

@@ -615,6 +615,7 @@ class CourseBrowseFilterForm(forms.Form):
 
 class TimetableFilterForm(forms.Form):
     department = forms.ModelChoiceField(queryset=Department.objects.all(), required=False)
+    programme = forms.ModelChoiceField(queryset=Programme.objects.none(), required=False)
     semester = forms.ChoiceField(
         choices=SEMESTER_FILTER_CHOICES,
         required=False,
@@ -625,6 +626,8 @@ class TimetableFilterForm(forms.Form):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["department"].queryset = Department.objects.all()
+        self.fields["programme"].queryset = Programme.objects.filter(is_active=True)
+        self.fields["programme"].empty_label = "All programmes"
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 
@@ -647,15 +650,24 @@ class LecturerCourseFilterForm(forms.Form):
 class TimetableForm(StyledModelForm):
     class Meta:
         model = Timetable
-        fields = ["department", "semester", "level", "file"]
+        fields = ["department", "programme", "semester", "level", "file"]
         widgets = {
             "semester": forms.Select(choices=Course.Semester.choices),
             "level": forms.Select(choices=LEVEL_CHOICES),
         }
 
+    def clean(self):
+        cleaned = super().clean()
+        programme = cleaned.get("programme")
+        department = cleaned.get("department")
+        if programme and department and programme.department_id != department.id:
+            self.add_error("programme", "Choose a programme under the selected department.")
+        return cleaned
+
     def save(self, commit=True):
         timetable = super().save(commit=False)
-        timetable.title = f"{timetable.department.name} {timetable.level} {timetable.semester} Timetable".strip()
+        owner = timetable.programme.name if timetable.programme_id else timetable.department.name
+        timetable.title = f"{owner} {timetable.level} {timetable.semester} Timetable".strip()
         year = date.today().year
         timetable.academic_session = f"{year}/{year + 1}"
         timetable.description = ""
@@ -956,35 +968,6 @@ class LecturerUserForm(BaseUserForm):
         user = super().save(commit=False)
         user.role = User.Role.LECTURER
         user.is_approved = False
-        if commit:
-            user.save()
-        return user
-
-
-class StaffUserForm(BaseUserForm):
-    """Institution-admin staff creation without exposing platform privileges."""
-    STAFF_ROLES = [
-        User.Role.MIS, User.Role.BURSARY, User.Role.ADMISSION_OFFICER,
-        User.Role.ACADEMIC_PLANNING, User.Role.HOD, User.Role.LECTURER,
-        User.Role.SENATE_MEMBER,
-    ]
-    assigned_role = forms.ChoiceField(choices=[(role, User.Role(role).label) for role in STAFF_ROLES])
-
-    class Meta(BaseUserForm.Meta):
-        fields = [field for field in BaseUserForm.Meta.fields if field not in {"level", "programme"}]
-
-    def clean(self):
-        cleaned = super().clean()
-        if cleaned.get("assigned_role") == User.Role.HOD and not cleaned.get("department"):
-            self.add_error("department", "An HOD must be assigned to a department.")
-        return cleaned
-
-    def save(self, commit=True):
-        user = super().save(commit=False)
-        selected = self.cleaned_data["assigned_role"]
-        # HOD is an additional academic responsibility of a lecturer.
-        user.role = User.Role.LECTURER if selected == User.Role.HOD else selected
-        user.is_approved = selected != User.Role.LECTURER
         if commit:
             user.save()
         return user

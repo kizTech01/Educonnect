@@ -12,6 +12,7 @@
             {% csrf_token %}
             <input type="hidden" name="action" value="create-timetable">
             <label>Department {{ timetable_form.department }} {{ timetable_form.department.errors }}</label>
+            <label>Programme {{ timetable_form.programme }} {{ timetable_form.programme.errors }}</label>
             <label>Semester {{ timetable_form.semester }} {{ timetable_form.semester.errors }}</label>
             <label>Level {{ timetable_form.level }} {{ timetable_form.level.errors }}</label>
             <label>Timetable file {{ timetable_form.file }} {{ timetable_form.file.errors }}</label>
@@ -24,6 +25,7 @@
         </div>
         <form method="get" class="stack-form">
             <label>Department {{ timetable_filter_form.department }}</label>
+            <label>Programme {{ timetable_filter_form.programme }}</label>
             <label>Semester {{ timetable_filter_form.semester }}</label>
             <label>Level {{ timetable_filter_form.level }}</label>
             <label>Search {{ timetable_filter_form.search }}</label>
@@ -41,6 +43,7 @@
             <thead>
                 <tr>
                     <th>Department</th>
+                    <th>Programme</th>
                     <th>Semester</th>
                     <th>Level</th>
                     <th>Title</th>
@@ -51,6 +54,7 @@
                 {% for item in timetables %}
                     <tr>
                         <td>{{ item.department.name }}</td>
+                        <td>{{ item.programme.name|default:"Department-wide" }}</td>
                         <td>{{ item.get_semester_display }}</td>
                         <td>{{ item.level|default:"-" }}</td>
                         <td>{{ item.title }}</td>
@@ -58,7 +62,7 @@
                     </tr>
                 {% empty %}
                     <tr>
-                        <td colspan="5">No timetable documents uploaded.</td>
+                        <td colspan="6">No timetable documents uploaded.</td>
                     </tr>
                 {% endfor %}
             </tbody>

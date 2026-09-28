@@ -10,6 +10,7 @@
         </div>
         <form method="get" class="stack-form">
             <label>Department {{ timetable_filter_form.department }}</label>
+            <label>Programme {{ timetable_filter_form.programme }}</label>
             <label>Semester {{ timetable_filter_form.semester }}</label>
             <label>Level {{ timetable_filter_form.level }}</label>
             <label>Search {{ timetable_filter_form.search }}</label>
@@ -39,6 +40,7 @@
                 <thead>
                     <tr>
                         <th>Department</th>
+                        <th>Programme</th>
                         <th>Semester</th>
                         <th>Level</th>
                         <th>Session</th>
@@ -49,6 +51,7 @@
                     {% for item in timetables %}
                         <tr>
                             <td>{{ item.department.name }}</td>
+                            <td>{{ item.programme.name|default:"Department-wide" }}</td>
                             <td>{{ item.get_semester_display }}</td>
                             <td>{{ item.level|default:"-" }}</td>
                             <td>{{ item.academic_session }}</td>
@@ -56,7 +59,7 @@
                         </tr>
                     {% empty %}
                         <tr>
-                            <td colspan="5">No timetable uploaded yet.</td>
+                            <td colspan="6">No timetable uploaded yet.</td>
                         </tr>
                     {% endfor %}
                 </tbody>
