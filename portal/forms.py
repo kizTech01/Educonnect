@@ -529,6 +529,7 @@ class LecturerCourseUpdateForm(CourseDetailsForm):
 
 class StudentCourseFilterForm(forms.Form):
     department = forms.ModelChoiceField(queryset=Department.objects.all(), required=False)
+    programme = forms.ModelChoiceField(queryset=Programme.objects.none(), required=False)
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
     search = forms.CharField(required=False)
 
@@ -541,6 +542,11 @@ class StudentCourseFilterForm(forms.Form):
                 if student.department_id
                 else Department.objects.none()
             )
+            self.fields["programme"].queryset = Programme.objects.filter(
+                department_id=student.department_id,
+                is_active=True,
+            ) if student.department_id else Programme.objects.none()
+        self.fields["programme"].empty_label = "All programmes"
         self.fields["search"].widget.attrs["placeholder"] = "Course code, title, or lecturer"
         for field in self.fields.values():
             if not isinstance(field.widget, forms.HiddenInput):
@@ -593,6 +599,7 @@ class CourseBrowseFilterForm(forms.Form):
     )
 
     department = forms.ModelChoiceField(queryset=Department.objects.all(), required=False)
+    programme = forms.ModelChoiceField(queryset=Programme.objects.none(), required=False)
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
     fee_type = forms.ChoiceField(choices=FEE_TYPE_CHOICES, required=False)
     search = forms.CharField(required=False)
@@ -600,6 +607,8 @@ class CourseBrowseFilterForm(forms.Form):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["department"].queryset = Department.objects.all()
+        self.fields["programme"].queryset = Programme.objects.filter(is_active=True)
+        self.fields["programme"].empty_label = "All programmes"
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 
@@ -622,12 +631,15 @@ class TimetableFilterForm(forms.Form):
 
 class LecturerCourseFilterForm(forms.Form):
     department = forms.ModelChoiceField(queryset=Department.objects.all(), required=False)
+    programme = forms.ModelChoiceField(queryset=Programme.objects.none(), required=False)
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
     search = forms.CharField(required=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["department"].queryset = Department.objects.all()
+        self.fields["programme"].queryset = Programme.objects.filter(is_active=True)
+        self.fields["programme"].empty_label = "All programmes"
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 

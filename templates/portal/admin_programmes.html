@@ -28,13 +28,17 @@
 
 <section class="panel-card">
     <div class="panel-head"><h2>Programme catalogue</h2></div>
+    <form method="get" class="stack-form">
+        <label>Search programmes <input class="input-field" type="search" name="search" value="{{ programme_search }}" placeholder="Programme name, code, department, or award"></label>
+        <button class="primary-btn" type="submit">Search</button>
+    </form>
     {% if programmes %}
         <div class="table-wrap"><table>
             <thead><tr><th>Code</th><th>Programme</th><th>Department</th><th>Award</th><th>Duration</th><th>Status</th></tr></thead>
             <tbody>{% for programme in programmes %}<tr><td>{{ programme.code }}</td><td>{{ programme.name }}</td><td>{{ programme.department.name }}</td><td>{{ programme.award|default:"—" }}</td><td>{{ programme.duration_years }} year{{ programme.duration_years|pluralize }}</td><td>{% if programme.is_active %}Active{% else %}Inactive{% endif %}</td></tr>{% endfor %}</tbody>
         </table></div>
     {% else %}
-        <p class="muted-note">No programmes have been created for this institution.</p>
+        <p class="muted-note">{% if programme_search %}No programmes match your search.{% else %}No programmes have been created for this institution.{% endif %}</p>
     {% endif %}
 </section>
 

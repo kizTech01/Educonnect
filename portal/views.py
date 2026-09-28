@@ -492,7 +492,10 @@ ROLE_MODULES = {
     User.Role.BURSARY: (("Payments", "payments"), ("Outstanding Balances", "balances"), ("Finance Reports", "reports")),
     User.Role.ADMISSION_OFFICER: (("Applications", "applications"), ("Admission Reports", "reports")),
     User.Role.ACADEMIC_PLANNING: (("Academic Structure", "academic-structure"), ("Course Catalogue", "courses"), ("Curriculum Reports", "reports")),
-    User.Role.HOD: (("Students", "students"), ("Lecturers", "lecturers"), ("Courses", "courses"), ("My Assigned Courses", "my-courses"), ("Course Allocation", "allocations"), ("All Results", "results"), ("Reports", "reports"), ("Exam Officer", "exam-officer")),
+    # HOD is an additional responsibility for a lecturer, not a second
+    # day-to-day workspace. The HOD-specific navigation is assembled with the
+    # lecturer menu in ``sidebar_links`` below.
+    User.Role.HOD: (("Lecturers", "lecturers"),),
     User.Role.EXAM_OFFICER: (("Exam Eligibility", "eligibility"), ("Course Registrations", "registrations"), ("Exam Cards", "exam-cards"), ("All Results", "results"), ("Reports", "reports")),
     User.Role.SENATE_MEMBER: (("Academic Reports", "reports"), ("Course Catalogue", "courses")),
     User.Role.PARENT_GUARDIAN: (("Linked Students", "linked-students"), ("Academic Progress", "progress"), ("Payments", "payments")),
@@ -504,6 +507,11 @@ def active_role(request):
     if not request.user.is_authenticated or request.user.is_superuser:
         return None
     roles = request.user.active_roles()
+    # A lecturer who is appointed HOD keeps one lecturer workspace.  This
+    # also repairs existing browser sessions that still hold ``active_role``
+    # as ``hod`` from the previous role-switching UI.
+    if User.Role.LECTURER in roles and User.Role.HOD in roles:
+        return User.Role.LECTURER
     # RequestFactory-based integrations and a few internal callers do not add
     # SessionMiddleware.  They should fall back to the primary role just as a
     # newly authenticated browser session does.
@@ -569,21 +577,11 @@ def sidebar_links(request):
                 "children": [
                     {"label": "API and Document", "url_name": "portal:hod-api-and-document"},
                     {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
+                    {"label": "Students", "url_name": "portal:hod-department-students"},
+                    {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
                 ],
             },
         ]
-        for label, slug in ROLE_MODULES[User.Role.HOD]:
-            links.append(
-                {"label": label, "url_name": "portal:hod-exam-officer"}
-                if slug == "exam-officer"
-                else {"label": label, "url_name": "portal:department-all-results"}
-                if slug == "results"
-                else {"label": label, "url_name": "portal:hod-reports"}
-                if slug == "reports"
-                else {"label": label, "url_name": "portal:lecturer-courses"}
-                if slug == "my-courses"
-                else {"label": label, "url_name": "portal:role-module", "kwargs": {"module": slug}}
-            )
     elif selected_role == User.Role.EXAM_OFFICER:
         links = [{"label": "Dashboard", "url_name": "portal:lecturer-dashboard"}]
         links.extend(
@@ -616,6 +614,12 @@ def sidebar_links(request):
         ]
         if getattr(request.user, "headed_department", None) or request.user.has_role(User.Role.HOD):
             links.insert(1, {"label": "Programmes", "url_name": "portal:hod-programmes"})
+            departmental_links[:] = [
+                {"label": "API and Document", "url_name": "portal:hod-api-and-document"},
+                {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
+                {"label": "Students", "url_name": "portal:hod-department-students"},
+                {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
+            ]
         links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
     elif selected_role in ROLE_MODULES:
         links = [
@@ -634,8 +638,6 @@ def sidebar_links(request):
             {"label": "Dashboard", "url_name": "portal:student-dashboard"},
             {"label": "Departmental", "url_name": "portal:student-departmental"},
             {"label": "Course Registration", "url_name": "portal:student-courses"},
-            {"label": "Results", "url_name": "portal:student-results"},
-            {"label": "Accommodation", "url_name": "portal:student-accommodation"},
             {"label": "Messages", "url_name": "portal:student-messages", "badge_count": unread_message_count},
             {"label": "Timetable and Handbook", "url_name": "portal:student-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
@@ -675,6 +677,7 @@ def dashboard_context(request, title, **extra):
         selectable_roles = [
             (value, User.Role(value).label)
             for value in sorted(request.user.active_roles())
+            if not (value == User.Role.HOD and request.user.has_role(User.Role.LECTURER))
         ]
     context = {
         "section_title": title,
@@ -938,11 +941,13 @@ def current_departmental_session():
 
 
 def reset_lecturer_course_registrations():
-    """Clear teaching assignments so a new session starts with fresh allocations."""
+    """Clear all live course registrations so a new session starts cleanly."""
     registration_count = LecturerCourseRegistration.objects.count()
+    student_registration_count = StudentCourseRegistration.objects.count()
     LecturerCourseRegistration.objects.all().delete()
+    StudentCourseRegistration.objects.all().delete()
     Course.objects.exclude(lecturer__isnull=True).update(lecturer=None)
-    return registration_count
+    return registration_count, student_registration_count
 
 
 def current_departmental_semester_label(reference_time=None):
@@ -1148,18 +1153,9 @@ def _student_curriculum(user):
         user.curriculum_id and user.curriculum.department_id == user.department_id
         and user.curriculum.programme_id == user.programme_id
     ):
-        # Keep cohorts fixed within a session. A curriculum published for a
-        # newly current session takes effect for its students.
-        if not current_session or user.curriculum.effective_session_id == current_session.id:
-            return user.curriculum
-        replacement = (
-            curriculum_for_programme(user.programme, current_session)
-            if user.programme_id else curriculum_for_department(user.department, current_session)
-        )
-        if replacement and replacement.effective_session_id == current_session.id:
-            user.curriculum = replacement
-            user.save(update_fields=["curriculum"])
-            return replacement
+        # A curriculum is assigned when the student joins a department or
+        # programme.  It remains their cohort's version even after a later
+        # academic session publishes a replacement handbook.
         return user.curriculum
     curriculum = (
         curriculum_for_programme(user.programme, current_departmental_session())
@@ -1175,10 +1171,9 @@ def _student_course_catalog_queryset(student):
     curriculum = _student_curriculum(student)
     if not curriculum:
         return Course.objects.none()
-    # The many-to-many curriculum relation permits a single shared course to
-    # appear in more than one programme without exposing either programme's
-    # private courses to the other.  The FK fallback preserves pre-migration
-    # course records until they are next saved.
+    # Programmes are selected during course creation and can be used as a
+    # registration filter. Curriculum membership keeps each student's cohort
+    # catalogue stable when a later handbook is published.
     queryset = Course.objects.select_related("department", "lecturer", "curriculum").filter(
         department=student.department,
     ).filter(Q(curricula=curriculum) | Q(curricula__isnull=True, curriculum=curriculum))
@@ -1186,8 +1181,6 @@ def _student_course_catalog_queryset(student):
         queryset = queryset.filter(programmes=student.programme)
     else:
         queryset = queryset.filter(programmes__isnull=True)
-    # A student moves through the same curriculum as their level changes. Old
-    # records that predate a stored level remain browsable for compatibility.
     if student.level:
         queryset = queryset.filter(level=student.level)
     return queryset.distinct()
@@ -1466,7 +1459,9 @@ def switch_role(request):
     if not request.user.is_authenticated or request.user.is_superuser:
         raise PermissionDenied
     requested_role = request.POST.get("role", "")
-    if requested_role not in request.user.active_roles():
+    if requested_role not in request.user.active_roles() or (
+        requested_role == User.Role.HOD and request.user.has_role(User.Role.LECTURER)
+    ):
         raise PermissionDenied("You can only switch to a role assigned to your account.")
     request.session["active_role"] = requested_role
     return redirect("portal:dashboard")
@@ -2880,11 +2875,16 @@ def student_courses(request):
     catalog_is_filtered = filter_form.is_bound
     if filter_form.is_valid():
         department = filter_form.cleaned_data.get("department")
+        programme = filter_form.cleaned_data.get("programme")
         level = filter_form.cleaned_data.get("level")
         search = filter_form.cleaned_data.get("search")
-        catalog_is_filtered = bool(department or level or search)
+        catalog_is_filtered = bool(department or programme or level or search)
         if department:
             available_courses = available_courses.filter(department=department)
+        if programme:
+            available_courses = available_courses.filter(
+                Q(programmes=programme) | Q(programmes__isnull=True)
+            )
         if level:
             available_courses = available_courses.filter(level=level)
         available_courses = _search_filter(available_courses, search, "code", "title", "department__name", "lecturer__username")
@@ -3300,11 +3300,16 @@ def lecturer_courses(request):
     catalog_is_filtered = False
     if filter_form.is_valid():
         department = filter_form.cleaned_data.get("department")
+        programme = filter_form.cleaned_data.get("programme")
         level = filter_form.cleaned_data.get("level")
         search = filter_form.cleaned_data.get("search")
-        catalog_is_filtered = bool(department or level or search)
+        catalog_is_filtered = bool(department or programme or level or search)
         if department:
             available_courses = available_courses.filter(department=department)
+        if programme:
+            available_courses = available_courses.filter(
+                Q(programmes=programme) | Q(programmes__isnull=True)
+            )
         if level:
             available_courses = available_courses.filter(level=level)
         available_courses = _search_filter(available_courses, search, "code", "title", "department__name")
@@ -4029,7 +4034,7 @@ def hod_programmes(request):
 @role_required(User.Role.LECTURER, User.Role.HOD)
 @require_http_methods(["GET", "POST"])
 def hod_programme_detail(request, programme_id):
-    """Manage a programme's handbook and its exclusive/shared curriculum."""
+    """Manage a programme handbook and its student directory."""
     department = hod_department_for(request)
     programme = get_object_or_404(Programme, pk=programme_id, department=department)
     current_session = current_departmental_session()
@@ -4057,30 +4062,11 @@ def hod_programme_detail(request, programme_id):
             return redirect("portal:hod-programme-detail", programme_id=programme.pk)
         messages.error(request, "Choose a valid handbook file.")
 
-    elif request.method == "POST" and request.POST.get("action") == "share-course":
-        course = get_object_or_404(Course.objects.filter(department=department), pk=request.POST.get("course_id"))
-        course.programmes.add(programme)
-        if active_curriculum:
-            course.curricula.add(active_curriculum)
-        AuditLog.objects.create(
-            institution=request.institution, user=request.user, action="programme_course_shared",
-            object_type="Course", object_id=str(course.pk), description=f"Shared {course.code} with {programme.code}.",
-            new_value={"programme_id": programme.pk}, ip_address=_client_ip(request),
-        )
-        messages.success(request, f"{course.code} is now available to {programme.name} students in this curriculum.")
-        return redirect("portal:hod-programme-detail", programme_id=programme.pk)
-
-    programme_courses = Course.objects.filter(
-        department=department, programmes=programme,
-    ).filter(Q(curricula=active_curriculum) | Q(curricula__isnull=True, curriculum=active_curriculum)).select_related(
-        "lecturer",
-    ).prefetch_related("programmes").distinct()
-    shareable_courses = Course.objects.filter(department=department).exclude(
-        programmes=programme,
-    ).order_by("code")
     students = User.objects.filter(role=User.Role.STUDENT, programme=programme).order_by(
         "level", "last_name", "first_name", "username",
     )
+    student_search = request.GET.get("student_search", "").strip()
+    students = _search_filter(students, student_search, "first_name", "last_name", "username", "id_number")
     handbooks = Handbook.objects.filter(programme=programme).order_by("-created_at")
     return render(request, "portal/hod_programme_detail.html", dashboard_context(
         request,
@@ -4088,11 +4074,70 @@ def hod_programme_detail(request, programme_id):
         department=department,
         programme=programme,
         active_curriculum=active_curriculum,
-        programme_courses=programme_courses,
-        shareable_courses=shareable_courses,
         students=students,
+        student_search=student_search,
         handbooks=handbooks,
         handbook_form=handbook_form,
+    ))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
+def hod_programme_students_pdf(request, programme_id):
+    """Download the HOD's filtered programme student directory."""
+    department = hod_department_for(request)
+    programme = get_object_or_404(Programme, pk=programme_id, department=department)
+    student_search = request.GET.get("student_search", "").strip()
+    students = User.objects.filter(role=User.Role.STUDENT, programme=programme).order_by(
+        "last_name", "first_name", "username",
+    )
+    students = _search_filter(students, student_search, "first_name", "last_name", "username", "id_number")
+    lines = [f"{student.full_name} — {student.id_number or student.username}" for student in students]
+    pdf_bytes = build_pdf_document(
+        f"{programme.name} Student List",
+        lines or ["No matching students found."],
+        subtitle=f"Programme code: {programme.code}",
+    )
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{programme.code.lower()}-students.pdf"'
+    return response
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
+def hod_department_lecturers(request):
+    """List lecturer contact information for the signed-in HOD's department."""
+    department = hod_department_for(request)
+    search = request.GET.get("search", "").strip()
+    lecturers = User.objects.filter(department=department).filter(
+        Q(role=User.Role.LECTURER)
+        | Q(role_assignments__role=User.Role.LECTURER, role_assignments__is_active=True)
+    ).distinct().order_by("last_name", "first_name", "username")
+    lecturers = _search_filter(lecturers, search, "first_name", "last_name", "username", "id_number", "email")
+    return render(request, "portal/role_module.html", dashboard_context(
+        request,
+        "Departmental Lecturers",
+        department=department,
+        rows=list(lecturers.values_list("full_name", "id_number", "email", "phone_number")),
+        columns=("Lecturer", "Staff ID", "Email", "Phone"),
+        notice="Lecturers assigned to this department.",
+    ))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
+def hod_department_students(request):
+    """Retain the HOD's departmental student list inside the Departmental menu."""
+    department = hod_department_for(request)
+    search = request.GET.get("search", "").strip()
+    students = User.objects.filter(role=User.Role.STUDENT, department=department).order_by(
+        "level", "last_name", "first_name", "username",
+    )
+    students = _search_filter(students, search, "first_name", "last_name", "username", "id_number", "programme__name")
+    return render(request, "portal/role_module.html", dashboard_context(
+        request,
+        "Departmental Students",
+        department=department,
+        rows=list(students.values_list("full_name", "id_number", "programme__name", "level")),
+        columns=("Student", "Student ID", "Programme", "Level"),
+        notice="Students assigned to this department.",
     ))
 
 
@@ -4484,13 +4529,20 @@ def admin_programmes(request):
                 messages.success(request, "Programme created.")
                 return redirect("portal:admin-programmes")
 
+    programme_search = request.GET.get("search", "").strip()
     programmes = Programme.objects.filter(institution=institution).select_related("department", "department__faculty")
+    programmes = _search_filter(
+        programmes,
+        programme_search,
+        "name", "code", "award", "department__name", "department__code",
+    )
     return render(request, "portal/admin_programmes.html", dashboard_context(
         request,
         "Programmes",
         form=form,
         import_form=import_form,
         programmes=programmes,
+        programme_search=programme_search,
         programme_departments=list(
             Department.objects.filter(institution=institution).values("id", "name", "faculty_id")
         ),
@@ -4506,13 +4558,16 @@ def admin_about(request):
             session = session_form.save()
             for department in Department.objects.all():
                 ensure_departmental_fees_for_department(department)
-            reset_count = reset_lecturer_course_registrations() if session.is_current else 0
+            lecturer_reset_count, student_reset_count = (
+                reset_lecturer_course_registrations() if session.is_current else (0, 0)
+            )
             messages.success(
                 request,
                 f"Academic session {session.name} created"
                 + (
-                    f" and set as current. {reset_count} lecturer course registration(s) were cleared; "
-                    "students start this session with no registered courses."
+                    f" and set as current. {lecturer_reset_count} lecturer and {student_reset_count} "
+                    "student course registration(s) were cleared. Every student must make a new "
+                    "departmental payment for this session."
                     if session.is_current else "."
                 ),
             )
@@ -4587,6 +4642,7 @@ def admin_courses(request):
         edit_course=edit_course,
         edit_form=edit_form,
         courses=courses,
+        course_programmes=list(Programme.objects.filter(is_active=True).values("id", "name", "code", "department_id")),
     )
     return render(request, "portal/admin_courses.html", context)
 

@@ -1079,14 +1079,18 @@ class DashboardAndCourseFlowTests(TestCase):
         request.resolver_match = None
         request.session = {"active_role": User.Role.HOD}
         labels = [item["label"] for item in sidebar_links(request)]
-        self.assertIn("Exam Officer", labels)
-        self.assertIn("Course Allocation", labels)
+        self.assertIn("Programmes", labels)
+        self.assertIn("Register Courses", labels)
+        self.assertNotIn("Exam Officer", labels)
+        self.assertNotIn("Course Allocation", labels)
+        self.assertNotIn("All Results", labels)
+        self.assertNotIn("Reports", labels)
         departmental_menu = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
         self.assertEqual(
             [item["label"] for item in departmental_menu["children"]],
-            ["API and Document", "Set Fee"],
+            ["API and Document", "Set Fee", "Students", "Lecturers"],
         )
-        self.assertNotIn("Timetable and Handbook", labels)
+        self.assertIn("Timetable and Handbook", labels)
 
     def test_only_assigned_hod_can_update_its_departmental_api_and_fees(self):
         self.department.head_of_department = self.lecturer
@@ -2238,6 +2242,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertFalse(
             StudentCourseRegistration.objects.filter(student=self.student, session=new_session).exists()
         )
+        self.assertFalse(StudentCourseRegistration.objects.filter(student=self.student).exists())
 
         page_response = self.client.get(reverse("portal:admin-about"))
         self.assertContains(page_response, "Create Academic Session")

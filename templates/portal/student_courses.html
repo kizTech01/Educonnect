@@ -8,9 +8,10 @@
         <div class="panel-head">
             <h2>Search Courses</h2>
         </div>
-        <p class="muted-note">Courses are limited to your department, curriculum, and current level. Choose a level or enter a search term to view matching courses.</p>
+        <p class="muted-note">Courses are limited to your department and current level. Filter by programme, level, or search to find any suitable course.</p>
         <form method="get" class="stack-form">
             <label>Department {{ filter_form.department }} {{ filter_form.department.errors }}</label>
+            <label>Programme {{ filter_form.programme }} {{ filter_form.programme.errors }}</label>
             <label>Level {{ filter_form.level }} {{ filter_form.level.errors }}</label>
             <label>Search {{ filter_form.search }} {{ filter_form.search.errors }}</label>
             <button type="submit" class="primary-btn">Filter Courses</button>

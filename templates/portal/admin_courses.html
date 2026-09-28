@@ -15,12 +15,13 @@
             <label>Course title {{ form.title }} {{ form.title.errors }}</label>
             <label>Course code {{ form.code }} {{ form.code.errors }}</label>
             <label>Lecturer {{ form.lecturer }} {{ form.lecturer.errors }}</label>
+            <label>Programme(s) {{ form.programmes }} {{ form.programmes.errors }}</label>
             <label>Level {{ form.level }} {{ form.level.errors }}</label>
             <label>Semester {{ form.semester }} {{ form.semester.errors }}</label>
             <label>Course file {{ form.file }} {{ form.file.errors }}</label>
             <label>Free course {{ form.is_free }} {{ form.is_free.errors }}</label>
             <label>Amount {{ form.amount }} {{ form.amount.errors }}</label>
-            <p class="muted-note">Entering an amount marks the course as paid automatically. Leave it blank or at 0.00 for free courses.</p>
+            <p class="muted-note">Select the programme or programmes this course belongs to. Leave it empty for a department-wide course. Entering an amount marks the course as paid automatically.</p>
             <button type="submit" class="primary-btn">Save Course</button>
         </form>
     </div>
@@ -30,6 +31,7 @@
         </div>
         <form method="get" class="stack-form">
             <label>Department {{ filter_form.department }}</label>
+            <label>Programme {{ filter_form.programme }}</label>
             <label>Level {{ filter_form.level }}</label>
             <label>Fee type {{ filter_form.fee_type }}</label>
             <label>Search {{ filter_form.search }}</label>
@@ -114,4 +116,27 @@
     </form>
 </section>
 {% endif %}
+
+{{ course_programmes|json_script:"course-programmes" }}
+<script>
+(() => {
+  const dataNode = document.getElementById("course-programmes");
+  const department = document.getElementById("id_department");
+  const programmes = document.getElementById("id_programmes");
+  if (!dataNode || !department || !programmes) return;
+  const items = JSON.parse(dataNode.textContent);
+  const selected = new Set(Array.from(programmes.selectedOptions).map(option => option.value));
+  const updateProgrammes = () => {
+    const chosenDepartment = department.value;
+    programmes.replaceChildren();
+    programmes.disabled = !chosenDepartment;
+    if (!chosenDepartment) return;
+    items.filter(item => String(item.department_id) === chosenDepartment).forEach(item => {
+      programmes.add(new Option(`${item.name} (${item.code})`, item.id, selected.has(String(item.id)), selected.has(String(item.id))));
+    });
+  };
+  department.addEventListener("change", updateProgrammes);
+  updateProgrammes();
+})();
+</script>
 {% endblock %}
