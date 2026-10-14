@@ -14,7 +14,7 @@
                 <img src="{{ fallback_logo }}" alt="{{ institution.name }} logo">
             {% endif %}
             <div>
-                <h3>Educonnect</h3>
+                <h3>{{ institution.name }}</h3>
                 <p>{{ request.user.full_name }}</p>
                 {% if request.user.department %}
                     <small>{{ request.user.department.name }}</small>
@@ -46,6 +46,22 @@
                     {% endif %}
                 </li>
             {% endfor %}
+            <li>
+                <details class="sidebar-dropdown">
+                    <summary>Policies &amp; Legal</summary>
+                    <div class="sidebar-submenu">
+                        <a href="{% url 'portal:policy-landing' %}">All policies</a>
+                        <a href="{% url 'portal:policy-detail' 'privacy' %}">Privacy Policy</a>
+                        <a href="{% url 'portal:policy-detail' 'terms' %}">Terms &amp; Conditions</a>
+                        <a href="{% url 'portal:policy-detail' 'refunds' %}">Refund &amp; Cancellation</a>
+                        <a href="{% url 'portal:policy-detail' 'acceptable-use' %}">Acceptable Use</a>
+                        <a href="{% url 'portal:policy-detail' 'cookies' %}">Cookie Policy</a>
+                        <a href="{% url 'portal:policy-detail' 'dpa' %}">Data Processing Agreement</a>
+                        <a href="{% url 'portal:policy-detail' 'security' %}">Security &amp; Data Protection</a>
+                        <a href="{% url 'portal:policy-detail' 'sla' %}">Service Availability &amp; SLA</a>
+                    </div>
+                </details>
+            </li>
         </ul>
         <div class="sidebar-note">
             <span>Role</span>
@@ -57,7 +73,7 @@
     </aside>
 
     <section class="dashboard-main">
-        {% if request.user.role == "student" or request.user.role == "lecturer" %}
+        {% if active_role == "student" or active_role == "lecturer" %}
             <div
                 class="alert-runtime"
                 data-alert-feed-url="{% url 'portal:alerts-feed' %}"
@@ -80,7 +96,7 @@
                     <span class="dashboard-sidebar-toggle-icon" aria-hidden="true">&#9776;</span>
                 </button>
                 <div class="dashboard-title-block">
-                    <p class="eyebrow">Educonnect Workspace</p>
+                    <p class="eyebrow">{{ institution.name }} Workspace</p>
                     <h1>{{ section_title }}</h1>
                     <p class="dashboard-topbar-summary">
                         {% if active_role == "student" %}
@@ -120,4 +136,6 @@
     </section>
     <div class="dashboard-backdrop" data-dashboard-backdrop aria-hidden="true"></div>
 </main>
+{{ programme_options|json_script:"institution-programme-options" }}
+{{ department_options|json_script:"institution-department-options" }}
 {% endblock %}

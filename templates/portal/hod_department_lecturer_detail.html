@@ -1,0 +1,31 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}{{ lecturer.full_name }} Courses | {{ institution.name }}{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>{{ lecturer.full_name }}</h2><a class="ghost-btn small" href="{% url 'portal:hod-department-lecturers' %}">All lecturers</a></div>
+    <p class="muted-note">{{ lecturer.email|default:"No email supplied" }} · {{ department.name }}</p>
+    <h3>Registered or allocated courses</h3>
+    <div class="table-wrap"><table>
+        <thead><tr><th>Course</th><th>Level</th><th>Semester</th><th></th></tr></thead>
+        <tbody>{% for course in allocated_courses %}
+            <tr><td>{{ course.code }} — {{ course.title }}</td><td>{{ course.level }}</td><td>{{ course.get_semester_display }}</td><td>
+                <form method="post">{% csrf_token %}<input type="hidden" name="action" value="remove-course"><input type="hidden" name="course_id" value="{{ course.id }}"><button class="danger-btn small" type="submit">Remove</button></form>
+            </td></tr>
+        {% empty %}<tr><td colspan="4">No courses allocated yet.</td></tr>{% endfor %}</tbody>
+    </table></div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>Available department courses</h2></div>
+    <div class="table-wrap"><table>
+        <thead><tr><th>Course</th><th>Level</th><th>Semester</th><th></th></tr></thead>
+        <tbody>{% for course in available_courses %}
+            <tr><td>{{ course.code }} — {{ course.title }}</td><td>{{ course.level }}</td><td>{{ course.get_semester_display }}</td><td>
+                <form method="post">{% csrf_token %}<input type="hidden" name="action" value="allocate-course"><input type="hidden" name="course_id" value="{{ course.id }}"><button class="primary-btn small" type="submit">Allocate</button></form>
+            </td></tr>
+        {% empty %}<tr><td colspan="4">No unallocated courses are available for this session.</td></tr>{% endfor %}</tbody>
+    </table></div>
+</section>
+{% endblock %}

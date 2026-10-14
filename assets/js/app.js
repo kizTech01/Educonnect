@@ -163,6 +163,59 @@ document.addEventListener("click", (event) => {
     passwordToggle.setAttribute("aria-pressed", String(!showingPassword));
 });
 
+// Keep department-dependent selects useful without making a user submit a
+// filter once merely to see the programmes they can choose. Handbook forms
+// intentionally have no programme control, so they are naturally excluded.
+const programmeOptionsNode = document.getElementById("institution-programme-options");
+const departmentOptionsNode = document.getElementById("institution-department-options");
+if (programmeOptionsNode && departmentOptionsNode) {
+    const programmeOptions = JSON.parse(programmeOptionsNode.textContent);
+    const departmentOptions = JSON.parse(departmentOptionsNode.textContent);
+    const fieldPrefix = (name) => name.includes("-") ? name.slice(0, name.lastIndexOf("-")) : "";
+
+    document.querySelectorAll("form").forEach((form) => {
+        const selects = Array.from(form.querySelectorAll("select"));
+        const faculty = selects.find((item) => item.name.endsWith("faculty"));
+        const department = selects.find((item) => item.name.endsWith("department"));
+        const programme = selects.find((item) => item.name.endsWith("programme"));
+        if (!department) return;
+
+        const updateDepartments = () => {
+            if (!faculty) return;
+            const selected = new Set(Array.from(department.selectedOptions).map((item) => item.value));
+            const facultyId = faculty.value;
+            const options = facultyId
+                ? departmentOptions.filter((item) => String(item.faculty_id) === facultyId)
+                : departmentOptions;
+            department.replaceChildren(new Option("All departments", ""));
+            options.forEach((item) => department.add(new Option(
+                `${item.name} (${item.code})`, item.id, selected.has(String(item.id)), selected.has(String(item.id)),
+            )));
+        };
+        const updateProgrammes = () => {
+            if (!programme) return;
+            const selected = new Set(Array.from(programme.selectedOptions).map((item) => item.value));
+            const departmentId = department.value;
+            const options = departmentId
+                ? programmeOptions.filter((item) => String(item.department_id) === departmentId)
+                : [];
+            programme.replaceChildren();
+            if (!programme.multiple) programme.add(new Option("All programmes", ""));
+            options.forEach((item) => programme.add(new Option(
+                `${item.name} (${item.code})`, item.id, selected.has(String(item.id)), selected.has(String(item.id)),
+            )));
+            programme.disabled = !departmentId || !options.length;
+        };
+        faculty?.addEventListener("change", () => {
+            updateDepartments();
+            updateProgrammes();
+        });
+        department.addEventListener("change", updateProgrammes);
+        if (faculty) updateDepartments();
+        updateProgrammes();
+    });
+}
+
 const getCsrfToken = () => {
     const csrfCookie = document.cookie
         .split(";")

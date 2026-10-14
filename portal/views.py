@@ -1,6 +1,11 @@
 import hashlib
 import hmac
 import json
+import re
+import secrets
+import time
+from io import BytesIO
+from zipfile import BadZipFile, ZipFile
 from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from functools import wraps
@@ -11,6 +16,7 @@ from django.contrib import messages
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.core.cache import cache
+from django.core.mail import EmailMessage
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, models, transaction
 from django.db.models import Count, Max, OuterRef, Prefetch, Subquery, Sum
@@ -19,11 +25,12 @@ from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.http import urlencode
+from django.utils.crypto import constant_time_compare, salted_hmac
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.csrf import ensure_csrf_cookie
+from pypdf import PdfReader
 
 from .forms import (
     CourseForm,
@@ -58,6 +65,8 @@ from .forms import (
     DepartmentPaymentGatewayForm,
     DepartmentCoursePaymentGatewayForm,
     DepartmentalAdditionalDocumentForm,
+    ExamCardAIConfigurationForm,
+    ExamCardAIReferenceDocumentForm,
     DepartmentalAssociationForm,
     DepartmentalSearchForm,
     DepartmentalStudentPaymentForm,
@@ -84,6 +93,9 @@ from .forms import (
     AdminProfileForm,
     InstitutionAdminPasswordChangeForm,
     UserPasswordResetForm,
+    PasswordResetOTPRequestForm,
+    PasswordResetOTPConfirmForm,
+    GlobalPolicyForm,
 )
 from .models import (
     AcademicSession,
@@ -107,6 +119,8 @@ from .models import (
     DepartmentalPayment,
     DepartmentalPaymentDocument,
     DepartmentalPaymentItem,
+    ExamCardAIConfiguration,
+    ExamCardAIReferenceDocument,
     Handbook,
     Hostel,
     HostelBed,
@@ -136,10 +150,13 @@ from .models import (
     GuardianRelationship,
     ScreeningIntegration,
     ScreeningApplication,
+    GlobalPolicy,
+    PolicyAcceptance,
     TimeStampedModel,
     curriculum_for_department,
     curriculum_for_programme,
 )
+from .policies import LEGAL_REVIEW_NOTICE
 from .services import (
     TEMPORARY_ACCOUNT_PASSWORD,
     grant_free_trial_subscription,
@@ -169,6 +186,79 @@ LOGIN_ROLES = set(User.Role.values)
 SCREENING_SIGNATURE_HEADER = "HTTP_X_EDUCONNECT_SIGNATURE"
 SCREENING_TIMESTAMP_HEADER = "HTTP_X_EDUCONNECT_TIMESTAMP"
 SCREENING_INSTITUTION_HEADER = "HTTP_X_EDUCONNECT_INSTITUTION"
+
+POLICY_VERSION = "2026-10-09"
+POLICIES = {
+    "privacy": {
+        "title": "Privacy Policy",
+        "sections": [
+            ("Who we are", "EduConnect is operated by KizTech Technologies Ltd, which is currently undergoing company registration. Contact: kiztech01@gmail.com or 08128666531. This policy is drafted for universities and other higher-education institutions in Nigeria, with possible future expansion within Africa."),
+            ("Institutional data responsibility", "Each university remains responsible for the institutional, academic and student information it uploads or directs us to process. EduConnect provides the platform and processes that information to deliver contracted services; storing or processing it does not make KizTech the owner of university academic records."),
+            ("Information processed", "Depending on the enabled features, we may process account and identity details, academic and administrative records, course registrations, communications, payment-related records, uploaded documents and technical/security information. People may self-register or be created by authorised institutional personnel. Some students may be under 18; institutions and authorised users must ensure any required authority or notices are in place."),
+            ("Purpose and AI", "We process information to operate and secure EduConnect, provide academic and administrative workflows, support payments, communicate about the service and meet applicable obligations. When enabled and used, EduConnect AI may process information or documents submitted to it. AI output can be inaccurate and must be independently checked before academic, financial, administrative or other consequential decisions."),
+            ("Sharing, retention and rights", "We share information only as needed to provide services, meet legal obligations, protect the platform or with authorised institutional users and service providers. We may use properly anonymised and aggregated information for security, statistics, development and product improvement. Retention depends on law, contract, security and legitimate needs; no universal retention period is promised. Universities may request deletion of institutional data subject to those limits. Individual account deletion requests should normally go through the relevant university."),
+            ("Security incidents and contact", "If KizTech becomes aware of a qualifying security or privacy incident, it will investigate, contain and remediate it and notify affected institutions without undue delay where appropriate and required by law or contract. Send privacy requests to kiztech01@gmail.com."),
+        ],
+    },
+    "terms": {
+        "title": "Terms & Conditions",
+        "sections": [
+            ("Agreement and scope", "These Terms govern access to EduConnect. They apply globally to students, lecturers, HODs, administrators, parents/guardians and other users. By registering, being issued an account or using the service, users agree to them. KizTech Technologies Ltd is currently undergoing company registration."),
+            ("Institution and user responsibilities", "Institutions are responsible for their authorised users, source data, policies and required permissions. Administrators and HODs must manage access and uploads carefully. Lecturers must verify academic information they submit or rely on. Students must keep credentials confidential and use only their own account. Parents/guardians and other users may access only information they are authorised to receive. Every user must keep information accurate and report suspected misuse."),
+            ("Service use", "EduConnect supports institutional workflows including only those features made available to a tenant. Access may be changed or suspended to protect security, comply with law, enforce these Terms or follow the institutional agreement. Do not rely on AI output without verification before important decisions."),
+            ("Data, payments and legal review", "Universities retain responsibility for their institutional data as described in the Privacy Policy. Payment features may use Paystack for university subscriptions, departmental fees and course fees. These Terms are governed by applicable Nigerian law. Detailed dispute arrangements, support commitments and institutional obligations remain for the institutional agreement and legal review."),
+        ],
+    },
+    "refunds": {
+        "title": "Refund & Cancellation Policy",
+        "sections": [
+            ("Scope", "EduConnect may facilitate university subscription payments, departmental fees and course fees through Paystack where those features are configured. The responsible institution sets its own academic fees and related approval process."),
+            ("Subscriptions", "University subscription payments are generally non-refundable, except for duplicate payments, erroneous payments, verified technical or payment errors, or where a refund is required by applicable law. A cancellation normally permits access through the already-paid subscription period unless the institutional agreement or circumstances provide otherwise."),
+            ("Departmental and course fees", "Requests concerning departmental or course fees should be made to the relevant university or department because it controls the fee and underlying entitlement. KizTech may assist with payment verification where appropriate but does not override an institution's lawful decision."),
+            ("Requests", "Submit payment references and supporting details to kiztech01@gmail.com or through the relevant institution. Refunds, where approved, are handled through the applicable payment process and may be subject to verification and legal requirements."),
+        ],
+    },
+    "acceptable-use": {
+        "title": "Acceptable Use Policy",
+        "sections": [
+            ("Permitted use", "Use EduConnect only for authorised educational, administrative and related institutional purposes, in accordance with applicable law and your institution's rules."),
+            ("Prohibited conduct", "Do not share accounts, impersonate another person, bypass permissions, probe or disrupt the service, upload malware, scrape data, interfere with payments, falsify academic records, misuse AI, or access data outside your authority. Do not upload information you are not authorised to provide."),
+            ("Enforcement", "KizTech and institutions may investigate misuse and restrict access where necessary to protect users, data and the service. Serious or unlawful conduct may be referred to the appropriate institution or authority."),
+        ],
+    },
+    "cookies": {
+        "title": "Cookie Policy",
+        "sections": [
+            ("What this site currently uses", "The current EduConnect code uses Django session and CSRF-protection cookies, commonly named sessionid and csrftoken. They support sign-in, session continuity and protection of submitted forms. We do not represent that analytics or advertising cookies are implemented."),
+            ("Your choices", "You can control cookies through your browser. Blocking essential cookies can prevent sign-in and form submission from working. If the implementation changes to add non-essential cookies or similar technologies, this policy will be updated before that change is represented here."),
+        ],
+    },
+    "dpa": {
+        "title": "Data Processing Agreement (DPA)",
+        "sections": [
+            ("Roles and instructions", "For institutional data submitted to EduConnect, the university normally acts as the responsible controller or equivalent responsible party and KizTech acts as processor/service provider, processing only to provide the contracted services and on documented institutional instructions, except where law requires otherwise."),
+            ("Processing details", "Processing may include hosting, storage, retrieval, transmission, support, security, backup and authorised feature operation for academic, administrative, account, communication, payment-related and technical data. Processing duration, categories and any institution-specific requirements should be completed in the institutional agreement."),
+            ("Safeguards and assistance", "KizTech will apply appropriate technical and organisational measures, assist the institution with reasonable data-protection requests consistent with the service, and notify it of qualifying incidents as described in the Privacy Policy. KizTech may use service providers where appropriate, subject to appropriate controls."),
+            ("Return or deletion", "On termination or valid request, institutional data may be returned or deleted subject to applicable law, contract, security, backup and legitimate retention requirements. This production draft requires review and completion with the relevant institutional agreement."),
+        ],
+    },
+    "security": {
+        "title": "Security & Data Protection Policy",
+        "sections": [
+            ("Our approach", "EduConnect uses security measures appropriate to the platform and its processing activities, including access controls, tenant-aware data handling, authentication protections and security monitoring practices implemented in the service. This policy does not claim a certification or guarantee absolute security."),
+            ("Shared responsibilities", "Institutions must authorise users appropriately and protect their local processes. Users must choose strong passwords, protect credentials, review access and promptly report suspected compromise to their institution or kiztech01@gmail.com."),
+            ("Incident response", "KizTech will investigate, contain and remediate qualifying security or privacy incidents and notify affected institutions without undue delay where appropriate and required by applicable law or contract."),
+        ],
+    },
+    "sla": {
+        "title": "Service Availability / SLA Policy",
+        "sections": [
+            ("Availability", "EduConnect aims to operate a dependable service but does not promise a specific uptime percentage in this policy. Service availability can be affected by maintenance, security work, third-party infrastructure, payment providers, networks and events outside reasonable control."),
+            ("Institutional SLA", "Specific uptime commitments, support response times, maintenance windows, service credits and escalation arrangements must be defined in the applicable institutional contract or SLA."),
+            ("Maintenance and support", "We may carry out planned or emergency maintenance to protect or improve the service. Where practical, affected institutions will receive appropriate communication through agreed channels."),
+        ],
+    },
+}
 
 
 def institution_overview_queryset():
@@ -279,6 +369,17 @@ def _record_failed_login(request, username):
 
 def _clear_failed_logins(request, username):
     cache.delete(_login_throttle_key(request, username))
+
+
+def _exam_card_verification_limited(request):
+    """Small cache-backed guard for the public opaque-token endpoint."""
+    fingerprint = hashlib.sha256((_client_ip(request) or "unknown").encode()).hexdigest()
+    key = f"exam-card-verify:{fingerprint}"
+    attempts = int(cache.get(key, 0))
+    if attempts >= 30:
+        return True
+    cache.set(key, attempts + 1, timeout=60)
+    return False
 
 
 def institution_logo(request):
@@ -506,10 +607,10 @@ def active_role(request):
     if not request.user.is_authenticated or request.user.is_superuser:
         return None
     roles = request.user.active_roles()
-    # A lecturer who is appointed HOD keeps one lecturer workspace.  This
-    # also repairs existing browser sessions that still hold ``active_role``
-    # as ``hod`` from the previous role-switching UI.
-    if User.Role.LECTURER in roles and User.Role.HOD in roles:
+    # HOD and Exam Officer are additional responsibilities of a lecturer, not
+    # separate workspaces.  Their capabilities are added to the lecturer
+    # navigation so staff do not have to switch roles to do their work.
+    if User.Role.LECTURER in roles and ({User.Role.HOD, User.Role.EXAM_OFFICER} & roles):
         return User.Role.LECTURER
     # RequestFactory-based integrations and a few internal callers do not add
     # SessionMiddleware.  They should fall back to the primary role just as a
@@ -578,12 +679,16 @@ def sidebar_links(request):
                     {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
                     {"label": "Students", "url_name": "portal:hod-department-students"},
                     {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
+                    {"label": "Assign Exam Officer", "url_name": "portal:hod-exam-officer"},
                 ],
             },
         ]
     elif selected_role == User.Role.EXAM_OFFICER:
         links = [{"label": "Dashboard", "url_name": "portal:lecturer-dashboard"}]
         links.extend(
+            {"label": label, "url_name": "portal:exam-card-approvals"}
+            if slug == "exam-cards"
+            else
             {"label": label, "url_name": "portal:department-all-results"}
             if slug == "results"
             else {"label": label, "url_name": "portal:hod-reports"}
@@ -618,7 +723,10 @@ def sidebar_links(request):
                 {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
                 {"label": "Students", "url_name": "portal:hod-department-students"},
                 {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
+                {"label": "Assign Exam Officer", "url_name": "portal:hod-exam-officer"},
             ]
+        if request.user.has_role(User.Role.EXAM_OFFICER):
+            links.insert(-1, {"label": "Exam Cards", "url_name": "portal:exam-card-approvals"})
         links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
     elif selected_role in ROLE_MODULES:
         links = [
@@ -676,7 +784,10 @@ def dashboard_context(request, title, **extra):
         selectable_roles = [
             (value, User.Role(value).label)
             for value in sorted(request.user.active_roles())
-            if not (value == User.Role.HOD and request.user.has_role(User.Role.LECTURER))
+            if not (
+                value in {User.Role.HOD, User.Role.EXAM_OFFICER}
+                and request.user.has_role(User.Role.LECTURER)
+            )
         ]
     context = {
         "section_title": title,
@@ -684,6 +795,15 @@ def dashboard_context(request, title, **extra):
         "active_role": selected_role,
         "active_role_label": User.Role(selected_role).label if selected_role else "Administrator",
         "selectable_roles": selectable_roles,
+        # Used by the shared dependent-select behaviour. Keeping this tenant
+        # scoped means a selected department only ever reveals programmes from
+        # the active institution.
+        "programme_options": list(
+            Programme.objects.filter(is_active=True).values("id", "name", "code", "department_id")
+        ),
+        "department_options": list(
+            Department.objects.values("id", "name", "code", "faculty_id")
+        ),
     }
     context.update(extra)
     return context
@@ -871,6 +991,11 @@ def _finalize_course_payment(payment):
             session=payment.session,
             defaults={"registered_by": payment.student},
         )
+        if not created and not registration.is_active:
+            registration.is_active = True
+            registration.superseded_at = None
+            registration.superseded_by_allocation = None
+            registration.save(update_fields=["is_active", "superseded_at", "superseded_by_allocation", "updated_at"])
         if created:
             sync_material_access_for_registration(registration)
         _assign_student_to_existing_course_group(payment.student, payment.course, payment.session)
@@ -883,6 +1008,191 @@ def _finalize_departmental_payment(payment):
         if not payment.is_paid:
             payment.status = DepartmentalPayment.Status.PAID
             payment.save(update_fields=["status", "paid_at", "updated_at"])
+    _automatically_process_exam_card(payment)
+
+
+def _return_exam_card_to_pending_approval(payment):
+    """Require a fresh review whenever a paid student's documents change."""
+    payment.exam_card_approval_status = DepartmentalPayment.ExamCardApprovalStatus.PENDING
+    payment.exam_card_approved_by = None
+    payment.exam_card_approved_at = None
+    payment.exam_card_rejection_reason = ""
+    payment.exam_card_approved_automatically = False
+    payment.exam_card_revoked_at = timezone.now()
+    payment.save(update_fields=[
+        "exam_card_approval_status", "exam_card_approved_by", "exam_card_approved_at",
+        "exam_card_rejection_reason", "exam_card_approved_automatically",
+        "exam_card_revoked_at", "updated_at",
+    ])
+
+
+def _document_text(document):
+    """Return safely extractable text from PDF, DOCX, TXT, or CSV evidence."""
+    try:
+        with document.file.open("rb") as source:
+            content = source.read()
+    except (OSError, ValueError):
+        return ""
+    name = document.file.name.lower()
+    try:
+        if name.endswith(".pdf"):
+            return "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(content)).pages)
+        if name.endswith(".docx"):
+            with ZipFile(BytesIO(content)) as archive:
+                xml = archive.read("word/document.xml").decode("utf-8", errors="ignore")
+                return xml.replace("</w:t>", " ").replace("<w:t>", " ")
+    except (BadZipFile, KeyError, ValueError):
+        return ""
+    return content.decode("utf-8", errors="ignore")
+
+
+def _contains_value(text, value):
+    """Use whitespace-insensitive matching for IDs and session labels."""
+    return "".join(str(value).casefold().split()) in "".join(text.casefold().split())
+
+
+def _contains_semester(text, semester):
+    """Accept the common readable forms used on departmental documents."""
+    compact = re.sub(r"[^a-z0-9]", "", str(text).casefold())
+    if semester == Course.Semester.FIRST:
+        return any(label in compact for label in ("firstsemester", "1stsemester", "semester1", "semesterone"))
+    if semester == Course.Semester.SECOND:
+        return any(label in compact for label in ("secondsemester", "2ndsemester", "semester2", "semestertwo"))
+    return False
+
+
+def _exam_card_ai_verification(payment, configuration):
+    """Evaluate typed payment-document samples; unverifiable files stay pending."""
+    documents = list(payment.documents.all())
+    categories = {document.category for document in documents}
+    required = []
+    if configuration.require_white_form:
+        required.append(DepartmentalPaymentDocument.Category.WHITE_FORM)
+    if configuration.require_school_receipt:
+        required.append(DepartmentalPaymentDocument.Category.SCHOOL_RECEIPT)
+    if configuration.require_course_form:
+        required.append(DepartmentalPaymentDocument.Category.COURSE_FORM)
+    missing_categories = [
+        DepartmentalPaymentDocument.Category(category).label
+        for category in required if category not in categories
+    ]
+    submitted_text = {
+        category: "\n".join(
+            _document_text(document) for document in documents if document.category == category
+        )
+        for category in required
+    }
+    sample_text = {
+        category: "\n".join(
+            _document_text(document)
+            for document in configuration.reference_documents.all()
+            if document.category == category
+        )
+        for category in required
+    }
+    identifier = payment.student.id_number or payment.student.username
+    student_name = payment.student.full_name
+    # A sample is a format/session reference, not another student's record.
+    # The student's ID or name must instead agree with every required document
+    # they submit for this payment.
+    student_identity_matches = {
+        category: (
+            _contains_value(text, identifier)
+            or (student_name and _contains_value(text, student_name))
+        )
+        for category, text in submitted_text.items()
+    }
+    checks = {
+        "payment_confirmed": payment.is_paid,
+        "department_matches": payment.department_id == configuration.department_id,
+        "academic_session_matches": payment.session_id == configuration.academic_session_id,
+        "required_documents_present": not missing_categories,
+        "trusted_samples_uploaded": all(sample_text.values()),
+        "sample_sessions_match": (
+            not configuration.verify_academic_session
+            or all(_contains_value(text, configuration.academic_session.name) for text in sample_text.values())
+        ),
+        "submitted_document_sessions_match": (
+            not configuration.verify_academic_session
+            or all(_contains_value(text, configuration.academic_session.name) for text in submitted_text.values())
+        ),
+        "semester_configured": bool(configuration.semester),
+        "sample_semesters_match": (
+            bool(configuration.semester)
+            and all(_contains_semester(text, configuration.semester) for text in sample_text.values())
+        ),
+        "submitted_document_semesters_match": (
+            bool(configuration.semester)
+            and all(_contains_semester(text, configuration.semester) for text in submitted_text.values())
+        ),
+        "student_identity_matches_required_documents": (
+            not configuration.verify_student_identifier
+            or all(student_identity_matches.values())
+        ),
+    }
+    return {
+        "checked_at": timezone.now().isoformat(),
+        "configuration_id": configuration.id,
+        "academic_session": configuration.academic_session.name,
+        "required_documents": required,
+        "missing_documents": missing_categories,
+        "student_identity_matches": student_identity_matches,
+        "checks": checks,
+        "outcome": "approved" if all(checks.values()) else "pending_review",
+    }
+
+
+def _automatically_process_exam_card(payment):
+    """Apply a department's enabled rules after a paid submission changes."""
+    payment = DepartmentalPayment.objects.select_related("student", "department", "session").prefetch_related(
+        "documents"
+    ).get(pk=payment.pk)
+    configuration = ExamCardAIConfiguration.objects.filter(
+        department=payment.department,
+        academic_session=payment.session,
+        automatic_processing_enabled=True,
+    ).prefetch_related("reference_documents").first()
+    if not configuration or payment.exam_card_approval_status != DepartmentalPayment.ExamCardApprovalStatus.PENDING:
+        return False
+    verification = _exam_card_ai_verification(payment, configuration)
+    payment.exam_card_ai_verification = verification
+    update_fields = ["exam_card_ai_verification", "updated_at"]
+    if verification["outcome"] == "approved":
+        payment.exam_card_approval_status = DepartmentalPayment.ExamCardApprovalStatus.APPROVED
+        payment.exam_card_approved_by = None
+        payment.exam_card_approved_at = timezone.now()
+        payment.exam_card_rejection_reason = ""
+        payment.exam_card_approved_automatically = True
+        update_fields.extend([
+            "exam_card_approval_status", "exam_card_approved_by", "exam_card_approved_at",
+            "exam_card_rejection_reason", "exam_card_approved_automatically",
+        ])
+    payment.save(update_fields=update_fields)
+    if verification["outcome"] == "approved":
+        AuditLog.objects.create(
+            institution=payment.institution,
+            user=configuration.configured_by,
+            action="exam_card_ai_approved",
+            object_type="DepartmentalPayment",
+            object_id=str(payment.pk),
+            new_value={"configuration_id": configuration.id, "session": payment.session.name},
+            description="EduConnect AI automatically approved an examination-card request after configured checks passed.",
+        )
+        return True
+    return False
+
+
+def _auto_process_pending_exam_cards(configuration):
+    """Run newly configured rules against outstanding submissions only."""
+    if not configuration.automatic_processing_enabled:
+        return 0
+    pending_payments = DepartmentalPayment.objects.filter(
+        department=configuration.department,
+        session=configuration.academic_session,
+        status=DepartmentalPayment.Status.PAID,
+        exam_card_approval_status=DepartmentalPayment.ExamCardApprovalStatus.PENDING,
+    )
+    return sum(_automatically_process_exam_card(payment) for payment in pending_payments)
 
 
 def _sync_course_material_access_for_paid_course(student, course):
@@ -940,12 +1250,32 @@ def current_departmental_session():
 
 
 def reset_lecturer_course_registrations():
-    """Clear all live course registrations so a new session starts cleanly."""
-    registration_count = LecturerCourseRegistration.objects.count()
-    student_registration_count = StudentCourseRegistration.objects.count()
-    LecturerCourseRegistration.objects.all().delete()
-    StudentCourseRegistration.objects.all().delete()
-    Course.objects.exclude(lecturer__isnull=True).update(lecturer=None)
+    """Deactivate every live allocation/registration for a session rollover.
+
+    We retain the old rows for results, receipts and audit history, but every
+    role sees an empty course registration state in the new current session.
+    Outstanding old payment callbacks are disabled too, so they cannot restore
+    an old-session registration after the rollover.
+    """
+    now = timezone.now()
+    registration_count = LecturerCourseRegistration.objects.filter(is_active=True).count()
+    student_registration_count = StudentCourseRegistration.objects.filter(is_active=True).count()
+    LecturerCourseRegistration.objects.filter(is_active=True).update(
+        is_active=False,
+        deactivated_at=now,
+        updated_at=now,
+    )
+    StudentCourseRegistration.objects.filter(is_active=True).update(
+        is_active=False,
+        superseded_at=now,
+        superseded_by_allocation=None,
+        updated_at=now,
+    )
+    CoursePayment.objects.filter(is_active_for_registration=True).update(
+        is_active_for_registration=False,
+        updated_at=now,
+    )
+    Course.objects.exclude(lecturer__isnull=True).update(lecturer=None, updated_at=now)
     return registration_count, student_registration_count
 
 
@@ -1073,14 +1403,20 @@ def _assign_student_to_existing_course_group(student, course, session):
     CourseStudentGroupMembership.objects.get_or_create(group=target_group, student=student)
 
 
-def departmental_download_context(request, scope="admin"):
+def departmental_download_context(request, scope="admin", department=None):
     search_form = DepartmentalSearchForm(request.GET or None)
     current_session = current_departmental_session()
     # Keep the overview focused on the active session. Selecting a student
     # below loads that student's complete paid departmental history.
     payments = departmental_payment_queryset().filter(session=current_session)
-    if scope == "lecturer" and request.user.department_id:
-        payments = payments.filter(department=request.user.department)
+    # A normal lecturer is restricted to their assigned department. An HOD may
+    # hold the appointment through RoleAssignment, so their department can be
+    # supplied explicitly instead of relying on user.department.
+    scoped_department = department
+    if scoped_department is None and scope == "lecturer":
+        scoped_department = request.user.department
+    if scoped_department is not None:
+        payments = payments.filter(department=scoped_department)
     selected_payment = None
     selected_student = None
     selected_student_payments = DepartmentalPayment.objects.none()
@@ -1103,8 +1439,8 @@ def departmental_download_context(request, scope="admin"):
     if selected_payment:
         selected_student = selected_payment.student
         selected_student_payments = departmental_payment_queryset().filter(student=selected_student)
-        if scope == "lecturer" and request.user.department_id:
-            selected_student_payments = selected_student_payments.filter(department=request.user.department)
+        if scoped_department is not None:
+            selected_student_payments = selected_student_payments.filter(department=scoped_department)
     department_totals = (
         payments.values("department__id", "department__name")
         .annotate(total=Count("id"))
@@ -1133,7 +1469,7 @@ def _course_catalog_queryset(user=None):
     queryset = Course.objects.select_related("department", "lecturer").filter(
         Q(academic_session=current_session) | Q(academic_session__isnull=True)
     )
-    if user and user.role == User.Role.LECTURER:
+    if user and user.has_role(User.Role.LECTURER):
         queryset = queryset.filter(Q(lecturer__isnull=True) | Q(lecturer=user))
     return queryset
 
@@ -1213,11 +1549,17 @@ def _lecturer_student_scope(request):
     courses = lecturer_registered_courses_queryset(request.user)
     search = ""
     if filter_form.is_valid():
+        faculty = filter_form.cleaned_data.get("faculty")
         department = filter_form.cleaned_data.get("department")
+        programme = filter_form.cleaned_data.get("programme")
         level = filter_form.cleaned_data.get("level")
         search = filter_form.cleaned_data.get("search")
+        if faculty:
+            courses = courses.filter(department__faculty=faculty)
         if department:
             courses = courses.filter(department=department)
+        if programme:
+            courses = courses.filter(Q(programmes=programme) | Q(programmes__isnull=True))
         if level:
             courses = courses.filter(level=level)
         courses = _search_filter(courses, search, "code", "title", "department__name")
@@ -1249,6 +1591,35 @@ def home_context(
 @never_cache
 def index(request):
     return render(request, "portal/index.html", home_context())
+
+
+@never_cache
+def policy_landing(request):
+    policies = list(
+        GlobalPolicy.objects.filter(status=GlobalPolicy.Status.PUBLISHED).order_by("title", "-effective_date")
+    )
+    # There is at most one published version per slug after the publish flow;
+    # retain this defensive de-duplication for records imported from old data.
+    published = {}
+    for policy in policies:
+        published.setdefault(policy.slug, policy)
+    return render(request, "portal/policy_landing.html", {
+        "policies": list(published.values()),
+        "legal_review_notice": LEGAL_REVIEW_NOTICE,
+    })
+
+
+@never_cache
+def policy_detail(request, slug):
+    policy = GlobalPolicy.objects.filter(
+        slug=slug, status=GlobalPolicy.Status.PUBLISHED,
+    ).order_by("-effective_date", "-id").first()
+    if policy is None:
+        raise Http404("Policy not found.")
+    return render(request, "portal/policy_detail.html", {
+        "policy": policy,
+        "legal_review_notice": LEGAL_REVIEW_NOTICE,
+    })
 
 
 @ensure_csrf_cookie
@@ -1340,6 +1711,32 @@ def portal_login(request, role=None):
     return redirect("portal:dashboard")
 
 
+def _record_policy_acceptance(request, user, slug, event):
+    """Store affirmative signup consent against the exact published version."""
+    policy = GlobalPolicy.objects.filter(
+        slug=slug, status=GlobalPolicy.Status.PUBLISHED,
+    ).order_by("-effective_date", "-id").first()
+    if not policy:
+        return
+    record, created = PolicyAcceptance.objects.get_or_create(
+        policy=policy,
+        user=user,
+        event=event,
+        defaults={"institution": user.institution, "ip_address": _client_ip(request)},
+    )
+    if created:
+        AuditLog.objects.create(
+            institution=user.institution,
+            user=user,
+            action=f"policy_{event}",
+            object_type="GlobalPolicy",
+            object_id=str(policy.pk),
+            new_value={"policy": policy.slug, "version": policy.version, "event": event},
+            description=f"User {event} the {policy.title} at account creation.",
+            ip_address=_client_ip(request),
+        )
+
+
 @ensure_csrf_cookie
 @never_cache
 def student_signup(request):
@@ -1356,6 +1753,8 @@ def student_signup(request):
             if user.programme_id else curriculum_for_department(user.department, current_departmental_session())
         )
         user.save(update_fields=["curriculum"])
+        _record_policy_acceptance(request, user, "terms", PolicyAcceptance.Event.ACCEPTED)
+        _record_policy_acceptance(request, user, "privacy", PolicyAcceptance.Event.ACKNOWLEDGED)
         authenticated_user = authenticate(
             request,
             username=form.cleaned_data["username"],
@@ -1380,7 +1779,9 @@ def lecturer_signup(request):
         ))
     form = LecturerSignupForm(request.POST, institution=getattr(request, "institution", None))
     if form.is_valid():
-        form.save()
+        user = form.save()
+        _record_policy_acceptance(request, user, "terms", PolicyAcceptance.Event.ACCEPTED)
+        _record_policy_acceptance(request, user, "privacy", PolicyAcceptance.Event.ACKNOWLEDGED)
         messages.success(request, "Lecturer account created successfully.")
         messages.warning(request, "Your lecturer account is pending admin approval before first dashboard access.")
         return redirect("portal:role-login", role=User.Role.LECTURER)
@@ -1459,7 +1860,8 @@ def switch_role(request):
         raise PermissionDenied
     requested_role = request.POST.get("role", "")
     if requested_role not in request.user.active_roles() or (
-        requested_role == User.Role.HOD and request.user.has_role(User.Role.LECTURER)
+        requested_role in {User.Role.HOD, User.Role.EXAM_OFFICER}
+        and request.user.has_role(User.Role.LECTURER)
     ):
         raise PermissionDenied("You can only switch to a role assigned to your account.")
     request.session["active_role"] = requested_role
@@ -1511,7 +1913,9 @@ def role_module(request, module):
         rows = list(courses.values_list("code", "title", "department__name", "level")[:100])
         columns = ("Code", "Course", "Department", "Level")
     elif module == "allocations":
-        rows = list(LecturerCourseRegistration.objects.filter(course__in=courses).values_list("course__code", "course__title", "lecturer__full_name")[:100])
+        rows = list(LecturerCourseRegistration.objects.filter(
+            course__in=courses, is_active=True,
+        ).values_list("course__code", "course__title", "lecturer__full_name")[:100])
         columns = ("Course", "Title", "Lecturer")
     elif module in {"payments", "balances", "exam-cards", "eligibility"}:
         payments = DepartmentalPayment.objects.select_related("student", "department", "session")
@@ -1527,7 +1931,9 @@ def role_module(request, module):
         rows = list(ScreeningApplication.objects.values_list("external_application_id", "first_name", "last_name", "programme", "status")[:100])
         columns = ("Application", "First name", "Last name", "Programme", "Status")
     elif module == "registrations":
-        rows = list(StudentCourseRegistration.objects.filter(course__in=courses).values_list("student__full_name", "course__code", "course__title", "session__name")[:100])
+        rows = list(StudentCourseRegistration.objects.filter(
+            course__in=courses, is_active=True,
+        ).values_list("student__full_name", "course__code", "course__title", "session__name")[:100])
         columns = ("Student", "Course", "Title", "Session")
     elif module == "data-quality":
         rows = list(User.objects.filter(Q(email="") | Q(id_number__isnull=True) | Q(id_number="")).values_list("full_name", "role", "email", "id_number")[:100])
@@ -1943,6 +2349,92 @@ def super_admin_reports(request):
 
 
 @super_admin_required
+def super_admin_policies(request):
+    policies = GlobalPolicy.objects.select_related("published_by", "supersedes").order_by("slug", "-effective_date", "-id")
+    return render(request, "portal/super_admin_policies.html", {"policies": policies})
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_policy_create(request):
+    source = None
+    source_id = request.GET.get("supersedes")
+    if source_id:
+        source = get_object_or_404(GlobalPolicy, pk=source_id)
+    initial = {}
+    if source:
+        initial = {
+            "slug": source.slug,
+            "title": source.title,
+            "summary": source.summary,
+            "sections": source.sections,
+            "version": f"{source.version}-next",
+            "effective_date": timezone.localdate(),
+            "last_updated": timezone.localdate(),
+            "acceptance_required": source.acceptance_required,
+        }
+    form = GlobalPolicyForm(request.POST or None, initial=initial)
+    if request.method == "POST" and form.is_valid():
+        policy = form.save(commit=False)
+        policy.status = GlobalPolicy.Status.DRAFT
+        policy.supersedes = source
+        policy.full_clean()
+        policy.save()
+        AuditLog.objects.create(
+            user=request.user, action="global_policy_draft_created", object_type="GlobalPolicy",
+            object_id=str(policy.pk), new_value={"slug": policy.slug, "version": policy.version},
+            description=f"Created global policy draft {policy}.",
+        )
+        messages.success(request, "Policy draft created. Review it before publishing.")
+        return redirect("portal:super-admin-policy-edit", policy_id=policy.pk)
+    return render(request, "portal/super_admin_policy_form.html", {"form": form, "policy": None, "source": source})
+
+
+@super_admin_required
+@require_http_methods(["GET", "POST"])
+def super_admin_policy_edit(request, policy_id):
+    policy = get_object_or_404(GlobalPolicy, pk=policy_id)
+    if policy.status != GlobalPolicy.Status.DRAFT:
+        messages.info(request, "Published and archived versions are immutable. Create a new draft version to change a policy.")
+        return redirect("portal:super-admin-policies")
+    form = GlobalPolicyForm(request.POST or None, instance=policy)
+    if request.method == "POST" and form.is_valid():
+        policy = form.save(commit=False)
+        policy.full_clean()
+        policy.save()
+        AuditLog.objects.create(
+            user=request.user, action="global_policy_draft_updated", object_type="GlobalPolicy",
+            object_id=str(policy.pk), new_value={"slug": policy.slug, "version": policy.version},
+            description=f"Updated global policy draft {policy}.",
+        )
+        messages.success(request, "Policy draft saved.")
+        return redirect("portal:super-admin-policy-edit", policy_id=policy.pk)
+    return render(request, "portal/super_admin_policy_form.html", {"form": form, "policy": policy, "source": policy.supersedes})
+
+
+@super_admin_required
+@require_http_methods(["POST"])
+def super_admin_policy_publish(request, policy_id):
+    with transaction.atomic():
+        policy = get_object_or_404(GlobalPolicy.objects.select_for_update(), pk=policy_id, status=GlobalPolicy.Status.DRAFT)
+        policy.full_clean()
+        GlobalPolicy.objects.filter(
+            slug=policy.slug, status=GlobalPolicy.Status.PUBLISHED,
+        ).exclude(pk=policy.pk).update(status=GlobalPolicy.Status.ARCHIVED)
+        policy.status = GlobalPolicy.Status.PUBLISHED
+        policy.published_at = timezone.now()
+        policy.published_by = request.user
+        policy.save(update_fields=["status", "published_at", "published_by", "updated_at"])
+        AuditLog.objects.create(
+            user=request.user, action="global_policy_published", object_type="GlobalPolicy",
+            object_id=str(policy.pk), new_value={"slug": policy.slug, "version": policy.version},
+            description=f"Published global policy {policy}; earlier published versions were archived.",
+        )
+    messages.success(request, f"{policy.title} v{policy.version} is now published.")
+    return redirect("portal:super-admin-policies")
+
+
+@super_admin_required
 def super_admin_settings(request):
     gateway, _ = SubscriptionPaymentGateway.objects.get_or_create(slug="subscription")
     form = SubscriptionPaymentGatewayForm(instance=gateway)
@@ -2037,18 +2529,22 @@ def _ai_answer(user, role, question):
 
     if role == User.Role.STUDENT:
         if "course" in question:
-            names = ", ".join(StudentCourseRegistration.objects.filter(student=user).select_related("course").values_list("course__code", flat=True)[:12])
+            names = ", ".join(StudentCourseRegistration.objects.filter(
+                student=user, is_active=True,
+            ).select_related("course").values_list("course__code", flat=True)[:12])
             return f"Your registered courses are: {names or 'none yet'}."
         if "department" in question:
             return f"Your department is {user.department.name if user.department else 'not assigned yet'}."
         return "I can help with your own courses, payments, timetable, documents, and course registration."
 
     if role == User.Role.LECTURER:
-        assignments = LecturerCourseRegistration.objects.filter(lecturer=user).select_related("course")
+        assignments = LecturerCourseRegistration.objects.filter(
+            lecturer=user, is_active=True,
+        ).select_related("course")
         if "material" in question:
             return f"You have uploaded {CourseMaterial.objects.filter(lecturer=user).count()} course material(s)."
         if "student" in question:
-            return f"{StudentCourseRegistration.objects.filter(course_id__in=assignments.values('course_id')).values('student_id').distinct().count()} student(s) are registered on your assigned courses."
+            return f"{StudentCourseRegistration.objects.filter(course_id__in=assignments.values('course_id'), is_active=True).values('student_id').distinct().count()} student(s) are registered on your assigned courses."
         names = ", ".join(assignments.values_list("course__code", flat=True)[:12])
         return f"Your assigned courses are: {names or 'none yet'}. I can also help with your materials and messages."
 
@@ -2062,7 +2558,9 @@ def _ai_answer(user, role, question):
             return f"{count} lecturer(s) belong to {department.name}."
         if "student" in question or "registration" in question:
             if role == User.Role.EXAM_OFFICER:
-                count = StudentCourseRegistration.objects.filter(course__department=department).values("student_id").distinct().count()
+                count = StudentCourseRegistration.objects.filter(
+                    course__department=department, is_active=True,
+                ).values("student_id").distinct().count()
             else:
                 count = students.filter(department=department).count()
             return f"{count} student(s) are within your authorised {department.name} scope."
@@ -2458,7 +2956,7 @@ def billing_receipt(request, payment_id):
 def profile(request):
     if request.user.role == User.Role.ADMIN:
         form_class = AdminProfileForm
-    elif request.user.role == User.Role.LECTURER:
+    elif request.user.has_role(User.Role.LECTURER):
         form_class = LecturerProfileForm
     else:
         form_class = StudentProfileForm
@@ -2518,6 +3016,8 @@ def profile(request):
             form=form,
             password_form=password_form,
             browser_alerts_enabled=request.user.browser_alerts_enabled,
+            profile_can_receive_alerts=request.user.has_role(User.Role.STUDENT, User.Role.LECTURER),
+            profile_is_institution_admin=request.user.role == User.Role.ADMIN,
         ),
     )
 
@@ -2559,18 +3059,114 @@ def institution_admin_change_password(request):
     )
 
 
+PASSWORD_RESET_OTP_TTL_SECONDS = 15 * 60
+PASSWORD_RESET_OTP_MAX_ATTEMPTS = 5
+
+
+def _password_reset_otp_digest(code):
+    return salted_hmac("portal.password-reset-otp", code).hexdigest()
+
+
 def _send_password_reset_verification(request, user):
-    form = UserPasswordResetForm({"email": user.email}, target_user=user)
-    if not form.is_valid():
+    """Email a short-lived OTP and retain only its digest in the session."""
+    if not user or not user.is_active or not user.email:
         return False
-    form.save(
-        request=request,
-        use_https=request.is_secure(),
-        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@educonnect.local"),
-        subject_template_name="portal/emails/password_reset_subject.txt",
-        email_template_name="portal/emails/password_reset_email.txt",
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    request.session["password_reset_otp"] = {
+        "user_id": user.pk,
+        "digest": _password_reset_otp_digest(code),
+        "expires_at": int(time.time()) + PASSWORD_RESET_OTP_TTL_SECONDS,
+        "attempts": 0,
+    }
+    request.session.modified = True
+    institution = getattr(request, "institution", None) or user.institution
+    portal_name = getattr(institution, "name", "") or "EduConnect"
+    message = (
+        f"Hello {user.full_name},\n\n"
+        f"Your {portal_name} password-reset verification code is: {code}\n\n"
+        "The code expires in 15 minutes. If you did not request this, you can ignore this email."
     )
+    try:
+        sent = EmailMessage(
+            subject=f"{portal_name} password reset verification code",
+            body=message,
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@educonnect.local"),
+            to=[user.email],
+        ).send(fail_silently=False)
+    except Exception:
+        request.session.pop("password_reset_otp", None)
+        request.session.modified = True
+        return False
+    if sent != 1:
+        request.session.pop("password_reset_otp", None)
+        request.session.modified = True
+        return False
     return True
+
+
+def password_reset(request):
+    """Two-step password reset: email ownership OTP, then a new password."""
+    if request.method == "GET" and request.GET.get("resend"):
+        request.session.pop("password_reset_otp", None)
+        request.session.modified = True
+        messages.info(request, "Enter your email address to receive a new verification code.")
+        return redirect("portal:password-reset")
+    reset_state = request.session.get("password_reset_otp") or {}
+    expires_at = reset_state.get("expires_at", 0)
+    if expires_at and expires_at <= int(time.time()):
+        request.session.pop("password_reset_otp", None)
+        reset_state = {}
+
+    if reset_state:
+        form = PasswordResetOTPConfirmForm(request.POST or None)
+        if request.method == "POST" and form.is_valid():
+            attempts = int(reset_state.get("attempts", 0)) + 1
+            if attempts > PASSWORD_RESET_OTP_MAX_ATTEMPTS:
+                request.session.pop("password_reset_otp", None)
+                messages.error(request, "Too many invalid codes. Request a new verification code.")
+                return redirect("portal:password-reset")
+            if not constant_time_compare(_password_reset_otp_digest(form.cleaned_data["otp"]), reset_state.get("digest", "")):
+                reset_state["attempts"] = attempts
+                request.session["password_reset_otp"] = reset_state
+                messages.error(request, "That verification code is incorrect.")
+            else:
+                user = User.all_objects.filter(pk=reset_state.get("user_id"), is_active=True).first()
+                request.session.pop("password_reset_otp", None)
+                if not user:
+                    messages.error(request, "This reset request is no longer valid. Please request another code.")
+                    return redirect("portal:password-reset")
+                user.set_password(form.cleaned_data["password1"])
+                user.save(update_fields=["password"])
+                messages.success(request, "Your password has been reset successfully.")
+                return redirect("portal:password-reset-complete")
+        return render(request, "portal/password_reset_form.html", {
+            "form": form, "otp_step": True, "masked_email": "***",
+        })
+
+    form = PasswordResetOTPRequestForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        # Keep the response identical for unknown email addresses to avoid
+        # exposing which accounts exist. A real account receives the OTP.
+        user = User.all_objects.filter(email__iexact=form.cleaned_data["email"], is_active=True).order_by("pk").first()
+        if user:
+            _send_password_reset_verification(request, user)
+        return redirect("portal:password-reset-done")
+    return render(request, "portal/password_reset_form.html", {"form": form, "otp_step": False})
+
+
+def password_reset_done(request):
+    """A neutral confirmation page after requesting a reset OTP."""
+    return render(request, "portal/password_reset_done.html")
+
+
+def password_reset_legacy_confirm(request, uidb64, token):
+    """Guide old emailed reset links into the current OTP verification flow."""
+    messages.info(request, "For your security, request a new email verification code to reset your password.")
+    return redirect("portal:password-reset")
+
+
+def password_reset_complete(request):
+    return render(request, "portal/password_reset_complete.html")
 
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
@@ -2582,7 +3178,8 @@ def send_profile_password_reset(request):
         return redirect("portal:profile")
 
     if _send_password_reset_verification(request, request.user):
-        messages.success(request, f"A password reset verification link has been sent to {request.user.email}.")
+        messages.success(request, f"A password reset verification code has been sent to {request.user.email}.")
+        return redirect("portal:password-reset")
     else:
         messages.error(request, "We could not send the password reset email right now.")
     return redirect("portal:profile")
@@ -2593,7 +3190,7 @@ def lecturer_registered_courses_queryset(user):
     # before a LecturerCourseRegistration record exists. Include both forms so
     # those courses remain visible and manageable by their assigned lecturer.
     return Course.objects.filter(
-        Q(lecturer=user) | Q(lecturer_registrations__lecturer=user)
+        Q(lecturer=user) | Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True)
     ).select_related("department", "lecturer").distinct()
 
 
@@ -2633,11 +3230,14 @@ def _filtered_timetables(request, prefix="tt"):
     form = TimetableFilterForm(request.GET or None, prefix=prefix)
     queryset = Timetable.objects.select_related("department", "programme")
     if form.is_valid():
+        faculty = form.cleaned_data.get("faculty")
         department = form.cleaned_data.get("department")
         programme = form.cleaned_data.get("programme")
         semester = form.cleaned_data.get("semester")
         level = form.cleaned_data.get("level")
         search = form.cleaned_data.get("search")
+        if faculty:
+            queryset = queryset.filter(department__faculty=faculty)
         if department:
             queryset = queryset.filter(department=department)
         if programme:
@@ -2668,6 +3268,7 @@ def student_dashboard(request):
     registrations = StudentCourseRegistration.objects.filter(
         student=request.user,
         session=current_session,
+        is_active=True,
     ).select_related("course", "course__lecturer")
     messages_qs = NotificationRecipient.objects.filter(student=request.user, is_deleted=False)
     payments = {
@@ -2735,6 +3336,8 @@ def student_departmental(request):
                     title=uploaded_file.name,
                     file=uploaded_file,
                 )
+            _return_exam_card_to_pending_approval(existing_payment)
+            _automatically_process_exam_card(existing_payment)
             messages.success(request, "Additional departmental document(s) uploaded.")
             return redirect("portal:student-departmental")
         else:
@@ -2759,6 +3362,7 @@ def student_departmental(request):
             summary = ", ".join(fee.association.name for fee in selected_fees)
             white_form = form.cleaned_data.get("white_form")
             school_receipt = form.cleaned_data.get("school_receipt")
+            course_form = form.cleaned_data.get("course_form")
             supporting_documents = form.cleaned_data.get("supporting_documents", [])
             with transaction.atomic():
                 payment = existing_payment or DepartmentalPayment(student=request.user, department=request.user.department, session=session)
@@ -2777,7 +3381,7 @@ def student_departmental(request):
                         association=fee.association,
                         amount=fee.amount,
                     )
-                if white_form or school_receipt or supporting_documents:
+                if white_form or school_receipt or course_form or supporting_documents:
                     payment.documents.all().delete()
                 if white_form:
                     DepartmentalPaymentDocument.objects.create(
@@ -2792,6 +3396,13 @@ def student_departmental(request):
                         category=DepartmentalPaymentDocument.Category.SCHOOL_RECEIPT,
                         title="School Receipt",
                         file=school_receipt,
+                    )
+                if course_form:
+                    DepartmentalPaymentDocument.objects.create(
+                        payment=payment,
+                        category=DepartmentalPaymentDocument.Category.COURSE_FORM,
+                        title="Course Form",
+                        file=course_form,
                     )
                 for uploaded_file in supporting_documents:
                     DepartmentalPaymentDocument.objects.create(
@@ -2895,6 +3506,7 @@ def student_courses(request):
     registrations = StudentCourseRegistration.objects.filter(
         student=request.user,
         session=current_session,
+        is_active=True,
     ).select_related("course", "course__lecturer")
     registered_course_ids = set(registrations.values_list("course_id", flat=True))
     payments = {
@@ -3001,6 +3613,13 @@ def student_courses(request):
                 session=current_session,
                 defaults={"registered_by": request.user},
             )
+            if not created and not registration.is_active:
+                registration.is_active = True
+                registration.superseded_at = None
+                registration.superseded_by_allocation = None
+                registration.save(update_fields=["is_active", "superseded_at", "superseded_by_allocation", "updated_at"])
+                messages.success(request, f"{course.code} registered successfully.")
+                created = True
             if created:
                 sync_material_access_for_registration(registration)
                 messages.success(request, f"{course.code} registered successfully.")
@@ -3195,7 +3814,7 @@ def student_delete_message(request, recipient_id):
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER)
 def update_alert_preferences(request):
-    if request.user.role not in {User.Role.STUDENT, User.Role.LECTURER}:
+    if not request.user.has_role(User.Role.STUDENT, User.Role.LECTURER):
         raise PermissionDenied
     if request.method != "POST":
         raise PermissionDenied
@@ -3215,13 +3834,13 @@ def update_alert_preferences(request):
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER)
 def alerts_feed(request):
-    if request.user.role not in {User.Role.STUDENT, User.Role.LECTURER}:
+    if not request.user.has_role(User.Role.STUDENT, User.Role.LECTURER):
         raise PermissionDenied
     alerts_queryset = UserAlert.objects.filter(
         recipient=request.user,
         browser_delivered_at__isnull=True,
     )
-    if request.user.role != User.Role.STUDENT:
+    if not request.user.has_role(User.Role.STUDENT):
         alerts_queryset = alerts_queryset.exclude(alert_type=UserAlert.AlertType.MESSAGE)
     alerts = list(alerts_queryset.order_by("-created_at")[:10])
     now = timezone.now()
@@ -4112,41 +4731,121 @@ def hod_programme_students_pdf(request, programme_id):
 
 @role_required(User.Role.LECTURER, User.Role.HOD)
 def hod_department_lecturers(request):
-    """List lecturer contact information for the signed-in HOD's department."""
+    """List lecturers in the HOD's department and expose their allocations."""
     department = hod_department_for(request)
     search = request.GET.get("search", "").strip()
     lecturers = User.objects.filter(department=department).filter(
         Q(role=User.Role.LECTURER)
         | Q(role_assignments__role=User.Role.LECTURER, role_assignments__is_active=True)
+        | Q(headed_department=department)
     ).distinct().order_by("last_name", "first_name", "username")
     lecturers = _search_filter(lecturers, search, "first_name", "last_name", "username", "id_number", "email")
-    return render(request, "portal/role_module.html", dashboard_context(
+    lecturers = lecturers.annotate(
+        allocated_course_total=Count(
+            "lecturer_registrations",
+            filter=Q(lecturer_registrations__course__department=department, lecturer_registrations__is_active=True),
+            distinct=True,
+        ),
+    )
+    return render(request, "portal/hod_department_lecturers.html", dashboard_context(
         request,
         "Departmental Lecturers",
         department=department,
-        rows=list(lecturers.values_list("full_name", "id_number", "email", "phone_number")),
-        columns=("Lecturer", "Staff ID", "Email", "Phone"),
-        notice="Lecturers assigned to this department.",
+        lecturers=lecturers,
+        search=search,
+    ))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
+@require_http_methods(["GET", "POST"])
+def hod_department_lecturer_detail(request, user_id):
+    """Let an HOD review and manage one departmental lecturer's allocation."""
+    department = hod_department_for(request)
+    lecturer = get_object_or_404(
+        User.objects.filter(department=department).filter(
+            Q(role=User.Role.LECTURER)
+            | Q(role_assignments__role=User.Role.LECTURER, role_assignments__is_active=True)
+            | Q(headed_department=department)
+        ).distinct(),
+        pk=user_id,
+    )
+    current_session = current_departmental_session()
+    allocated_courses = Course.objects.filter(department=department).filter(
+        Q(lecturer=lecturer) | Q(lecturer_registrations__lecturer=lecturer, lecturer_registrations__is_active=True)
+    ).filter(
+        Q(academic_session=current_session) | Q(academic_session__isnull=True)
+    ).distinct().order_by("code")
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        course = get_object_or_404(
+            Course.objects.filter(department=department).filter(
+                Q(academic_session=current_session) | Q(academic_session__isnull=True)
+            ),
+            pk=request.POST.get("course_id"),
+        )
+        if action == "allocate-course":
+            if course.lecturer_id and course.lecturer_id != lecturer.id:
+                messages.error(request, f"{course.code} is already allocated to another lecturer.")
+            else:
+                with transaction.atomic():
+                    if course.lecturer_id != lecturer.id:
+                        course.lecturer = lecturer
+                        course.save(update_fields=["lecturer", "updated_at"])
+                    allocation, _ = LecturerCourseRegistration.objects.get_or_create(
+                        lecturer=lecturer, course=course,
+                    )
+                    if not allocation.is_active:
+                        allocation.is_active = True
+                        allocation.deactivated_at = None
+                        allocation.save(update_fields=["is_active", "deactivated_at", "updated_at"])
+                messages.success(request, f"{course.code} was allocated to {lecturer.full_name}.")
+        elif action == "remove-course":
+            if not allocated_courses.filter(pk=course.pk).exists():
+                raise PermissionDenied
+            with transaction.atomic():
+                LecturerCourseRegistration.objects.filter(
+                    lecturer=lecturer, course=course, is_active=True,
+                ).update(
+                    is_active=False,
+                    deactivated_at=timezone.now(),
+                    updated_at=timezone.now(),
+                )
+                if course.lecturer_id == lecturer.id:
+                    course.lecturer = None
+                    course.save(update_fields=["lecturer", "updated_at"])
+            messages.success(request, f"{course.code} was removed from {lecturer.full_name}'s allocation.")
+        else:
+            raise PermissionDenied
+        return redirect("portal:hod-department-lecturer-detail", user_id=lecturer.pk)
+
+    available_courses = Course.objects.filter(
+        department=department,
+        lecturer__isnull=True,
+    ).filter(
+        Q(academic_session=current_session) | Q(academic_session__isnull=True)
+    ).exclude(pk__in=allocated_courses).order_by("code")
+    return render(request, "portal/hod_department_lecturer_detail.html", dashboard_context(
+        request,
+        f"{lecturer.full_name} Courses",
+        department=department,
+        lecturer=lecturer,
+        allocated_courses=allocated_courses,
+        available_courses=available_courses,
     ))
 
 
 @role_required(User.Role.LECTURER, User.Role.HOD)
 def hod_department_students(request):
-    """Retain the HOD's departmental student list inside the Departmental menu."""
+    """Show HODs the same paid departmental records available to lecturers."""
     department = hod_department_for(request)
-    search = request.GET.get("search", "").strip()
-    students = User.objects.filter(role=User.Role.STUDENT, department=department).order_by(
-        "level", "last_name", "first_name", "username",
-    )
-    students = _search_filter(students, search, "first_name", "last_name", "username", "id_number", "programme__name")
-    return render(request, "portal/role_module.html", dashboard_context(
+    context = dashboard_context(
         request,
         "Departmental Students",
         department=department,
-        rows=list(students.values_list("full_name", "id_number", "programme__name", "level")),
-        columns=("Student", "Student ID", "Programme", "Level"),
-        notice="Students assigned to this department.",
-    ))
+        **departmental_download_context(request, scope="hod", department=department),
+    )
+    return render(request, "portal/departmental_students.html", context)
 
 
 @role_required(User.Role.LECTURER, User.Role.HOD)
@@ -4159,34 +4858,55 @@ def hod_exam_officer(request):
     ).distinct().order_by("first_name", "last_name", "username")
     if request.method == "POST":
         lecturer = get_object_or_404(lecturers, pk=request.POST.get("lecturer_id"))
-        assignment, created = RoleAssignment.objects.get_or_create(
-            institution=request.institution,
-            user=lecturer,
-            role=User.Role.EXAM_OFFICER,
-            department=department,
-            defaults={"assigned_by": request.user},
-        )
-        if not assignment.is_active:
-            assignment.is_active = True
-            assignment.assigned_by = request.user
-            assignment.save(update_fields=["is_active", "assigned_by", "updated_at"])
-            created = True
-        if created:
+        with transaction.atomic():
+            # Use the department's tenant and the unfiltered manager.  The
+            # target may be an earlier inactive assignment; reactivating that
+            # row avoids inserting a duplicate user/role/department record.
+            institution = department.institution
+            assignments = RoleAssignment.all_objects.select_for_update().filter(
+                institution=institution,
+                department=department,
+                role=User.Role.EXAM_OFFICER,
+            )
+            previous_officer = assignments.filter(is_active=True).exclude(user=lecturer).select_related("user").first()
+            assignments.filter(is_active=True).exclude(user=lecturer).update(is_active=False)
+            assignment = assignments.filter(user=lecturer).first()
+            created = assignment is None
+            if assignment is None:
+                assignment = RoleAssignment(
+                    institution=institution, user=lecturer,
+                    role=User.Role.EXAM_OFFICER, department=department,
+                    assigned_by=request.user, is_active=True,
+                )
+                assignment.save()
+            elif not assignment.is_active:
+                RoleAssignment.all_objects.filter(pk=assignment.pk).update(
+                    is_active=True, assigned_by=request.user,
+                )
+                assignment.refresh_from_db()
+                created = True
+        if created or previous_officer:
             AuditLog.objects.create(
                 institution=request.institution, user=request.user, action="exam_officer_assigned",
                 object_type="RoleAssignment", object_id=str(assignment.pk),
-                new_value={"lecturer_id": lecturer.id, "department_id": department.id, "role": User.Role.EXAM_OFFICER},
-                description="HOD assigned Exam Officer while retaining the lecturer account and role.", ip_address=_client_ip(request),
+                new_value={"lecturer_id": lecturer.id, "department_id": department.id, "role": User.Role.EXAM_OFFICER,
+                           "replaced_lecturer_id": previous_officer.user_id if previous_officer else None},
+                description="HOD assigned the department's Exam Officer while retaining the lecturer account and role.", ip_address=_client_ip(request),
             )
-            messages.success(request, f"{lecturer.full_name} is now an Exam Officer for {department.name}.")
+            messages.success(request, f"{lecturer.full_name} is now the Exam Officer for {department.name}.")
         else:
             messages.info(request, f"{lecturer.full_name} is already the Exam Officer for this department.")
         return redirect("portal:hod-exam-officer")
-    exam_officer_ids = set(RoleAssignment.objects.filter(
+    exam_officer = RoleAssignment.objects.filter(
         department=department, role=User.Role.EXAM_OFFICER, is_active=True,
-    ).values_list("user_id", flat=True))
+    ).select_related("user").first()
     return render(request, "portal/hod_exam_officer.html", dashboard_context(
-        request, "Exam Officer", department=department, lecturers=lecturers, exam_officer_ids=exam_officer_ids,
+        request,
+        "Exam Officer",
+        department=department,
+        lecturers=lecturers,
+        exam_officer=exam_officer,
+        exam_officer_ids={exam_officer.user_id} if exam_officer else set(),
     ))
 
 
@@ -4197,10 +4917,10 @@ def hod_departmental_apis(request):
     form = DepartmentPaymentGatewayForm(instance=gateway)
     course_gateway, _ = DepartmentCoursePaymentGateway.objects.get_or_create(department=department)
     course_gateway_form = DepartmentCoursePaymentGatewayForm(instance=course_gateway)
-    allocation_form = CourseAllocationUploadForm()
+    allocation_form = CourseAllocationUploadForm(department=department)
     handbook_form = HandbookForm(initial={"department": department})
     if request.method == "POST" and request.POST.get("action") == "upload-allocations":
-        allocation_form = CourseAllocationUploadForm(request.POST, request.FILES)
+        allocation_form = CourseAllocationUploadForm(request.POST, request.FILES, department=department)
         if allocation_form.is_valid():
             upload = allocation_form.save(commit=False)
             upload.department = department
@@ -4803,13 +5523,209 @@ def admin_delete_user(request, user_id):
     return redirect(_redirect_with_query(request, "portal:admin-users"))
 
 
-@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
+@role_required(User.Role.EXAM_OFFICER)
+@require_http_methods(["GET", "POST"])
+def exam_card_approvals(request):
+    """Review departmental submissions and maintain AI auto-approval rules."""
+    department_ids = list(RoleAssignment.objects.filter(
+        user=request.user,
+        role=User.Role.EXAM_OFFICER,
+        is_active=True,
+        department__isnull=False,
+    ).values_list("department_id", flat=True))
+    if not department_ids:
+        raise PermissionDenied("You are not assigned as an Exam Officer for a department.")
+
+    payments = DepartmentalPayment.objects.filter(
+        department_id__in=department_ids,
+        status=DepartmentalPayment.Status.PAID,
+    ).select_related("student", "department", "session", "exam_card_approved_by").prefetch_related("documents")
+    selected_status = request.GET.get("status", DepartmentalPayment.ExamCardApprovalStatus.PENDING)
+    valid_statuses = set(DepartmentalPayment.ExamCardApprovalStatus.values)
+    if selected_status not in valid_statuses:
+        selected_status = DepartmentalPayment.ExamCardApprovalStatus.PENDING
+    search = request.GET.get("search", "").strip()
+    if search:
+        payments = payments.filter(
+            Q(student__id_number__icontains=search)
+            | Q(student__username__icontains=search)
+            | Q(student__first_name__icontains=search)
+            | Q(student__last_name__icontains=search)
+        )
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action == "save-ai-config":
+            department_id = request.POST.get("department")
+            session_id = request.POST.get("academic_session")
+            configuration = ExamCardAIConfiguration.objects.filter(
+                department_id=department_id,
+                academic_session_id=session_id,
+            ).first()
+            configuration_form = ExamCardAIConfigurationForm(
+                request.POST, instance=configuration, departments=department_ids,
+            )
+            if configuration_form.is_valid():
+                configuration = configuration_form.save(commit=False)
+                configuration.configured_by = request.user
+                configuration.save()
+                approved_count = _auto_process_pending_exam_cards(configuration)
+                AuditLog.objects.create(
+                    institution=request.institution, user=request.user,
+                    action="exam_card_ai_configured", object_type="ExamCardAIConfiguration",
+                    object_id=str(configuration.id),
+                    new_value={
+                        "department_id": configuration.department_id,
+                        "academic_session_id": configuration.academic_session_id,
+                        "semester": configuration.semester,
+                        "automatic_processing_enabled": configuration.automatic_processing_enabled,
+                    },
+                    description="Exam Officer saved automatic examination-card verification rules.",
+                    ip_address=_client_ip(request),
+                )
+                messages.success(
+                    request,
+                    "AI approval rules saved."
+                    + (f" {approved_count} pending card(s) were automatically approved." if approved_count else ""),
+                )
+                return redirect("portal:exam-card-approvals")
+            messages.error(request, "Correct the AI approval rule settings below.")
+        elif action == "add-ai-reference":
+            configuration = get_object_or_404(
+                ExamCardAIConfiguration.objects.filter(department_id__in=department_ids),
+                pk=request.POST.get("configuration_id"),
+            )
+            reference_form = ExamCardAIReferenceDocumentForm(request.POST, request.FILES)
+            if reference_form.is_valid():
+                reference = reference_form.save(commit=False)
+                reference.configuration = configuration
+                if configuration.reference_documents.filter(category=reference.category).exists():
+                    reference_form.add_error("category", "Replace or remove the existing sample for this document type first.")
+                    messages.error(request, "Each required payment document can have one trusted sample.")
+                else:
+                    reference.title = reference.get_category_display()
+                    reference.save()
+                    approved_count = _auto_process_pending_exam_cards(configuration)
+                    AuditLog.objects.create(
+                        institution=request.institution, user=request.user,
+                        action="exam_card_ai_reference_uploaded", object_type="ExamCardAIReferenceDocument",
+                        object_id=str(reference.id),
+                        new_value={"configuration_id": configuration.id, "category": reference.category, "file_name": reference.file.name},
+                        description="Exam Officer uploaded a trusted sample for a required departmental-payment document.",
+                        ip_address=_client_ip(request),
+                    )
+                    messages.success(
+                        request,
+                        "Trusted payment-document sample uploaded."
+                        + (f" {approved_count} pending card(s) were automatically approved." if approved_count else ""),
+                    )
+                    return redirect("portal:exam-card-approvals")
+            messages.error(request, "Choose a valid trusted reference document.")
+        elif action == "delete-ai-reference":
+            reference = get_object_or_404(
+                ExamCardAIReferenceDocument.objects.filter(configuration__department_id__in=department_ids),
+                pk=request.POST.get("reference_id"),
+            )
+            reference.delete()
+            messages.success(request, "Trusted reference document removed.")
+            return redirect("portal:exam-card-approvals")
+        elif action == "process-ai-pending":
+            configuration = get_object_or_404(
+                ExamCardAIConfiguration.objects.filter(department_id__in=department_ids),
+                pk=request.POST.get("configuration_id"),
+            )
+            approved_count = _auto_process_pending_exam_cards(configuration)
+            messages.success(request, f"Automatic processing completed. {approved_count} card(s) approved.")
+            return redirect("portal:exam-card-approvals")
+
+        if action not in {"approve", "reject"}:
+            # Preserve the bound configuration form below when validation fails.
+            pass
+        else:
+            payment = get_object_or_404(payments, pk=request.POST.get("payment_id"))
+            rejection_reason = request.POST.get("rejection_reason", "").strip()
+            if action == "reject" and not rejection_reason:
+                messages.error(request, "Give the student a reason before rejecting an examination card request.")
+                return redirect("portal:exam-card-approvals")
+            with transaction.atomic():
+                payment = DepartmentalPayment.objects.select_for_update().get(pk=payment.pk)
+                payment.exam_card_approval_status = (
+                    DepartmentalPayment.ExamCardApprovalStatus.APPROVED
+                    if action == "approve" else DepartmentalPayment.ExamCardApprovalStatus.REJECTED
+                )
+                payment.exam_card_approved_by = request.user
+                payment.exam_card_approved_at = timezone.now()
+                payment.exam_card_rejection_reason = rejection_reason if action == "reject" else ""
+                payment.exam_card_approved_automatically = False
+                if action == "reject":
+                    payment.exam_card_revoked_at = timezone.now()
+                payment.save(update_fields=[
+                    "exam_card_approval_status", "exam_card_approved_by", "exam_card_approved_at",
+                    "exam_card_rejection_reason", "exam_card_approved_automatically",
+                    "exam_card_revoked_at", "updated_at",
+                ])
+                AuditLog.objects.create(
+                    institution=payment.institution,
+                    user=request.user,
+                    action=f"exam_card_{action}d",
+                    object_type="DepartmentalPayment",
+                    object_id=str(payment.pk),
+                    new_value={"department_id": payment.department_id, "status": payment.exam_card_approval_status},
+                    description=f"Exam Officer {action}d examination-card request for {payment.student.full_name}.",
+                    ip_address=_client_ip(request),
+                )
+            messages.success(request, f"Examination card request {action}d.")
+            return redirect("portal:exam-card-approvals")
+
+    status_counts = {
+        status: payments.filter(exam_card_approval_status=status).count()
+        for status in DepartmentalPayment.ExamCardApprovalStatus.values
+    }
+    configurations = ExamCardAIConfiguration.objects.filter(
+        department_id__in=department_ids,
+    ).select_related("department", "academic_session", "configured_by").prefetch_related("reference_documents")
+    configuration_form = locals().get("configuration_form") or ExamCardAIConfigurationForm(
+        departments=department_ids,
+        initial={"academic_session": current_departmental_session()},
+    )
+    reference_form = locals().get("reference_form") or ExamCardAIReferenceDocumentForm()
+    return render(request, "portal/exam_card_approvals.html", dashboard_context(
+        request,
+        "Exam Cards",
+        payments=payments.filter(exam_card_approval_status=selected_status),
+        selected_status=selected_status,
+        search=search,
+        status_counts=status_counts,
+        ai_configuration_form=configuration_form,
+        ai_reference_form=reference_form,
+        ai_configurations=configurations,
+    ))
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN, User.Role.HOD, User.Role.EXAM_OFFICER)
 def download_departmental_document(request, document_id):
     document = get_object_or_404(
         DepartmentalPaymentDocument.objects.select_related("payment", "payment__student", "payment__department"),
         pk=document_id,
     )
-    if request.user.role == User.Role.STUDENT and document.payment.student_id != request.user.id:
+    if request.user.has_role(User.Role.STUDENT):
+        if document.payment.student_id != request.user.id:
+            raise PermissionDenied
+    elif request.user.has_role(User.Role.ADMIN):
+        pass
+    elif request.user.has_role(User.Role.EXAM_OFFICER):
+        is_assigned_officer = RoleAssignment.objects.filter(
+            user=request.user,
+            role=User.Role.EXAM_OFFICER,
+            department=document.payment.department,
+            is_active=True,
+        ).exists()
+        if not is_assigned_officer:
+            raise PermissionDenied
+    elif request.user.has_role(User.Role.HOD):
+        if hod_department_for(request) != document.payment.department:
+            raise PermissionDenied
+    elif request.user.department_id != document.payment.department_id:
         raise PermissionDenied
     return FileResponse(document.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=document.file.name.rsplit("/", 1)[-1])
 
@@ -4823,15 +5739,39 @@ def download_exam_card(request, payment_id):
     )
     if request.user.role == User.Role.STUDENT and payment.student_id != request.user.id:
         raise PermissionDenied
+    if request.user.role == User.Role.STUDENT and not payment.exam_card_is_approved:
+        raise PermissionDenied("Your examination card is awaiting Exam Officer approval.")
     registered_courses = [
         f"{registration.course.code} - {registration.course.title}"
         for registration in StudentCourseRegistration.objects.filter(
             student=payment.student,
             session=payment.session,
+            is_active=True,
         ).select_related("course").order_by("course__code")
     ]
+    # A freshly rendered card gets a fresh opaque secret. Only a keyed hash is
+    # retained, so a leaked database cannot turn into usable QR links.
+    verification_token = payment.issue_exam_card_token()
+    verification_url = request.build_absolute_uri(
+        reverse("portal:verify-exam-card", args=[verification_token])
+    )
+    institution = payment.institution or request.institution
+    # Older single-tenant records are attached to the compatibility tenant;
+    # their administrator-managed InstitutionProfile remains the source of the
+    # public school name and logo. New tenant records use Institution directly.
+    card_brand = institution
+    if institution and institution.institution_code == "EDUCONNECT-LEGACY":
+        card_brand = InstitutionProfile.all_objects.filter(institution=institution).first() or institution
+    try:
+        logo_path = card_brand.logo.path if card_brand and card_brand.logo else None
+    except (NotImplementedError, OSError, ValueError):
+        logo_path = None
+    try:
+        passport_photo_path = payment.student.passport_photo.path if payment.student.passport_photo else None
+    except (NotImplementedError, OSError, ValueError):
+        passport_photo_path = None
     pdf_bytes = build_exam_card_pdf(
-        school_name=InstitutionProfile.objects.first().name if InstitutionProfile.objects.exists() else "Educonnect",
+        school_name=card_brand.name if card_brand else "Educonnect",
         card_title="Departmental Examination Clearance Card",
         session_label=payment.session.name,
         fields=[
@@ -4843,7 +5783,9 @@ def download_exam_card(request, payment_id):
         ],
         registered_courses=registered_courses,
         portrait_text=payment.student.full_name,
-        passport_photo_path=payment.student.passport_photo.path if payment.student.passport_photo else None,
+        passport_photo_path=passport_photo_path,
+        school_logo_path=logo_path,
+        verification_url=verification_url,
     )
     session_slug = payment.session.name.replace("/", "-")
     response = HttpResponse(pdf_bytes, content_type="application/pdf")
@@ -4852,11 +5794,43 @@ def download_exam_card(request, payment_id):
     return response
 
 
+def verify_exam_card(request, token):
+    """Public, rate-limited verification for a non-guessable card token."""
+    if _exam_card_verification_limited(request):
+        return HttpResponse("Too many verification attempts. Please try again shortly.", status=429)
+    if len(token) < 40 or len(token) > 128:
+        raise Http404("This examination-card verification link is invalid.")
+    payment = DepartmentalPayment.all_objects.select_related(
+        "student", "department", "session", "institution"
+    ).filter(exam_card_token_hash=DepartmentalPayment.exam_card_token_hash_for(token)).first()
+    # Identical invalid responses avoid turning this into a card or tenant
+    # discovery oracle.
+    if not payment:
+        raise Http404("This examination-card verification link is invalid.")
+    if not payment.exam_card_is_valid:
+        return render(request, "portal/exam_card_verification.html", {"verification_status": "invalid"}, status=410)
+    registered_courses = StudentCourseRegistration.all_objects.filter(
+        student=payment.student, session=payment.session, is_active=True,
+    ).select_related("course").order_by("course__code")
+    card_brand = payment.institution
+    if card_brand and card_brand.institution_code == "EDUCONNECT-LEGACY":
+        card_brand = InstitutionProfile.all_objects.filter(institution=card_brand).first() or card_brand
+    return render(request, "portal/exam_card_verification.html", {
+        "institution": card_brand,
+        "payment": payment,
+        "student": payment.student,
+        "registered_courses": registered_courses,
+        "verification_status": "valid",
+    })
+
+
 @role_required(User.Role.ADMIN, User.Role.LECTURER)
 def departmental_student_ids_pdf(request):
     payments = departmental_payment_queryset().filter(session=current_departmental_session())
-    if request.user.role == User.Role.LECTURER and request.user.department_id:
-        payments = payments.filter(department=request.user.department)
+    if request.user.has_role(User.Role.LECTURER):
+        department = hod_department_for(request) if request.user.has_role(User.Role.HOD) else request.user.department
+        if department:
+            payments = payments.filter(department=department)
     department_id = request.GET.get("department")
     level = request.GET.get("level")
     if department_id:
@@ -4891,6 +5865,7 @@ def download_course_file(request, course_id):
             student=request.user,
             course=course,
             session=current_departmental_session(),
+            is_active=True,
         ).first()
         if not registration:
             raise PermissionDenied
@@ -4939,7 +5914,7 @@ def lecturer_paid_course_students_pdf(request, course_id):
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
 def download_material(request, material_id):
     material = get_object_or_404(CourseMaterial.objects.select_related("course", "lecturer"), pk=material_id)
-    if request.user.is_superuser or request.user.role in {User.Role.ADMIN, User.Role.LECTURER}:
+    if request.user.is_superuser or request.user.role == User.Role.ADMIN or request.user.has_role(User.Role.LECTURER):
         return FileResponse(material.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=material.file.name.rsplit("/", 1)[-1])
     if request.user.role != User.Role.STUDENT:
         raise PermissionDenied
@@ -4947,6 +5922,7 @@ def download_material(request, material_id):
         student=request.user,
         course=material.course,
         session=current_departmental_session(),
+        is_active=True,
     ).first()
     if not registration:
         raise PermissionDenied
@@ -4993,7 +5969,7 @@ def download_message_attachment(request, notification_id):
     if request.user.role == User.Role.STUDENT:
         if not notification.recipients.filter(student=request.user, is_deleted=False).exists():
             raise PermissionDenied
-    elif request.user.role == User.Role.LECTURER and notification.sender_id != request.user.id:
+    elif request.user.has_role(User.Role.LECTURER) and notification.sender_id != request.user.id:
         raise PermissionDenied
     return FileResponse(
         notification.attachment.open("rb"),
@@ -5014,7 +5990,7 @@ def download_notification_attachment(request, attachment_id):
     if request.user.role == User.Role.STUDENT:
         if not notification.recipients.filter(student=request.user, is_deleted=False).exists():
             raise PermissionDenied
-    elif request.user.role == User.Role.LECTURER and notification.sender_id != request.user.id:
+    elif request.user.has_role(User.Role.LECTURER) and notification.sender_id != request.user.id:
         raise PermissionDenied
     return FileResponse(
         attachment.file.open("rb"),

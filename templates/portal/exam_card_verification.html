@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+
+{% block title %}Exam Card Verification{% endblock %}
+
+{% block content %}
+<main class="page-shell">
+    <section class="container panel-card" style="margin-top: 2rem; margin-bottom: 2rem; max-width: 760px;">
+        {% if verification_status == "valid" %}
+        <div class="panel-head"><h2>Exam Card Verified</h2><span class="status-pill success">Valid</span></div>
+        <p class="muted-note">This examination clearance card was issued by {{ institution.name }}.</p>
+        <div class="detail-grid">
+            <p><strong>Student:</strong> {{ student.full_name }}</p>
+            <p><strong>Matric No.:</strong> {{ student.id_number|default:"Not supplied" }}</p>
+            <p><strong>Department:</strong> {{ payment.department.name }}</p>
+            <p><strong>Level:</strong> {{ student.level|default:"Not supplied" }}</p>
+            <p><strong>Session:</strong> {{ payment.session.name }}</p>
+            <p><strong>Card status:</strong> Valid for examination clearance</p>
+        </div>
+        <h3>Registered Courses</h3>
+        <ul>
+            {% for registration in registered_courses %}<li>{{ registration.course.code }} — {{ registration.course.title }}</li>{% empty %}<li>No registered courses recorded for this session.</li>{% endfor %}
+        </ul>
+        <p class="muted-note">This page intentionally shows only the information needed to verify this examination card. It does not display contact, payment, password, result or transcript information.</p>
+        {% else %}
+        <div class="panel-head"><h2>Exam Card Not Valid</h2><span class="status-pill warning">Invalid</span></div>
+        <p class="muted-note">This examination card has been cancelled, replaced, or is no longer valid. No student information is displayed.</p>
+        {% endif %}
+    </section>
+</main>
+{% endblock %}

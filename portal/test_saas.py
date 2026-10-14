@@ -778,9 +778,9 @@ class ScreeningIntegrationTests(TestCase):
 
         response = self.client.post(reverse("portal:profile-password-reset"))
 
-        self.assertRedirects(response, reverse("portal:profile"))
+        self.assertRedirects(response, reverse("portal:password-reset"))
         self.assertEqual(mail.outbox[0].to, [self.institution_admin.email])
-        self.assertIn("password-reset/confirm", mail.outbox[0].body)
+        self.assertIn("verification code", mail.outbox[0].body)
 
     def test_institution_admin_can_change_their_password_from_their_profile(self):
         self.client.force_login(self.institution_admin)
@@ -820,7 +820,7 @@ class ScreeningIntegrationTests(TestCase):
                 response = self.client.get(reverse(url_name))
                 self.assertEqual(response.status_code, 200)
 
-    def test_super_admin_resets_an_institution_admin_password_and_sends_a_verification_link(self):
+    def test_super_admin_resets_an_institution_admin_password_and_sends_a_verification_code(self):
         self.client.force_login(self.super_admin)
 
         response = self.client.post(
@@ -831,7 +831,7 @@ class ScreeningIntegrationTests(TestCase):
         self.institution_admin.refresh_from_db()
         self.assertTrue(self.institution_admin.check_password(TEMPORARY_ACCOUNT_PASSWORD))
         self.assertEqual(mail.outbox[0].to, [self.institution_admin.email])
-        self.assertIn("password-reset/confirm", mail.outbox[0].body)
+        self.assertIn("verification code", mail.outbox[0].body)
 
     def test_institution_list_stacks_sections_and_shows_reset_for_every_institution_admin(self):
         second_institution = Institution.objects.create(

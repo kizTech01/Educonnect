@@ -54,6 +54,7 @@
                         </div>
                         {{ signup_form.password2.errors }}
                     </label>
+                    <label class="checkbox-label">{{ signup_form.accept_terms }} {{ signup_form.accept_terms.label }} {{ signup_form.accept_terms.errors }}</label>
                     <button type="submit" class="primary-btn full-width">
                         {% if is_student %}
                             Create Student Account

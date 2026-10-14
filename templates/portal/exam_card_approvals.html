@@ -1,0 +1,164 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Exam Cards | EduConnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="split-layout">
+    <div class="panel-card">
+        <div class="panel-head">
+            <div>
+                <h2>EduConnect AI Approval</h2>
+                <p class="muted-note">Set rules for one department and academic session, then enable automatic processing. The system checks the paid submission, required payment documents, the student's shared identity details, and the academic session before approving.</p>
+            </div>
+        </div>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="save-ai-config">
+            {{ ai_configuration_form.non_field_errors }}
+            <label>Department {{ ai_configuration_form.department }} {{ ai_configuration_form.department.errors }}</label>
+            <label>Academic session {{ ai_configuration_form.academic_session }} {{ ai_configuration_form.academic_session.errors }}</label>
+            <label class="option-row">{{ ai_configuration_form.require_white_form }} <span>Require White Form</span></label>
+            <label class="option-row">{{ ai_configuration_form.require_school_receipt }} <span>Require School Receipt</span></label>
+            <label class="option-row">{{ ai_configuration_form.require_course_form }} <span>Require Course Form</span></label>
+            <label class="option-row">{{ ai_configuration_form.verify_student_identifier }} <span>Require the student's ID or name in every required payment document</span></label>
+            <label class="option-row">{{ ai_configuration_form.verify_academic_session }} <span>Require the academic session in each sample and submitted payment document</span></label>
+            <label class="option-row">{{ ai_configuration_form.automatic_processing_enabled }} <span>Enable automatic approval processing</span></label>
+            <button class="primary-btn" type="submit">Save AI Approval Rules</button>
+        </form>
+    </div>
+
+    <div class="panel-card">
+        <div class="panel-head"><h2>Required Payment-Document Samples</h2></div>
+        {% for configuration in ai_configurations %}
+            <div class="detail-card">
+                <h3>{{ configuration.department.name }} · {{ configuration.academic_session.name }}</h3>
+                <p><span class="status-pill {% if configuration.automatic_processing_enabled %}success{% else %}warning{% endif %}">{% if configuration.automatic_processing_enabled %}Automatic processing enabled{% else %}Automatic processing disabled{% endif %}</span></p>
+                <div class="message-list">
+                    {% for reference in configuration.reference_documents.all %}
+                        <div class="message-item shell">
+                            <div><strong>{{ reference.get_category_display }} sample</strong><span>{{ reference.file.name|cut:"exam_card_ai_references/" }}</span></div>
+                            <form method="post">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="delete-ai-reference">
+                                <input type="hidden" name="reference_id" value="{{ reference.id }}">
+                                <button class="danger-btn small" type="submit">Remove</button>
+                            </form>
+                        </div>
+                    {% empty %}
+                        <p class="muted-note">Upload one sample for every document type required from students. Automatic approval remains pending until all required samples are present.</p>
+                    {% endfor %}
+                </div>
+                <form method="post" enctype="multipart/form-data" class="stack-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="add-ai-reference">
+                    <input type="hidden" name="configuration_id" value="{{ configuration.id }}">
+                    <label>{{ ai_reference_form.category.label }} {{ ai_reference_form.category }} {{ ai_reference_form.category.errors }}</label>
+                    <label>{{ ai_reference_form.file.label }} (PDF, DOCX, TXT, or CSV) {{ ai_reference_form.file }} {{ ai_reference_form.file.errors }}</label>
+                    <button class="ghost-btn small" type="submit">Upload Payment-Document Sample</button>
+                </form>
+                <form method="post" class="compact-course-actions">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="process-ai-pending">
+                    <input type="hidden" name="configuration_id" value="{{ configuration.id }}">
+                    <button class="ghost-btn small" type="submit">Process Pending Requests</button>
+                </form>
+            </div>
+        {% empty %}
+            <p class="muted-note">Save a department and session rule set before uploading payment-document samples.</p>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head">
+        <div>
+            <h2>Exam Card Approval</h2>
+            <p class="muted-note">Review paid departmental submissions for your assigned department(s). An approved card becomes available to the student immediately.</p>
+        </div>
+    </div>
+
+    <nav class="departmental-tabs" aria-label="Exam card status">
+        <a class="ghost-btn small {% if selected_status == 'pending' %}active{% endif %}" href="?status=pending{% if search %}&amp;search={{ search|urlencode }}{% endif %}">Pending Approval ({{ status_counts.pending|default:0 }})</a>
+        <a class="ghost-btn small {% if selected_status == 'approved' %}active{% endif %}" href="?status=approved{% if search %}&amp;search={{ search|urlencode }}{% endif %}">Approved ({{ status_counts.approved|default:0 }})</a>
+        <a class="ghost-btn small {% if selected_status == 'rejected' %}active{% endif %}" href="?status=rejected{% if search %}&amp;search={{ search|urlencode }}{% endif %}">Rejected ({{ status_counts.rejected|default:0 }})</a>
+    </nav>
+
+    <form method="get" class="compact-course-actions">
+        <input type="hidden" name="status" value="{{ selected_status }}">
+        <label>Find a student <input class="input-field" type="search" name="search" value="{{ search }}" placeholder="Student ID or name"></label>
+        <button class="ghost-btn small" type="submit">Search</button>
+    </form>
+
+    <div class="table-wrap responsive-table-wrap">
+        <table class="responsive-table">
+            <thead>
+                <tr>
+                    <th>Student</th>
+                    <th>Department / Session</th>
+                    <th>Payment</th>
+                    <th>Submitted Documents</th>
+                    <th>Decision</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for payment in payments %}
+                    <tr>
+                        <td>
+                            <strong>{{ payment.student.full_name }}</strong><br>
+                            <span class="muted-note">{{ payment.student.id_number|default:payment.student.username }}</span>
+                        </td>
+                        <td>{{ payment.department.name }}<br><span class="muted-note">{{ payment.session.name }}</span></td>
+                        <td>
+                            <span class="status-pill success">Paid</span><br>
+                            <span class="muted-note">{{ payment.paid_at|date:"M d, Y H:i" }}</span>
+                        </td>
+                        <td>
+                            {% for document in payment.documents.all %}
+                                <div class="compact-course-actions">
+                                    <span>{{ document.get_category_display }}: {{ document.title }}</span>
+                                    <a class="ghost-btn small" href="{% url 'portal:download-departmental-document' document.id %}" target="_blank" rel="noopener">View</a>
+                                    <a class="ghost-btn small" href="{% url 'portal:download-departmental-document' document.id %}?download=1">Download</a>
+                                </div>
+                            {% empty %}
+                                <span class="muted-note">No documents submitted.</span>
+                            {% endfor %}
+                        </td>
+                        <td class="actions-cell">
+                            {% if payment.exam_card_approval_status == 'pending' %}
+                                {% if payment.exam_card_ai_verification %}
+                                    <p class="muted-note">Automatic verification requires manual review.</p>
+                                {% endif %}
+                                <form method="post" class="compact-course-actions">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="payment_id" value="{{ payment.id }}">
+                                    <input type="hidden" name="action" value="approve">
+                                    <button class="primary-btn small" type="submit">Approve</button>
+                                </form>
+                                <form method="post" class="stack-form">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="payment_id" value="{{ payment.id }}">
+                                    <input type="hidden" name="action" value="reject">
+                                    <label>
+                                        Reason if rejecting
+                                        <textarea class="input-field" name="rejection_reason" rows="2" required></textarea>
+                                    </label>
+                                    <button class="danger-btn small" type="submit">Reject</button>
+                                </form>
+                            {% elif payment.exam_card_approval_status == 'approved' %}
+                                <span class="status-pill success">Approved</span><br>
+                                <span class="muted-note">{% if payment.exam_card_approved_automatically %}EduConnect AI{% else %}{{ payment.exam_card_approved_by.full_name|default:"-" }}{% endif %} · {{ payment.exam_card_approved_at|date:"M d, Y H:i" }}</span>
+                            {% else %}
+                                <span class="status-pill danger">Rejected</span>
+                                <p class="muted-note">{{ payment.exam_card_rejection_reason }}</p>
+                                <span class="muted-note">{{ payment.exam_card_approved_by.full_name|default:"-" }} · {{ payment.exam_card_approved_at|date:"M d, Y H:i" }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="5" class="empty-text">No {{ selected_status }} examination-card requests.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

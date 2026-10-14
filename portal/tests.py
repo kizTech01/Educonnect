@@ -39,6 +39,7 @@ from .models import (
     DepartmentalAssociation,
     DepartmentalFee,
     DepartmentalPayment,
+    DepartmentalPaymentDocument,
     Handbook,
     InstitutionProfile,
     Institution,
@@ -89,6 +90,62 @@ class InstitutionalRBACTests(TestCase):
             user=self.lecturer, role=User.Role.EXAM_OFFICER, department=self.department,
         ).exists())
         self.assertTrue(AuditLog.objects.filter(action="exam_officer_assigned", user=self.hod).exists())
+
+    def test_exam_officer_reviews_its_department_paid_submission_and_issues_card(self):
+        session = AcademicSession.objects.create(name="2031/2032", is_current=True)
+        student = User.objects.create_user(
+            username="exam-card-student", password="pass1234", role=User.Role.STUDENT,
+            department=self.department, level="100",
+        )
+        payment = DepartmentalPayment.objects.create(
+            student=student, department=self.department, session=session,
+            status=DepartmentalPayment.Status.PAID, total_amount=Decimal("4000.00"),
+        )
+        other_department = Department.objects.create(name="Mathematics", code="MTH")
+        other_student = User.objects.create_user(
+            username="other-exam-card-student", password="pass1234", role=User.Role.STUDENT,
+            department=other_department, level="100",
+        )
+        other_payment = DepartmentalPayment.objects.create(
+            student=other_student, department=other_department, session=session,
+            status=DepartmentalPayment.Status.PAID, total_amount=Decimal("4000.00"),
+        )
+        document = DepartmentalPaymentDocument.objects.create(
+            payment=payment, category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="White Form", file=SimpleUploadedFile("white-form.pdf", b"form", content_type="application/pdf"),
+        )
+
+        self.client.force_login(self.hod)
+        self.client.post(reverse("portal:hod-exam-officer"), {"lecturer_id": self.lecturer.id})
+        self.client.force_login(self.lecturer)
+
+        page = self.client.get(reverse("portal:exam-card-approvals"))
+        self.assertContains(page, "Pending Approval")
+        self.assertContains(page, student.full_name)
+        self.assertNotContains(page, other_student.full_name)
+        self.assertContains(page, reverse("portal:download-departmental-document", args=[document.id]))
+
+        self.assertEqual(
+            self.client.post(
+                reverse("portal:exam-card-approvals"), {"payment_id": other_payment.id, "action": "approve"},
+            ).status_code,
+            404,
+        )
+
+        self.client.force_login(student)
+        self.assertEqual(self.client.get(reverse("portal:download-exam-card", args=[payment.id])).status_code, 403)
+        self.client.force_login(self.lecturer)
+
+        response = self.client.post(
+            reverse("portal:exam-card-approvals"), {"payment_id": payment.id, "action": "approve"},
+        )
+        self.assertRedirects(response, reverse("portal:exam-card-approvals"))
+        payment.refresh_from_db()
+        self.assertEqual(payment.exam_card_approval_status, DepartmentalPayment.ExamCardApprovalStatus.APPROVED)
+        self.assertEqual(payment.exam_card_approved_by, self.lecturer)
+
+        self.client.force_login(student)
+        self.assertEqual(self.client.get(reverse("portal:download-exam-card", args=[payment.id])).status_code, 200)
 
     def test_role_assignment_rejects_a_cross_tenant_department(self):
         other = Institution.objects.create(
@@ -208,7 +265,7 @@ class DepartmentAutomationTests(TestCase):
             department=self.department,
             file=SimpleUploadedFile(
                 "allocation.csv",
-                b"LECTURER,CODE,COURSE TITLE,UNIT\nE. J. Garba,CSC508(E),Structured Programming,3\n,CSC510,System Modelling,3\nDr. K. O. Oluborode,CSC508,Structured Programming,3\n,CSC424,Distributed Computing,3\n",
+                b"LECTURER ID,CODE,COURSE TITLE,UNIT\nLEC-CS-001,CSC508(E),Structured Programming,3\nLEC-CS-001,CSC510,System Modelling,3\nLEC-CS-002,CSC508,Structured Programming,3\nLEC-CS-002,CSC424,Distributed Computing,3\n",
                 content_type="text/csv",
             ),
         )
@@ -240,7 +297,7 @@ class DepartmentAutomationTests(TestCase):
         )
 
         with patch("portal.automation._ai_extract_image", return_value=[
-            {"lecturer_name": "Prof. E. J. Garba", "course_code": "CSC508"},
+            {"lecturer_id": "LEC-CS-001", "course_code": "CSC508"},
         ]):
             self.assertIn("1 allocations assigned", import_course_allocations(allocation_upload))
 
@@ -314,6 +371,7 @@ class CurriculumCohortTests(TestCase):
                 "phone_number": "08000000000",
                 "password1": "pass1234",
                 "password2": "pass1234",
+                "accept_terms": "on",
             },
         )
         self.assertEqual(response.status_code, 302)
@@ -355,6 +413,7 @@ class CurriculumCohortTests(TestCase):
                 "phone_number": "08000000000",
                 "password1": "pass1234",
                 "password2": "pass1234",
+                "accept_terms": "on",
             },
         )
 
@@ -484,6 +543,7 @@ class DashboardAndCourseFlowTests(TestCase):
                 "phone_number": "08000000000",
                 "password1": "pass1234",
                 "password2": "pass1234",
+                "accept_terms": "on",
             },
         )
 
@@ -1036,6 +1096,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "phone_number": "08000000000",
             "password1": "pass1234",
             "password2": "pass1234",
+            "accept_terms": "on",
         }
 
         missing_programme = self.client.post(reverse("portal:student-signup"), payload)
@@ -1089,7 +1150,7 @@ class DashboardAndCourseFlowTests(TestCase):
         departmental_menu = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
         self.assertEqual(
             [item["label"] for item in departmental_menu["children"]],
-            ["API and Document", "Set Fee", "Students", "Lecturers"],
+            ["API and Document", "Set Fee", "Students", "Lecturers", "Assign Exam Officer"],
         )
         self.assertIn("Timetable and Handbook", labels)
 
@@ -1726,6 +1787,7 @@ class DashboardAndCourseFlowTests(TestCase):
             {
                 "white_form": SimpleUploadedFile("white.pdf", b"white", content_type="application/pdf"),
                 "school_receipt": SimpleUploadedFile("receipt.pdf", b"receipt", content_type="application/pdf"),
+                "course_form": SimpleUploadedFile("course-form.pdf", b"course form", content_type="application/pdf"),
                 "association_choice": "acf",
             },
         )
@@ -1745,6 +1807,7 @@ class DashboardAndCourseFlowTests(TestCase):
             {
                 "white_form": SimpleUploadedFile("white.pdf", b"white", content_type="application/pdf"),
                 "school_receipt": SimpleUploadedFile("receipt.pdf", b"receipt", content_type="application/pdf"),
+                "course_form": SimpleUploadedFile("course-form.pdf", b"course form", content_type="application/pdf"),
                 "association_choice": "acf",
             },
         )
@@ -1770,6 +1833,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "Please complete these departmental payment fields before starting payment")
         self.assertContains(response, "White Form")
         self.assertContains(response, "School Receipt")
+        self.assertContains(response, "Course Form")
         initialize_paystack_transaction.assert_not_called()
 
     @patch("portal.views.initialize_paystack_transaction")
@@ -1782,6 +1846,7 @@ class DashboardAndCourseFlowTests(TestCase):
             {
                 "white_form": SimpleUploadedFile("white.pdf", b"white", content_type="application/pdf"),
                 "school_receipt": SimpleUploadedFile("receipt.pdf", b"receipt", content_type="application/pdf"),
+                "course_form": SimpleUploadedFile("course-form.pdf", b"course form", content_type="application/pdf"),
             },
         )
 
@@ -1799,6 +1864,7 @@ class DashboardAndCourseFlowTests(TestCase):
             {
                 "white_form": SimpleUploadedFile("white.pdf", b"white", content_type="application/pdf"),
                 "school_receipt": SimpleUploadedFile("receipt.pdf", b"receipt", content_type="application/pdf"),
+                "course_form": SimpleUploadedFile("course-form.pdf", b"course form", content_type="application/pdf"),
                 "supporting_documents": [
                     SimpleUploadedFile("support-1.pdf", b"support-1", content_type="application/pdf"),
                     SimpleUploadedFile("support-2.pdf", b"support-2", content_type="application/pdf"),
@@ -1957,6 +2023,78 @@ class DashboardAndCourseFlowTests(TestCase):
             access = MaterialAccess.objects.get(material=material, student=self.student)
             self.assertEqual(access.status, MaterialAccess.Status.PAID)
 
+    def test_hod_departmental_students_show_only_paid_departmental_records(self):
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        RoleAssignment.objects.create(
+            user=self.lecturer,
+            role=User.Role.HOD,
+            department=self.department,
+            assigned_by=self.admin,
+        )
+        DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+            association_summary="Departmental Fee",
+        )
+
+        self.client.force_login(self.lecturer)
+        response = self.client.get(reverse("portal:hod-department-students"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.student.full_name)
+        self.assertContains(response, "Paid Departmental Students")
+
+    def test_hod_can_allocate_and_remove_a_department_course_for_a_lecturer(self):
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        RoleAssignment.objects.create(
+            user=self.lecturer,
+            role=User.Role.HOD,
+            department=self.department,
+            assigned_by=self.admin,
+        )
+        colleague = User.objects.create_user(
+            username="lecturer2", password="pass1234", role=User.Role.LECTURER,
+            department=self.department, is_approved=True,
+        )
+        unallocated_course = Course.objects.create(
+            department=self.department, code="CSC301", title="Algorithms", level="300",
+        )
+
+        self.client.force_login(self.lecturer)
+        detail_url = reverse("portal:hod-department-lecturer-detail", args=[colleague.id])
+        self.assertContains(self.client.get(reverse("portal:hod-department-lecturers")), colleague.full_name)
+        allocation = self.client.post(detail_url, {"action": "allocate-course", "course_id": unallocated_course.id})
+        self.assertRedirects(allocation, detail_url)
+        unallocated_course.refresh_from_db()
+        self.assertEqual(unallocated_course.lecturer, colleague)
+        self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=colleague, course=unallocated_course).exists())
+
+        removal = self.client.post(detail_url, {"action": "remove-course", "course_id": unallocated_course.id})
+        self.assertRedirects(removal, detail_url)
+        unallocated_course.refresh_from_db()
+        self.assertIsNone(unallocated_course.lecturer)
+        self.assertFalse(LecturerCourseRegistration.objects.filter(lecturer=colleague, course=unallocated_course).exists())
+
+    def test_password_reset_uses_an_emailed_otp_to_set_a_new_password(self):
+        self.client.post(reverse("portal:password-reset"), {"email": self.student.email})
+        self.assertEqual(len(mail.outbox), 1)
+        import re
+
+        code = re.search(r"\b(\d{6})\b", mail.outbox[0].body).group(1)
+        response = self.client.post(
+            reverse("portal:password-reset"),
+            {"otp": code, "password1": "changed-password-123", "password2": "changed-password-123"},
+        )
+
+        self.assertRedirects(response, reverse("portal:password-reset-complete"))
+        self.student.refresh_from_db()
+        self.assertTrue(self.student.check_password("changed-password-123"))
+
     def test_departmental_exam_card_download_is_pdf(self):
         StudentCourseRegistration.objects.create(student=self.student, course=self.free_course, registered_by=self.student)
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
@@ -1968,6 +2106,7 @@ class DashboardAndCourseFlowTests(TestCase):
             total_amount=Decimal("4000.00"),
             status=DepartmentalPayment.Status.PAID,
             association_summary="Departmental Fee",
+            exam_card_approval_status=DepartmentalPayment.ExamCardApprovalStatus.APPROVED,
         )
 
         self.client.force_login(self.student)
@@ -1992,6 +2131,7 @@ class DashboardAndCourseFlowTests(TestCase):
             total_amount=Decimal("4000.00"),
             status=DepartmentalPayment.Status.PAID,
             association_summary="Departmental Fee, ACF",
+            exam_card_approval_status=DepartmentalPayment.ExamCardApprovalStatus.APPROVED,
         )
 
         self.client.force_login(self.student)
@@ -2353,7 +2493,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertIsNone(self.free_course.lecturer)
         self.assertEqual(self.paid_course.lecturer, self.lecturer)
         self.assertEqual(
-            list(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer).values_list("course_id", flat=True)),
+            list(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer, is_active=True).values_list("course_id", flat=True)),
             [self.paid_course.id],
         )
 
@@ -2387,6 +2527,10 @@ class DashboardAndCourseFlowTests(TestCase):
         )
         self.assertNotEqual(new_course.pk, old_course.pk)
 
+        # This account predates curriculum cohorts; its first catalogue visit
+        # should therefore resolve the handbook current at that time.
+        self.student.curriculum = None
+        self.student.save(update_fields=["curriculum"])
         self.client.force_login(self.student)
         response = self.client.get(reverse("portal:student-courses"), {"search": "CSC901"})
         self.assertContains(response, "New Curriculum Course")
@@ -2673,14 +2817,14 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["event"], "customer.create")
 
-    def test_profile_password_reset_sends_email_verification_link(self):
+    def test_profile_password_reset_sends_email_verification_code(self):
         self.client.force_login(self.student)
         response = self.client.post(reverse("portal:profile-password-reset"))
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["student@example.com"])
-        self.assertIn("password-reset/confirm", mail.outbox[0].body)
+        self.assertIn("verification code", mail.outbox[0].body)
 
 
 @override_settings(

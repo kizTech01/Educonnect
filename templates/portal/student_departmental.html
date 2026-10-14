@@ -26,8 +26,17 @@
                 <p><strong>Payment completed.</strong></p>
                 <p>{{ departmental_payment.association_summary }}</p>
                 <p>Reference: {{ departmental_payment.paystack_reference }}</p>
-                <a href="{% url 'portal:download-exam-card' departmental_payment.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View Exam Card</a>
-                <a href="{% url 'portal:download-exam-card' departmental_payment.id %}?download=1" class="ghost-btn small file-action-btn">Download Exam Card</a>
+                {% if departmental_payment.exam_card_is_approved %}
+                    <p><span class="status-pill success">Exam card approved</span></p>
+                    <a href="{% url 'portal:download-exam-card' departmental_payment.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View Exam Card</a>
+                    <a href="{% url 'portal:download-exam-card' departmental_payment.id %}?download=1" class="ghost-btn small file-action-btn">Download Exam Card</a>
+                {% elif departmental_payment.exam_card_approval_status == "rejected" %}
+                    <p><span class="status-pill danger">Exam card rejected</span></p>
+                    <p class="muted-note">{{ departmental_payment.exam_card_rejection_reason|default:"Please upload the requested documents and await a new review." }}</p>
+                {% else %}
+                    <p><span class="status-pill warning">Exam card pending approval</span></p>
+                    <p class="muted-note">Your payment and submitted documents are awaiting review by the department's Exam Officer.</p>
+                {% endif %}
                 <form method="post" enctype="multipart/form-data" class="stack-form">
                     {% csrf_token %}
                     <input type="hidden" name="action" value="add-documents">
@@ -54,6 +63,11 @@
                     School Receipt
                     {{ departmental_form.school_receipt }}
                     {{ departmental_form.school_receipt.errors }}
+                </label>
+                <label>
+                    Course Form
+                    {{ departmental_form.course_form }}
+                    {{ departmental_form.course_form.errors }}
                 </label>
                 <label>
                     Medical fitness
@@ -118,7 +132,7 @@
     <div class="panel-card payment-history-card">
         <div class="panel-head">
             <h2>Payment History</h2>
-            <span class="muted-note">Download exam card PDFs for any paid session.</span>
+            <span class="muted-note">Cards are available after Exam Officer approval.</span>
         </div>
         <div class="table-wrap responsive-table-wrap">
             <table class="responsive-table">
@@ -134,12 +148,19 @@
                     {% for payment in departmental_history %}
                         <tr>
                             <td>{{ payment.session.name }}</td>
-                            <td>{{ payment.get_status_display }}</td>
+                            <td>
+                                {{ payment.get_status_display }}
+                                {% if payment.is_paid %}
+                                    <br><span class="status-pill {% if payment.exam_card_is_approved %}success{% elif payment.exam_card_approval_status == 'rejected' %}danger{% else %}warning{% endif %}">{{ payment.get_exam_card_approval_status_display }}</span>
+                                {% endif %}
+                            </td>
                             <td>{{ payment.paid_at|date:"M d, Y H:i"|default:"-" }}</td>
                             <td>
-                                {% if payment.is_paid %}
+                                {% if payment.exam_card_is_approved %}
                                     <a href="{% url 'portal:download-exam-card' payment.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
                                     <a href="{% url 'portal:download-exam-card' payment.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
+                                {% elif payment.is_paid %}
+                                    <span class="muted-note">Awaiting approval</span>
                                 {% else %}
                                     -
                                 {% endif %}

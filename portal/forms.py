@@ -25,6 +25,8 @@ from .models import (
     DepartmentalAssociation,
     DepartmentalFee,
     DepartmentalPaymentDocument,
+    ExamCardAIConfiguration,
+    ExamCardAIReferenceDocument,
     Handbook,
     Faculty,
     InstitutionProfile,
@@ -44,6 +46,7 @@ from .models import (
     HostelBlock,
     HostelRoom,
     HostelBed,
+    GlobalPolicy,
     Programme,
     LEVEL_CHOICES,
     curriculum_for_programme,
@@ -66,6 +69,35 @@ class PortalAuthenticationForm(forms.Form):
         for name, field in self.fields.items():
             if name != "role":
                 field.widget.attrs["class"] = "input-field"
+
+
+class GlobalPolicyForm(forms.ModelForm):
+    """Super-admin editor for a versioned global policy draft."""
+
+    class Meta:
+        model = GlobalPolicy
+        fields = (
+            "slug", "title", "summary", "sections", "version", "effective_date",
+            "last_updated", "acceptance_required",
+        )
+        widgets = {
+            "sections": forms.Textarea(attrs={"rows": 18, "class": "input-field"}),
+            "effective_date": forms.DateInput(attrs={"type": "date"}),
+            "last_updated": forms.DateInput(attrs={"type": "date"}),
+        }
+        help_texts = {
+            "sections": 'Use JSON: [{"heading": "1. Heading", "paragraphs": ["Text"]}].',
+            "version": "Use a new version identifier when publishing a replacement.",
+        }
+
+    def clean_sections(self):
+        sections = self.cleaned_data["sections"]
+        if not isinstance(sections, list) or not sections:
+            raise forms.ValidationError("Add at least one section.")
+        for item in sections:
+            if not isinstance(item, dict) or not item.get("heading") or not isinstance(item.get("paragraphs"), list):
+                raise forms.ValidationError("Each section needs a heading and a paragraphs list.")
+        return sections
 
 
 class AIAutomationUploadForm(forms.Form):
@@ -454,6 +486,11 @@ class CourseAllocationUploadForm(StyledModelForm):
         model = CourseAllocationUpload
         fields = ["file"]
 
+    def __init__(self, *args, department=None, **kwargs):
+        """Accept trusted HOD context without exposing department to the POST."""
+        super().__init__(*args, **kwargs)
+        self.department = department
+
 
 class CourseForm(CoursePricingMixin, StyledModelForm):
     programmes = forms.ModelMultipleChoiceField(
@@ -472,6 +509,13 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         super().__init__(*args, **kwargs)
         self.fields["amount"].required = False
         self.fields["programmes"].queryset = Programme.objects.select_related("department").filter(is_active=True)
+        selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+        if not selected_department and self.instance.department_id:
+            selected_department = self.instance.department_id
+        if selected_department:
+            self.fields["programmes"].queryset = self.fields["programmes"].queryset.filter(
+                department_id=selected_department
+            )
         if self.instance.pk:
             self.initial["programmes"] = self.instance.programmes.all()
 
@@ -598,6 +642,7 @@ class CourseBrowseFilterForm(forms.Form):
         ("paid", "Paid courses"),
     )
 
+    faculty = forms.ModelChoiceField(queryset=Faculty.objects.all(), required=False)
     department = forms.ModelChoiceField(queryset=Department.objects.all(), required=False)
     programme = forms.ModelChoiceField(queryset=Programme.objects.none(), required=False)
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
@@ -606,14 +651,26 @@ class CourseBrowseFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["faculty"].empty_label = "All faculties"
         self.fields["department"].queryset = Department.objects.all()
+        selected_faculty = self.data.get(self.add_prefix("faculty")) or self.initial.get("faculty")
+        if selected_faculty:
+            self.fields["department"].queryset = self.fields["department"].queryset.filter(
+                faculty_id=selected_faculty
+            )
         self.fields["programme"].queryset = Programme.objects.filter(is_active=True)
+        selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+        if selected_department:
+            self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
+                department_id=selected_department
+            )
         self.fields["programme"].empty_label = "All programmes"
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
 
 
 class TimetableFilterForm(forms.Form):
+    faculty = forms.ModelChoiceField(queryset=Faculty.objects.all(), required=False)
     department = forms.ModelChoiceField(queryset=Department.objects.all(), required=False)
     programme = forms.ModelChoiceField(queryset=Programme.objects.none(), required=False)
     semester = forms.ChoiceField(
@@ -625,8 +682,19 @@ class TimetableFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields["faculty"].empty_label = "All faculties"
         self.fields["department"].queryset = Department.objects.all()
+        selected_faculty = self.data.get(self.add_prefix("faculty")) or self.initial.get("faculty")
+        if selected_faculty:
+            self.fields["department"].queryset = self.fields["department"].queryset.filter(
+                faculty_id=selected_faculty
+            )
         self.fields["programme"].queryset = Programme.objects.filter(is_active=True)
+        selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+        if selected_department:
+            self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
+                department_id=selected_department
+            )
         self.fields["programme"].empty_label = "All programmes"
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
@@ -642,6 +710,11 @@ class LecturerCourseFilterForm(forms.Form):
         super().__init__(*args, **kwargs)
         self.fields["department"].queryset = Department.objects.all()
         self.fields["programme"].queryset = Programme.objects.filter(is_active=True)
+        selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+        if selected_department:
+            self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
+                department_id=selected_department
+            )
         self.fields["programme"].empty_label = "All programmes"
         for field in self.fields.values():
             field.widget.attrs["class"] = "input-field"
@@ -655,6 +728,16 @@ class TimetableForm(StyledModelForm):
             "semester": forms.Select(choices=Course.Semester.choices),
             "level": forms.Select(choices=LEVEL_CHOICES),
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+        if not selected_department and self.instance.department_id:
+            selected_department = self.instance.department_id
+        if selected_department:
+            self.fields["programme"].queryset = Programme.objects.filter(
+                department_id=selected_department, is_active=True
+            )
 
     def clean(self):
         cleaned = super().clean()
@@ -691,6 +774,15 @@ class HandbookForm(StyledModelForm):
     class Meta:
         model = Handbook
         fields = ["department", "programme", "file"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+        if not selected_department and self.instance.department_id:
+            selected_department = self.instance.department_id
+        self.fields["programme"].queryset = Programme.objects.filter(
+            department_id=selected_department, is_active=True
+        ) if selected_department else Programme.objects.none()
 
     def clean(self):
         cleaned = super().clean()
@@ -732,7 +824,7 @@ class CourseMaterialForm(StyledModelForm):
         queryset = Course.objects.all()
         if user and not allow_all_courses:
             queryset = Course.objects.filter(
-                Q(lecturer_registrations__lecturer=user) | Q(lecturer=user)
+                Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True) | Q(lecturer=user)
             ).distinct()
         self.fields["course"].queryset = queryset.select_related("department")
 
@@ -761,7 +853,7 @@ class CourseMaterialBatchForm(forms.Form):
         queryset = Course.objects.all()
         if user and not allow_all_courses:
             queryset = Course.objects.filter(
-                Q(lecturer_registrations__lecturer=user) | Q(lecturer=user)
+                Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True) | Q(lecturer=user)
             ).distinct()
         self.fields["course"].queryset = queryset.select_related("department", "lecturer")
         for field in self.fields.values():
@@ -806,7 +898,7 @@ class NotificationForm(StyledModelForm):
 
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
-        if user and user.role == User.Role.LECTURER:
+        if user and user.has_role(User.Role.LECTURER):
             self.fields.pop("courses")
         else:
             self.fields["courses"].queryset = Course.objects.all()
@@ -874,6 +966,32 @@ class UserPasswordResetForm(PasswordResetForm):
             and user.email.casefold() == email.casefold()
         ):
             yield user
+
+
+class PasswordResetOTPRequestForm(forms.Form):
+    email = forms.EmailField(label="Account email")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["email"].widget.attrs["class"] = "input-field"
+
+
+class PasswordResetOTPConfirmForm(forms.Form):
+    otp = forms.CharField(label="Email verification code", min_length=6, max_length=6)
+    password1 = forms.CharField(label="New password", min_length=8, widget=forms.PasswordInput)
+    password2 = forms.CharField(label="Confirm new password", min_length=8, widget=forms.PasswordInput)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for name, field in self.fields.items():
+            field.widget.attrs["class"] = "input-field"
+            field.widget.attrs["autocomplete"] = "one-time-code" if name == "otp" else "new-password"
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("password1") and cleaned.get("password1") != cleaned.get("password2"):
+            self.add_error("password2", "The passwords do not match.")
+        return cleaned
 
 
 class BaseUserForm(StyledModelForm):
@@ -986,6 +1104,10 @@ class RequiredProfileFieldsMixin:
 
 
 class StudentSignupForm(RequiredProfileFieldsMixin, StudentUserForm):
+    accept_terms = forms.BooleanField(
+        required=True,
+        label="I agree to the EduConnect Terms & Conditions and acknowledge the Privacy Policy.",
+    )
     required_fields = (
         "username",
         "first_name",
@@ -999,6 +1121,10 @@ class StudentSignupForm(RequiredProfileFieldsMixin, StudentUserForm):
 
 
 class LecturerSignupForm(RequiredProfileFieldsMixin, LecturerUserForm):
+    accept_terms = forms.BooleanField(
+        required=True,
+        label="I agree to the EduConnect Terms & Conditions and acknowledge the Privacy Policy.",
+    )
     required_fields = (
         "username",
         "first_name",
@@ -1214,7 +1340,7 @@ class CourseResultForm(StyledModelForm):
         courses = Course.objects.none()
         if user is not None:
             courses = Course.objects.filter(
-                Q(lecturer=user) | Q(lecturer_registrations__lecturer=user)
+                Q(lecturer=user) | Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True)
             ).distinct()
         self.fields["course"].queryset = courses
         self.fields["session"].queryset = AcademicSession.objects.all()
@@ -1269,7 +1395,7 @@ class ResultImportForm(forms.Form):
         super().__init__(*args, **kwargs)
         if user is not None:
             self.fields["course"].queryset = Course.objects.filter(
-                Q(lecturer=user) | Q(lecturer_registrations__lecturer=user)
+                Q(lecturer=user) | Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True)
             ).distinct()
         for field in self.fields.values():
             field.widget.attrs["class"] = f'{field.widget.attrs.get("class", "")} input-field'.strip()
@@ -1325,6 +1451,7 @@ class DepartmentalAssociationForm(StyledModelForm):
 class DepartmentalStudentPaymentForm(forms.Form):
     white_form = forms.FileField()
     school_receipt = forms.FileField()
+    course_form = forms.FileField()
     supporting_documents = MultipleFileField(
         required=False,
         widget=MultipleFileInput(),
@@ -1373,6 +1500,45 @@ class DepartmentalAdditionalDocumentForm(forms.Form):
     additional_documents = MultipleFileField(
         widget=MultipleFileInput(attrs={"class": "input-field"}),
     )
+
+
+class ExamCardAIConfigurationForm(StyledModelForm):
+    class Meta:
+        model = ExamCardAIConfiguration
+        fields = [
+            "department", "academic_session", "semester", "automatic_processing_enabled",
+            "require_white_form", "require_school_receipt", "require_course_form",
+            "verify_student_identifier", "verify_academic_session",
+        ]
+        labels = {
+            "automatic_processing_enabled": "Enable automatic approval processing",
+            "verify_student_identifier": "Require the student ID in the course form",
+            "verify_academic_session": "Require the academic session in reference and course-form documents",
+            "semester": "Semester to verify",
+        }
+
+    def __init__(self, *args, departments=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if departments is not None:
+            self.fields["department"].queryset = Department.objects.filter(pk__in=departments)
+        self.fields["semester"].required = True
+
+
+class ExamCardAIReferenceDocumentForm(StyledModelForm):
+    class Meta:
+        model = ExamCardAIReferenceDocument
+        fields = ["category", "file"]
+        labels = {"category": "Required payment document type", "file": "Trusted sample"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["category"].required = True
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data["file"]
+        if uploaded_file.size > 10 * 1024 * 1024:
+            raise forms.ValidationError("Reference documents must be 10 MB or smaller.")
+        return uploaded_file
 
 
 class DepartmentalSearchForm(forms.Form):

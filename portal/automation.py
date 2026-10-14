@@ -6,9 +6,11 @@ from CSV, TXT and DOCX keep working without a third-party AI account.
 """
 import base64
 import csv
+import hashlib
 import json
 import os
 import re
+import unicodedata
 import urllib.request
 import zipfile
 from decimal import Decimal, InvalidOperation
@@ -20,7 +22,7 @@ from django.db import transaction
 from django.db.models import Max, Q
 from django.utils import timezone
 
-from .models import AcademicSession, Course, CourseResult, Curriculum, Department, LecturerCourseRegistration, Programme, RoleAssignment, StudentCourseRegistration, User
+from .models import AcademicSession, AuditLog, Course, CourseAllocationUpload, CourseResult, Curriculum, Department, LecturerCourseRegistration, Programme, RoleAssignment, StudentCourseRegistration, User, curriculum_for_department, curriculum_for_programme
 from .services import TEMPORARY_ACCOUNT_PASSWORD
 
 
@@ -206,22 +208,16 @@ def import_handbook_courses(handbook):
             effective_session=session,
         )
         latest_version = curriculum_scope.aggregate(max_version=Max("version"))["max_version"] or 0
-        # A programme can receive its first student before its first handbook.
-        # That account gets an empty placeholder curriculum; populate it on
-        # the first handbook rather than immediately making those students
-        # stale. Every later handbook remains a new immutable version.
-        curriculum = None
-        if handbook.programme_id:
-            latest = curriculum_scope.order_by("-version", "-created_at").first()
-            if latest and not Course.objects.filter(curriculum=latest).exists():
-                curriculum = latest
-        if curriculum is None:
-            curriculum = Curriculum.objects.create(
-                department=handbook.department,
-                programme=handbook.programme,
-                effective_session=session,
-                version=latest_version + 1,
-            )
+        # Every handbook is an immutable curriculum snapshot.  Even an empty
+        # placeholder from an earlier enrolment is not reused: students who
+        # already existed keep their assigned curriculum, while students who
+        # join after this upload receive this new version.
+        curriculum = Curriculum.objects.create(
+            department=handbook.department,
+            programme=handbook.programme,
+            effective_session=session,
+            version=latest_version + 1,
+        )
         for record in records:
             code = re.sub(r"[^A-Z0-9]", "", str(record.get("code", "")).upper())[:20]
             title = str(record.get("title", "")).strip()[:200]
@@ -365,43 +361,42 @@ def import_programmes(uploaded_file, department):
     return f"Programme import finished: {created} created, {updated} updated, {skipped} skipped."
 
 
-def _person_key(value):
-    """Match staff names while ignoring title and punctuation differences."""
-    tokens = re.findall(r"[a-z0-9]+", str(value).lower())
-    return " ".join(token for token in tokens if token not in {"prof", "professor", "dr", "mr", "mrs", "ms"})
+def _allocation_key(value):
+    """Normalise IDs/codes across Unicode, dash, whitespace and case variants."""
+    value = unicodedata.normalize("NFKD", str(value or ""))
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
 
 
 def _find_department_lecturer(department, lecturer_key):
-    direct_match = User.objects.filter(
-        role=User.Role.LECTURER,
-        department=department,
-    ).filter(
-        Q(username__iexact=lecturer_key) | Q(id_number__iexact=lecturer_key)
-    ).first()
-    if direct_match:
-        return direct_match
-    requested_name = _person_key(lecturer_key)
-    if not requested_name:
+    requested_id = _allocation_key(lecturer_key)
+    if not requested_id:
         return None
-    lecturers = list(User.objects.filter(role=User.Role.LECTURER, department=department))
-    exact_matches = [lecturer for lecturer in lecturers if _person_key(lecturer.full_name) == requested_name]
-    if exact_matches:
-        return exact_matches[0]
-    requested_tokens = set(requested_name.split())
-    partial_matches = [
+    lecturers = list(User.all_objects.filter(
+        institution=department.institution,
+        department=department,
+    ).filter(Q(role=User.Role.LECTURER) | Q(role_assignments__role=User.Role.LECTURER, role_assignments__is_active=True)).distinct())
+    direct_matches = [
         lecturer for lecturer in lecturers
-        if requested_tokens and requested_tokens.issubset(set(_person_key(lecturer.full_name).split()))
+        if _allocation_key(lecturer.id_number) == requested_id or _allocation_key(lecturer.username) == requested_id
     ]
-    return partial_matches[0] if len(partial_matches) == 1 else None
+    return direct_matches[0] if len(direct_matches) == 1 else None
 
 
-def _find_department_course(department, course_code, session):
-    courses = Course.objects.filter(department=department).filter(
-        Q(academic_session=session) | Q(academic_session__isnull=True)
-    )
-    course = courses.filter(code__iexact=course_code).first()
-    if course:
-        return course
+def _find_department_course(department, course_code, session=None):
+    # Department ownership is the durable tenant boundary for catalogue rows.
+    # Some legacy courses predate the tenant FK backfill, so filtering by that
+    # nullable copied field makes an otherwise valid course invisible.
+    courses = Course.all_objects.filter(department=department)
+    normalised = _allocation_key(course_code)
+    matching_courses = [course for course in courses if _allocation_key(course.code) == normalised]
+    if matching_courses:
+        if session:
+            return next(
+                (course for course in matching_courses if course.academic_session_id == session.pk),
+                matching_courses[0],
+            )
+        return matching_courses[0]
     # Allocation sheets often use a suffix such as "(E)" or "(A)" for a
     # programme stream, while the course catalogue stores the base code.
     base_code = re.sub(r"(?<=\d)[A-Z]+$", "", course_code)
@@ -411,32 +406,45 @@ def _find_department_course(department, course_code, session):
 
 
 def _allocation_course_code(course_code):
-    return re.sub(r"(?<=\d)[A-Z]+$", "", course_code)
+    return re.sub(r"(?<=\d)[A-Z]+$", "", _allocation_key(course_code))
 
 
 def _create_course_from_allocation(department, row, course_code, session):
     """Create a catalogue entry only when a valid allocation supplies its details."""
     code = _allocation_course_code(course_code)
     title = _field(row, "course_title", "title").strip()[:200]
-    if not code or not title or Course.objects.filter(
-        department=department,
-        code__iexact=code,
-        academic_session=session,
-    ).exists():
+    if not code or not title or _find_department_course(department, code, session):
         return None
     number_match = re.search(r"(\d{3,4})", code)
-    level = f"{number_match.group(1)[0]}00" if number_match else "100"
-    if level not in {"100", "200", "300", "400", "500"}:
-        level = "100"
+    inferred_level = f"{number_match.group(1)[0]}00" if number_match else "100"
+    if inferred_level not in {"100", "200", "300", "400", "500"}:
+        inferred_level = "100"
     unit_match = re.search(r"\d+", _field(row, "unit", "credit_units", "credits"))
-    return Course.objects.create(
+    curriculum = curriculum_for_department(department, session)
+    # ``Course.save`` assigns a curriculum to legacy catalogue rows.  Therefore
+    # a course can already be in the requested curriculum even when an older
+    # catalogue/session lookup did not return it.  Reuse that exact catalogue
+    # row rather than attempting a duplicate insert (and failing the unique
+    # department/code/curriculum constraint).
+    existing = Course.all_objects.filter(
+        department=department,
+        curriculum=curriculum,
+    )
+    for candidate in existing:
+        if _allocation_key(candidate.code) == _allocation_key(code):
+            return candidate
+    course = Course.objects.create(
+        institution=department.institution,
         department=department,
         academic_session=session,
+        curriculum=curriculum,
         code=code,
         title=title,
-        level=level,
+        level=inferred_level,
+        semester="second" if _field(row, "semester").lower().startswith("second") else Course.Semester.FIRST,
         credit_units=int(unit_match.group()) if unit_match else 2,
     )
+    return course
 
 
 def import_department_lecturers(upload):
@@ -471,23 +479,49 @@ def import_course_allocations(upload):
     rows = _records_from_upload(upload, "course allocations with lecturer_name or lecturer_id and course_code")
     if not rows:
         raise ValueError("No course allocations were found in the uploaded file.")
-    session = AcademicSession.objects.filter(is_current=True).first()
+    # Allocation is department-wide.  The current session is needed only if a
+    # previously unknown course must be added to the catalogue; it never
+    # limits which existing departmental course may be assigned.
+    session = AcademicSession.all_objects.filter(
+        institution=upload.institution, is_current=True
+    ).first()
     if session is None:
         year = timezone.now().year
-        session, _ = AcademicSession.objects.get_or_create(
+        session, _ = AcademicSession.all_objects.get_or_create(
+            institution=upload.institution,
             name=f"{year}/{year + 1}",
             defaults={"is_current": True},
         )
-    assigned = created_courses = skipped = 0
+    upload.file.open("rb")
+    content_hash = hashlib.sha256(upload.file.read()).hexdigest()
+    upload.file.seek(0)
+    scope = {
+        "institution": upload.institution,
+        "department": upload.department,
+    }
+    duplicate = CourseAllocationUpload.all_objects.filter(**scope, content_hash=content_hash, is_active=True).exclude(pk=upload.pk).first()
+    if duplicate:
+        upload.content_hash = content_hash
+        upload.reconciliation = {"duplicate_of": duplicate.pk, "assigned": 0, "created_courses": 0, "skipped": 0}
+        upload.processing_summary = "Course-allocation upload is unchanged; the existing active allocation was retained."
+        upload.save(update_fields=["content_hash", "reconciliation", "processing_summary", "updated_at"])
+        AuditLog.objects.create(
+            institution=upload.institution, user=upload.uploaded_by,
+            action="course_allocation_duplicate", object_type="CourseAllocationUpload",
+            object_id=str(upload.pk), description=upload.processing_summary,
+            new_value={"duplicate_of": duplicate.pk, "department_id": upload.department_id},
+        )
+        return upload.processing_summary
+
+    assigned = created_courses = skipped = reassigned = removed = preserved = superseded = 0
     with transaction.atomic():
-        LecturerCourseRegistration.objects.filter(
-            course__department=upload.department,
-        ).delete()
-        Course.objects.filter(department=upload.department).exclude(lecturer__isnull=True).update(lecturer=None)
-        lecturer_key = ""
+        incoming = {}
         for row in rows:
-            lecturer_key = _field(row, "lecturer_id", "staff_id", "lecturer_name", "lecturer", "name") or lecturer_key
-            course_code = re.sub(r"[^A-Z0-9]", "", _field(row, "course_code", "course", "code").upper())
+            # A departmental lecturer ID, not a display name, is the stable
+            # allocation key.  It prevents a similarly named lecturer from
+            # receiving a course by mistake.
+            lecturer_key = _field(row, "lecturer_id", "staff_id", "staff_no", "lecturer id")
+            course_code = _allocation_key(_field(row, "course_code", "course", "code"))
             lecturer = _find_department_lecturer(upload.department, lecturer_key)
             course = _find_department_course(upload.department, course_code, session)
             if not course and lecturer:
@@ -496,18 +530,69 @@ def import_course_allocations(upload):
             if not lecturer or not course:
                 skipped += 1
                 continue
-            update_fields = []
-            if course.academic_session_id is None:
-                course.academic_session = session
-                update_fields.append("academic_session")
-            if course.lecturer_id is None:
-                course.lecturer = lecturer
-                update_fields.append("lecturer")
-            if update_fields:
-                course.save(update_fields=[*update_fields, "updated_at"])
-            LecturerCourseRegistration.objects.get_or_create(lecturer=lecturer, course=course)
-            assigned += 1
-    return f"Course-allocation automation finished: {assigned} allocations assigned, {created_courses} courses created, {skipped} rows could not be matched."
+            allocation = incoming.setdefault(course.pk, {"course": course, "lecturers": []})
+            if lecturer not in allocation["lecturers"]:
+                allocation["lecturers"].append(lecturer)
+
+        # A bad or wrong-department file must not silently remove every
+        # lecturer allocation in the department.  Leave the previous active
+        # allocation untouched until at least one ID/course pair is valid.
+        if not incoming:
+            raise ValueError(
+                "No valid lecturer ID and course-code pairs were found for this department; the existing allocation was kept."
+            )
+
+        scoped_courses = Course.all_objects.filter(department=upload.department)
+        previous = LecturerCourseRegistration.all_objects.filter(course__in=scoped_courses, is_active=True)
+        for record in previous.select_related("course", "lecturer"):
+            expected = incoming.get(record.course_id)
+            expected_ids = {lecturer.pk for lecturer in expected["lecturers"]} if expected else set()
+            if record.lecturer_id not in expected_ids:
+                record.is_active = False
+                record.deactivated_at = timezone.now()
+                record.save(update_fields=["is_active", "deactivated_at", "updated_at"])
+                if not expected:
+                    removed += 1
+                    if record.course.lecturer_id == record.lecturer_id:
+                        record.course.lecturer = None
+                        record.course.save(update_fields=["lecturer", "updated_at"])
+        for allocation in incoming.values():
+            course = allocation["course"]
+            lecturers = allocation["lecturers"]
+            lecturer_ids = {lecturer.pk for lecturer in lecturers}
+            # Keep an already-valid lead lecturer.  Otherwise select the first
+            # lecturer in the sheet as the catalogue's lead without losing any
+            # co-lecturer rows below.
+            if course.lecturer_id not in lecturer_ids:
+                if course.lecturer_id:
+                    reassigned += 1
+                course.lecturer = lecturers[0]
+                course.save(update_fields=["lecturer", "updated_at"])
+            for lecturer in lecturers:
+                record, _ = LecturerCourseRegistration.all_objects.get_or_create(lecturer=lecturer, course=course)
+                record.is_active = True
+                record.deactivated_at = None
+                record.allocation_upload = upload
+                record.save(update_fields=["is_active", "deactivated_at", "allocation_upload", "updated_at"])
+                assigned += 1
+
+        # Lecturer allocation changes must never alter a student's registered
+        # courses, payments, or results.
+        CourseAllocationUpload.all_objects.filter(**scope, is_active=True).exclude(pk=upload.pk).update(is_active=False)
+        upload.content_hash = content_hash
+        upload.is_active = True
+        upload.reconciliation = {"assigned": assigned, "created_courses": created_courses, "reassigned": reassigned, "removed": removed, "skipped": skipped}
+        upload.processing_summary = (f"Course-allocation reconciliation finished: {assigned} allocations assigned, {created_courses} courses created, "
+                                     f"{reassigned} lecturer changes, {removed} removed allocations, {skipped} unmatched rows.")
+        upload.save(update_fields=["content_hash", "is_active", "reconciliation", "processing_summary", "updated_at"])
+        AuditLog.objects.create(
+            institution=upload.institution, user=upload.uploaded_by,
+            action="course_allocation_reconciled", object_type="CourseAllocationUpload",
+            object_id=str(upload.pk), description=upload.processing_summary,
+            new_value={**upload.reconciliation, "department_id": upload.department_id,
+                       "catalogue_session_id": session.pk},
+        )
+    return upload.processing_summary
 
 
 def import_course_results(uploaded_file, *, course, session, semester, lecturer, institution):

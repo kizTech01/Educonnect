@@ -1,0 +1,5 @@
+{% extends 'portal/super_admin_base.html' %}
+{% block super_title %}{% if policy %}Edit policy draft{% else %}Create policy draft{% endif %}{% endblock %}
+{% block super_content %}
+<section class="panel-card"><div class="panel-head"><div><h2>{% if policy %}{{ policy.title }} v{{ policy.version }}{% else %}New global policy version{% endif %}</h2><p class="muted-note">Use a new version identifier for each replacement. Content remains a draft until you explicitly publish it.</p></div><a class="ghost-btn small" href="{% url 'portal:super-admin-policies' %}">Back to policies</a></div><form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="primary-btn" type="submit">Save draft</button></form>{% if policy %}<form method="post" action="{% url 'portal:super-admin-policy-publish' policy.id %}" class="stack-form">{% csrf_token %}<button class="primary-btn" type="submit">Publish this version</button></form>{% endif %}</section>
+{% endblock %}

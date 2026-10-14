@@ -40,7 +40,7 @@
             <div class="message-list">
                 {% for payment in departmental_completed_payments %}
                     <a
-                        href="{% if departmental_download_scope == 'lecturer' %}{% url 'portal:lecturer-departmental-download' %}{% else %}{% url 'portal:admin-departmental-download' %}{% endif %}?payment={{ payment.id }}{% if request.GET.department %}&department={{ request.GET.department }}{% endif %}{% if request.GET.level %}&level={{ request.GET.level }}{% endif %}{% if request.GET.student_id %}&student_id={{ request.GET.student_id }}{% endif %}"
+                        href="{% if departmental_download_scope == 'lecturer' %}{% url 'portal:lecturer-departmental-download' %}{% elif departmental_download_scope == 'hod' %}{% url 'portal:hod-department-students' %}{% else %}{% url 'portal:admin-departmental-download' %}{% endif %}?payment={{ payment.id }}{% if request.GET.department %}&department={{ request.GET.department }}{% endif %}{% if request.GET.level %}&level={{ request.GET.level }}{% endif %}{% if request.GET.student_id %}&student_id={{ request.GET.student_id }}{% endif %}"
                         class="message-item shell {% if departmental_selected_payment and departmental_selected_payment.id == payment.id %}selected{% endif %}"
                     >
                         <div>

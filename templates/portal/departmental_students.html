@@ -1,7 +1,7 @@
 {% extends 'portal/dashboard_base.html' %}
 
 {% block title %}
-    {% if departmental_download_scope == 'lecturer' %}Paid Courses Students{% else %}Departmental Users{% endif %} | EduConnect
+    {% if departmental_download_scope == 'lecturer' %}Paid Courses Students{% elif departmental_download_scope == 'hod' %}Departmental Students{% else %}Departmental Users{% endif %} | EduConnect
 {% endblock %}
 
 {% block dashboard_content %}

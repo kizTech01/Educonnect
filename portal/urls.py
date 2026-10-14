@@ -1,5 +1,4 @@
-from django.contrib.auth import views as auth_views
-from django.urls import path, reverse_lazy
+from django.urls import path
 
 
 from . import views
@@ -8,6 +7,8 @@ app_name = "portal"
 
 urlpatterns = [
     path("", views.index, name="home"),
+    path("policies/", views.policy_landing, name="policy-landing"),
+    path("policies/<slug:slug>/", views.policy_detail, name="policy-detail"),
     path("institution-logo/", views.institution_logo, name="institution-logo"),
     path("login/", views.portal_login, name="login"),
     path("login/<str:role>/", views.portal_login, name="role-login"),
@@ -30,6 +31,10 @@ urlpatterns = [
     path("super-admin/users/", views.super_admin_users, name="super-admin-users"),
     path("super-admin/audit-logs/", views.super_admin_audit_logs, name="super-admin-audit-logs"),
     path("super-admin/reports/", views.super_admin_reports, name="super-admin-reports"),
+    path("super-admin/policies/", views.super_admin_policies, name="super-admin-policies"),
+    path("super-admin/policies/create/", views.super_admin_policy_create, name="super-admin-policy-create"),
+    path("super-admin/policies/<int:policy_id>/edit/", views.super_admin_policy_edit, name="super-admin-policy-edit"),
+    path("super-admin/policies/<int:policy_id>/publish/", views.super_admin_policy_publish, name="super-admin-policy-publish"),
     path("super-admin/settings/", views.super_admin_settings, name="super-admin-settings"),
     path("super-admin/profile/", views.super_admin_profile, name="super-admin-profile"),
     path("super-admin/ai/", views.super_admin_ai, name="super-admin-ai"),
@@ -56,30 +61,10 @@ urlpatterns = [
     path("api/v1/institutions/<str:institution_code>/screening/applications/<str:application_id>/", views.api_screening_application_status, name="api-screening-application-status"),
     path("api/v1/institutions/<str:institution_code>/screening/applications/<str:application_id>/admit/", views.api_screening_admit, name="api-screening-admit"),
     path("api/v1/screening/students/", views.api_student_from_screening, name="api-student-from-screening"),
-    path("password-reset/", auth_views.PasswordResetView.as_view(
-        template_name="portal/password_reset_form.html",
-        email_template_name="portal/emails/password_reset_email.txt",
-        subject_template_name="portal/emails/password_reset_subject.txt",
-        success_url=reverse_lazy("portal:password-reset-done"),
-    ), name="password-reset"),
-    path(
-        "password-reset/done/",
-        auth_views.PasswordResetDoneView.as_view(template_name="portal/password_reset_done.html"),
-        name="password-reset-done",
-    ),
-    path(
-        "password-reset/confirm/<uidb64>/<token>/",
-        auth_views.PasswordResetConfirmView.as_view(
-            template_name="portal/password_reset_confirm.html",
-            success_url=reverse_lazy("portal:password-reset-complete"),
-        ),
-        name="password-reset-confirm",
-    ),
-    path(
-        "password-reset/complete/",
-        auth_views.PasswordResetCompleteView.as_view(template_name="portal/password_reset_complete.html"),
-        name="password-reset-complete",
-    ),
+    path("password-reset/", views.password_reset, name="password-reset"),
+    path("password-reset/done/", views.password_reset_done, name="password-reset-done"),
+    path("password-reset/confirm/<uidb64>/<token>/", views.password_reset_legacy_confirm, name="password-reset-confirm"),
+    path("password-reset/complete/", views.password_reset_complete, name="password-reset-complete"),
     path("student/", views.student_dashboard, name="student-dashboard"),
     path("student/departmental/", views.student_departmental, name="student-departmental"),
     path("student/departmental/<int:payment_id>/callback/", views.departmental_payment_callback, name="departmental-payment-callback"),
@@ -94,6 +79,7 @@ urlpatterns = [
     path("student/results/", views.student_results, name="student-results"),
     path("lecturer/", views.lecturer_dashboard, name="lecturer-dashboard"),
     path("lecturer/results/", views.lecturer_results, name="lecturer-results"),
+    path("exam-cards/", views.exam_card_approvals, name="exam-card-approvals"),
     path("exam/results/", views.exam_results, name="exam-results"),
     path("department/results/", views.exam_results, name="department-all-results"),
     path("department/reports/", views.exam_results, name="hod-reports"),
@@ -108,6 +94,7 @@ urlpatterns = [
     path("lecturer/programmes/<int:programme_id>/students/pdf/", views.hod_programme_students_pdf, name="hod-programme-students-pdf"),
     path("lecturer/departmental/students/", views.hod_department_students, name="hod-department-students"),
     path("lecturer/departmental/lecturers/", views.hod_department_lecturers, name="hod-department-lecturers"),
+    path("lecturer/departmental/lecturers/<int:user_id>/", views.hod_department_lecturer_detail, name="hod-department-lecturer-detail"),
     path("lecturer/users/", views.lecturer_students, name="lecturer-users"),
     path("lecturer/courses/", views.lecturer_courses, name="lecturer-courses"),
     path("lecturer/courses/<int:course_id>/paid-students/", views.lecturer_paid_course_student_search, name="lecturer-paid-course-student-search"),
@@ -150,6 +137,7 @@ urlpatterns = [
     path("admin-portal/documents/<str:kind>/<int:document_id>/delete/", views.admin_delete_document, name="admin-delete-document"),
     path("departmental/documents/<int:document_id>/download/", views.download_departmental_document, name="download-departmental-document"),
     path("departmental/payments/<int:payment_id>/exam-card/", views.download_exam_card, name="download-exam-card"),
+    path("exam-card/verify/<str:token>/", views.verify_exam_card, name="verify-exam-card"),
     path("departmental/student-ids/pdf/", views.departmental_student_ids_pdf, name="departmental-student-ids-pdf"),
     path("courses/<int:course_id>/download/", views.download_course_file, name="download-course-file"),
     path("materials/<int:material_id>/download/", views.download_material, name="download-material"),

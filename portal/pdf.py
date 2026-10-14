@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import zlib
+from io import BytesIO
 from functools import lru_cache
 from math import ceil
 from pathlib import Path
@@ -134,11 +135,7 @@ def _line_commands(x1: float, y1: float, x2: float, y2: float, *, stroke: str, l
     ]
 
 
-def _load_png_image(image_path: Path):
-    if not image_path.exists():
-        return None
-
-    data = image_path.read_bytes()
+def _load_png_bytes(data: bytes):
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         return None
 
@@ -224,6 +221,12 @@ def _load_png_image(image_path: Path):
     return width, height, zlib.compress(bytes(pixels)), "FlateDecode"
 
 
+def _load_png_image(image_path: Path):
+    if not image_path.exists():
+        return None
+    return _load_png_bytes(image_path.read_bytes())
+
+
 @lru_cache(maxsize=1)
 def _load_school_logo():
     return _load_png_image(SCHOOL_LOGO_PATH)
@@ -273,6 +276,33 @@ def _load_passport_photo(passport_photo_path: str | None):
     return _load_png_image(image_path) or _load_jpeg_image(image_path)
 
 
+def _load_logo(logo_path: str | None):
+    """Load a tenant logo, falling back only when no usable tenant file exists."""
+    if logo_path:
+        image_path = Path(logo_path)
+        logo = _load_png_image(image_path) or _load_jpeg_image(image_path)
+        if logo:
+            return logo
+    return _load_school_logo()
+
+
+def _make_qr_code(verification_url: str | None):
+    """Return a PDF-compatible QR PNG for the public card verification URL."""
+    if not verification_url:
+        return None
+    try:
+        import qrcode
+
+        image = qrcode.make(verification_url)
+        output = BytesIO()
+        image.convert("RGB").save(output, format="PNG")
+        return _load_png_bytes(output.getvalue())
+    except (ImportError, OSError, ValueError):
+        # The card remains usable if a deployment has not yet installed the
+        # optional QR renderer; requirements installs it in normal deployments.
+        return None
+
+
 def _build_image_object(image_data: bytes, width: int, height: int, image_filter: str) -> bytes:
     return (
         f"<< /Type /XObject /Subtype /Image /Width {width} /Height {height} "
@@ -292,6 +322,8 @@ def build_exam_card_pdf(
     registered_courses: list[str] | None = None,
     portrait_text: str | None = None,
     passport_photo_path: str | None = None,
+    school_logo_path: str | None = None,
+    verification_url: str | None = None,
 ) -> bytes:
     student_rows = [(label, value) for label, value in fields if label not in {"Department", "Clearance"}][:6] or [("Details", "")]
     course_entries = [course.strip() for course in (registered_courses or []) if course and course.strip()]
@@ -309,8 +341,9 @@ def build_exam_card_pdf(
     context_y = student_y + student_height + section_gap
     card_height = context_y + context_height + 128
 
-    logo = _load_school_logo()
+    logo = _load_logo(school_logo_path)
     passport_photo = _load_passport_photo(passport_photo_path)
+    qr_code = _make_qr_code(verification_url)
 
     commands: list[str] = ["q"]
     commands.extend(_rect_commands(0, 0, CARD_WIDTH, card_height, fill=_rgb(0.998, 0.999, 0.996), stroke=_rgb(0.13, 0.52, 0.22), line_width=2.2))
@@ -344,6 +377,15 @@ def build_exam_card_pdf(
 
     commands.extend(_centered_text(CARD_WIDTH / 2, school_y, school_name, font="F2", size=13.0, color=_rgb(0.08, 0.18, 0.10), bold=True))
     commands.extend(_centered_text(CARD_WIDTH / 2, title_y, card_title.upper(), font="F2", size=9.8, color=_rgb(0.13, 0.52, 0.22), bold=True))
+    if qr_code:
+        qr_width, qr_height, _, _ = qr_code
+        render_size = 58
+        scale = min(render_size / qr_width, render_size / qr_height)
+        rendered_width, rendered_height = qr_width * scale, qr_height * scale
+        qr_x, qr_y = CARD_WIDTH - CARD_MARGIN - rendered_width, card_height - 112
+        commands.extend(_rect_commands(qr_x - 3, qr_y - 3, rendered_width + 6, rendered_height + 6, fill=_rgb(1, 1, 1), stroke=_rgb(0.40, 0.55, 0.42), line_width=0.5))
+        commands.extend(["q", f"{rendered_width:.2f} 0 0 {rendered_height:.2f} {qr_x:.2f} {qr_y:.2f} cm", "/Im3 Do", "Q"])
+        commands.extend(_text_lines(qr_x - 3, qr_y - 11, "SCAN TO VERIFY EXAMINATION CARD", font="F2", size=5.2, color=_rgb(0.13, 0.52, 0.22)))
 
     context_x = CARD_MARGIN
     context_w = CARD_WIDTH - (CARD_MARGIN * 2)
@@ -455,6 +497,12 @@ def build_exam_card_pdf(
         passport_image_object_id = len(objects) + 1
         objects.append(_build_image_object(photo_bytes, photo_width, photo_height, photo_filter))
 
+    qr_image_object_id = None
+    if qr_code:
+        qr_width, qr_height, qr_bytes, qr_filter = qr_code
+        qr_image_object_id = len(objects) + 1
+        objects.append(_build_image_object(qr_bytes, qr_width, qr_height, qr_filter))
+
     content_object_id = len(objects) + 1
     objects.append(b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream")
 
@@ -465,6 +513,8 @@ def build_exam_card_pdf(
         image_resources.append(f"/Im1 {image_object_id} 0 R")
     if passport_image_object_id:
         image_resources.append(f"/Im2 {passport_image_object_id} 0 R")
+    if qr_image_object_id:
+        image_resources.append(f"/Im3 {qr_image_object_id} 0 R")
     if image_resources:
         resources.append(f"/XObject << {' '.join(image_resources)} >>")
     objects.append(

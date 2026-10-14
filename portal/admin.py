@@ -22,6 +22,8 @@ from .models import (
     DepartmentalPayment,
     DepartmentalPaymentDocument,
     DepartmentalPaymentItem,
+    ExamCardAIConfiguration,
+    ExamCardAIReferenceDocument,
     Handbook,
     Hostel,
     HostelBed,
@@ -47,6 +49,8 @@ from .models import (
     SubscriptionPlan,
     ScreeningIntegration,
     ScreeningApplication,
+    GlobalPolicy,
+    PolicyAcceptance,
 )
 
 
@@ -288,10 +292,23 @@ class DepartmentalPaymentDocumentInline(admin.TabularInline):
 
 @admin.register(DepartmentalPayment)
 class DepartmentalPaymentAdmin(admin.ModelAdmin):
-    list_display = ("student", "department", "session", "status", "total_amount", "paid_at")
+    list_display = ("student", "department", "session", "status", "exam_card_approval_status", "exam_card_approved_automatically", "total_amount", "paid_at")
     list_filter = ("status", "department", "session")
     search_fields = ("student__username", "student__id_number", "paystack_reference")
     inlines = [DepartmentalPaymentItemInline, DepartmentalPaymentDocumentInline]
+
+
+class ExamCardAIReferenceDocumentInline(admin.TabularInline):
+    model = ExamCardAIReferenceDocument
+    extra = 0
+
+
+@admin.register(ExamCardAIConfiguration)
+class ExamCardAIConfigurationAdmin(admin.ModelAdmin):
+    list_display = ("department", "academic_session", "automatic_processing_enabled", "configured_by", "updated_at")
+    list_filter = ("automatic_processing_enabled", "department", "academic_session")
+    search_fields = ("department__name", "academic_session__name")
+    inlines = [ExamCardAIReferenceDocumentInline]
 
 
 @admin.register(Institution)
@@ -358,3 +375,51 @@ class ScreeningApplicationAdmin(admin.ModelAdmin):
     list_filter = ("status", "institution")
     search_fields = ("external_application_id", "applicant_reference", "jamb_number", "email")
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(GlobalPolicy)
+class GlobalPolicyAdmin(admin.ModelAdmin):
+    list_display = ("title", "version", "status", "effective_date", "published_by", "published_at")
+    list_filter = ("status", "acceptance_required")
+    search_fields = ("title", "slug", "version")
+    readonly_fields = ("published_at", "published_by", "created_at", "updated_at")
+
+    def has_module_permission(self, request):
+        return request.user.is_superuser
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser and (
+            obj is None or obj.status == GlobalPolicy.Status.DRAFT
+        )
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PolicyAcceptance)
+class PolicyAcceptanceAdmin(admin.ModelAdmin):
+    list_display = ("user", "policy", "event", "institution", "accepted_at")
+    list_filter = ("event", "institution")
+    search_fields = ("user__username", "user__email", "policy__title", "policy__version")
+    readonly_fields = ("policy", "user", "institution", "event", "accepted_at", "ip_address")
+
+    def has_module_permission(self, request):
+        return request.user.is_superuser
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

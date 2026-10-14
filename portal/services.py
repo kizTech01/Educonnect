@@ -342,7 +342,9 @@ def default_material_status(material: CourseMaterial):
 
 
 def sync_material_access_for_material(material: CourseMaterial):
-    registrations = StudentCourseRegistration.objects.filter(course=material.course).select_related("student")
+    registrations = StudentCourseRegistration.objects.filter(
+        course=material.course, is_active=True,
+    ).select_related("student")
     target_status = default_material_status(material)
     for registration in registrations:
         access, created = MaterialAccess.objects.get_or_create(
@@ -378,11 +380,15 @@ def send_course_reminder_email(course: Course, recipients=None):
             User.objects.filter(
                 role=User.Role.STUDENT,
                 student_registrations__course=course,
+                student_registrations__is_active=True,
             ).distinct()
         )
 
     for user in recipients:
-        if not user or user.role not in {User.Role.STUDENT, User.Role.LECTURER} or not user.email:
+        # An HOD is still a lecturer.  RoleAssignment is the authoritative
+        # source for that additional responsibility, rather than the legacy
+        # primary role field alone.
+        if not user or not user.has_role(User.Role.STUDENT, User.Role.LECTURER) or not user.email:
             continue
         email = user.email.strip()
         if email:
@@ -402,9 +408,8 @@ def send_course_reminder_email(course: Course, recipients=None):
     delivered_recipient_ids = set()
     failed_recipient_ids = set()
     error_message = ""
-    connection = get_connection(fail_silently=False)
-
     try:
+        connection = get_connection(fail_silently=False)
         connection.open()
         for start in range(0, len(recipient_groups), NOTIFICATION_EMAIL_BATCH_SIZE):
             batch = recipient_groups[start : start + NOTIFICATION_EMAIL_BATCH_SIZE]
@@ -430,7 +435,8 @@ def send_course_reminder_email(course: Course, recipients=None):
             failed_recipient_ids.update(item["recipient_ids"])
         failed_recipient_ids.difference_update(delivered_recipient_ids)
     finally:
-        connection.close()
+        if "connection" in locals():
+            connection.close()
 
     return delivered_recipient_ids, failed_recipient_ids, error_message
 
@@ -445,9 +451,15 @@ def deliver_notification(notification):
     if notification.level:
         students = students.filter(level=notification.level)
     if course_ids:
-        students = students.filter(student_registrations__course_id__in=course_ids).distinct()
-    elif notification.sender.role == User.Role.LECTURER and not department_ids:
-        students = students.filter(student_registrations__course__lecturer=notification.sender).distinct()
+        students = students.filter(
+            student_registrations__course_id__in=course_ids,
+            student_registrations__is_active=True,
+        ).distinct()
+    elif notification.sender.has_role(User.Role.LECTURER) and not department_ids:
+        students = students.filter(
+            student_registrations__course__lecturer=notification.sender,
+            student_registrations__is_active=True,
+        ).distinct()
 
     recipient_rows = []
     for student_id in students.distinct().values_list("id", flat=True).iterator(
@@ -487,7 +499,7 @@ def deliver_notification(notification):
     if alert_rows:
         UserAlert.objects.bulk_create(alert_rows, ignore_conflicts=True)
 
-    if notification.sender.role == User.Role.LECTURER:
+    if notification.sender.has_role(User.Role.LECTURER):
         transaction.on_commit(lambda: send_lecturer_message_emails(notification))
 
 
@@ -535,7 +547,7 @@ def send_lecturer_message_emails(notification):
 
 
 def create_alert(recipient, alert_type, title, body, target_url, dedupe_key):
-    if not recipient or recipient.role not in {User.Role.STUDENT, User.Role.LECTURER}:
+    if not recipient or not recipient.has_role(User.Role.STUDENT, User.Role.LECTURER):
         return None
     UserAlert.objects.get_or_create(
         recipient=recipient,
@@ -609,13 +621,14 @@ def dispatch_due_course_reminders(now=None):
                 role=User.Role.STUDENT,
                 student_registrations__course=course,
                 student_registrations__session__is_current=True,
+                student_registrations__is_active=True,
             ).distinct()
         )
 
         email_targets = []
         email_dispatches = {}
         for recipient in recipients:
-            if not recipient or recipient.role not in {User.Role.STUDENT, User.Role.LECTURER}:
+            if not recipient or not recipient.has_role(User.Role.STUDENT, User.Role.LECTURER):
                 continue
             if recipient.email_class_reminders and recipient.email:
                 reminder_dispatch, _ = CourseReminderDispatch.objects.get_or_create(

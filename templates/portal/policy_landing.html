@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}Policies &amp; Legal | EduConnect{% endblock %}
+{% block body_class %}policy-page{% endblock %}
+{% block content %}
+<main class="page-shell policy-shell"><section class="container policy-document">
+    <header class="policy-header"><p class="eyebrow">EduConnect</p><h1>Policies &amp; Legal</h1><p>These global EduConnect documents explain how the platform is used, managed and supported. They apply consistently across institutions. Institution-specific academic regulations, payment rules and signed agreements may supplement them but do not replace these published global policies.</p><p class="muted-note">{{ legal_review_notice }}</p></header>
+    <section class="policy-grid" aria-label="Published policies">
+        {% for policy in policies %}<article class="policy-card"><p class="eyebrow">Version {{ policy.version }}</p><h2><a href="{% url 'portal:policy-detail' policy.slug %}">{{ policy.title }}</a></h2><p>{{ policy.summary }}</p><p class="muted-note">Effective {{ policy.effective_date|date:"F j, Y" }} · Updated {{ policy.last_updated|date:"F j, Y" }}</p>{% if policy.slug == 'dpa' %}<p class="muted-note">Institutional agreement template; not a student contract.</p>{% endif %}<a class="ghost-btn small" href="{% url 'portal:policy-detail' policy.slug %}">Read {{ policy.title }}</a></article>{% empty %}<p class="flash error">Policies are temporarily unavailable. Please try again later.</p>{% endfor %}
+    </section>
+    <footer class="policy-contact"><h2>Contact</h2><p>Contact KizTech Technologies Ltd at <a href="mailto:kiztech01@gmail.com">kiztech01@gmail.com</a> or 08128666531.</p></footer>
+</section></main>
+{% endblock %}

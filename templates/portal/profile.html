@@ -13,7 +13,7 @@
         <button type="submit" class="primary-btn">Save Profile</button>
     </form>
 </section>
-{% if request.user.role == "student" or request.user.role == "lecturer" %}
+{% if profile_can_receive_alerts %}
     <section class="panel-card">
         <div class="panel-head">
             <h2>Browser Alerts</h2>
@@ -41,7 +41,7 @@
     <div class="panel-head">
         <h2>Change Password</h2>
     </div>
-    {% if request.user.role == "admin" %}
+    {% if profile_is_institution_admin %}
         <p class="muted-note">Choose a new password for your institution administrator account.</p>
         <form method="post" action="{% url 'portal:institution-admin-change-password' %}" class="stack-form">
             {% csrf_token %}
@@ -52,7 +52,7 @@
         <p class="muted-note">We will verify the request through your email before your password can be changed.</p>
         <form method="post" action="{% url 'portal:profile-password-reset' %}">
             {% csrf_token %}
-            <button type="submit" class="ghost-btn">Send Password Reset Link</button>
+            <button type="submit" class="ghost-btn">Send Password Reset Code</button>
         </form>
     {% endif %}
 </section>

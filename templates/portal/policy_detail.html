@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ policy.title }} | EduConnect{% endblock %}
+{% block body_class %}policy-page{% endblock %}
+
+{% block content %}
+<main class="page-shell policy-shell">
+    <article class="container policy-document">
+        <div class="policy-actions no-print">
+            <a class="ghost-btn small" href="{% url 'portal:policy-landing' %}">All Policies &amp; Legal</a>
+            {% if request.user.is_authenticated %}<a class="ghost-btn small" href="{% url 'portal:dashboard' %}">Return to dashboard</a>{% else %}<a class="ghost-btn small" href="{% url 'portal:home' %}">Return to portal</a>{% endif %}
+            <button class="primary-btn small" type="button" onclick="window.print()">Print / Save PDF</button>
+        </div>
+        <header class="policy-header">
+            <p class="eyebrow">EduConnect Policies &amp; Legal</p>
+            <h1>{{ policy.title }}</h1>
+            <dl class="policy-metadata">
+                <div><dt>Version</dt><dd>{{ policy.version }}</dd></div>
+                <div><dt>Effective date</dt><dd>{{ policy.effective_date|date:"F j, Y" }}</dd></div>
+                <div><dt>Last updated</dt><dd>{{ policy.last_updated|date:"F j, Y" }}</dd></div>
+            </dl>
+            <p class="muted-note">{{ legal_review_notice }}</p>
+        </header>
+
+        <nav class="policy-toc no-print" aria-label="Table of contents">
+            <h2>Contents</h2>
+            <ol>{% for item in policy.sections %}<li><a href="#section-{{ forloop.counter }}">{{ item.heading }}</a></li>{% endfor %}</ol>
+        </nav>
+
+        <div class="policy-body">
+            {% for item in policy.sections %}
+                <section id="section-{{ forloop.counter }}" class="policy-section">
+                    <h2><span>{{ forloop.counter }}.</span> {{ item.heading }}</h2>
+                    {% for paragraph in item.paragraphs %}<p>{{ paragraph }}</p>{% endfor %}
+                </section>
+            {% endfor %}
+        </div>
+
+        <footer class="policy-contact">
+            <h2>Contact</h2>
+            <p>Questions about this policy: <a href="mailto:kiztech01@gmail.com">kiztech01@gmail.com</a> · 08128666531.</p>
+            <p>{{ legal_review_notice }}</p>
+        </footer>
+    </article>
+</main>
+{% endblock %}

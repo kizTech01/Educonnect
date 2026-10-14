@@ -8,7 +8,9 @@ from django.core.validators import FileExtensionValidator
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
 from django.utils.text import slugify
+import secrets
 
 
 LEVEL_CHOICES = [
@@ -102,6 +104,97 @@ class Institution(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class GlobalPolicy(models.Model):
+    """A versioned, platform-owned legal document shared by every tenant."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PUBLISHED = "published", "Published"
+        ARCHIVED = "archived", "Archived"
+
+    slug = models.SlugField(max_length=80)
+    title = models.CharField(max_length=200)
+    summary = models.CharField(max_length=300)
+    sections = models.JSONField(default=list)
+    version = models.CharField(max_length=40)
+    effective_date = models.DateField()
+    last_updated = models.DateField()
+    acceptance_required = models.BooleanField(default=False)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
+    published_at = models.DateTimeField(null=True, blank=True)
+    published_by = models.ForeignKey(
+        "User", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="policies_published",
+    )
+    supersedes = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="replacement_versions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["title", "-effective_date", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["slug", "version"], name="unique_global_policy_version"),
+            models.UniqueConstraint(
+                fields=["slug"],
+                condition=models.Q(status="published"),
+                name="one_published_global_policy_per_slug",
+            ),
+        ]
+        indexes = [models.Index(fields=["slug", "status"])]
+
+    def clean(self):
+        if not isinstance(self.sections, list) or not self.sections:
+            raise ValidationError({"sections": "Add at least one numbered policy section."})
+        for item in self.sections:
+            if not isinstance(item, dict) or not item.get("heading") or not isinstance(item.get("paragraphs"), list):
+                raise ValidationError({"sections": "Each section needs a heading and a list of paragraphs."})
+            if not all(isinstance(paragraph, str) and paragraph.strip() for paragraph in item["paragraphs"]):
+                raise ValidationError({"sections": "Each policy paragraph must contain text."})
+        if self.status == self.Status.PUBLISHED and not self.published_at:
+            self.published_at = timezone.now()
+
+    def __str__(self):
+        return f"{self.title} v{self.version}"
+
+    def save(self, *args, **kwargs):
+        """Keep released versions immutable; publication creates a new version."""
+        if self.pk:
+            previous_status = type(self).objects.filter(pk=self.pk).values_list("status", flat=True).first()
+            if previous_status and previous_status != self.Status.DRAFT:
+                raise ValidationError("Published and archived policy versions are immutable. Create a new draft version instead.")
+        super().save(*args, **kwargs)
+
+
+class PolicyAcceptance(models.Model):
+    """Evidence of an affirmative acceptance or acknowledgement, never a page view."""
+
+    class Event(models.TextChoices):
+        ACCEPTED = "accepted", "Accepted"
+        ACKNOWLEDGED = "acknowledged", "Acknowledged"
+
+    policy = models.ForeignKey(GlobalPolicy, on_delete=models.PROTECT, related_name="acceptances")
+    user = models.ForeignKey("User", on_delete=models.CASCADE, related_name="policy_acceptances")
+    institution = models.ForeignKey(Institution, null=True, blank=True, on_delete=models.SET_NULL, related_name="policy_acceptances")
+    event = models.CharField(max_length=16, choices=Event.choices)
+    accepted_at = models.DateTimeField(default=timezone.now)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-accepted_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["policy", "user", "event"], name="unique_user_policy_acceptance_event"),
+        ]
+        indexes = [models.Index(fields=["user", "policy", "event"])]
+
+    def save(self, *args, **kwargs):
+        if self.user_id and not self.institution_id:
+            self.institution = self.user.institution
+        super().save(*args, **kwargs)
 
 
 class TenantQuerySet(models.QuerySet):
@@ -260,9 +353,17 @@ class DepartmentLecturerUpload(TimeStampedModel):
 
 class CourseAllocationUpload(TimeStampedModel):
     department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="course_allocation_uploads")
+    semester = models.CharField(
+        max_length=20,
+        choices=(("first", "First Semester"), ("second", "Second Semester")),
+        blank=True,
+    )
     file = models.FileField(upload_to="department_uploads/course_allocations/%Y/%m/")
     uploaded_by = models.ForeignKey("User", on_delete=models.SET_NULL, null=True, related_name="course_allocation_uploads")
     processing_summary = models.TextField(blank=True)
+    reconciliation = models.JSONField(default=dict, blank=True)
+    content_hash = models.CharField(max_length=64, blank=True)
+    is_active = models.BooleanField(default=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -385,6 +486,11 @@ class User(AbstractUser):
             roles.update(
                 self.role_assignments.filter(is_active=True).values_list("role", flat=True)
             )
+        # An HOD is a lecturer with an additional departmental appointment.
+        # This also repairs older accounts whose primary role was stored as
+        # ``hod`` before role assignments were introduced.
+        if self.Role.HOD in roles:
+            roles.add(self.Role.LECTURER)
         return roles
 
     def has_role(self, *roles):
@@ -404,6 +510,11 @@ class RoleAssignment(TimeStampedModel):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["institution", "user", "role", "department"], name="unique_tenant_user_role"),
+            models.UniqueConstraint(
+                fields=["institution", "department"],
+                condition=models.Q(role=User.Role.EXAM_OFFICER, is_active=True),
+                name="unique_active_exam_officer_per_department",
+            ),
         ]
         indexes = [models.Index(fields=["institution", "role", "is_active"])]
 
@@ -902,6 +1013,14 @@ class StudentCourseRegistration(TimeStampedModel):
         on_delete=models.SET_NULL,
         related_name="student_course_actions",
     )
+    # A curriculum/allocation change must not erase the registration row: it
+    # can be needed to explain an earlier result, payment or transcript.
+    is_active = models.BooleanField(default=True)
+    superseded_at = models.DateTimeField(null=True, blank=True)
+    superseded_by_allocation = models.ForeignKey(
+        "CourseAllocationUpload", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="superseded_student_registrations",
+    )
 
     class Meta:
         ordering = ["course__code"]
@@ -1124,6 +1243,9 @@ class LecturerCourseRegistration(TimeStampedModel):
         limit_choices_to={"role": User.Role.LECTURER},
     )
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="lecturer_registrations")
+    allocation_upload = models.ForeignKey(CourseAllocationUpload, null=True, blank=True, on_delete=models.SET_NULL, related_name="allocation_records")
+    is_active = models.BooleanField(default=True)
+    deactivated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["course__code"]
@@ -1767,6 +1889,11 @@ class DepartmentalPayment(TimeStampedModel):
         PAID = "paid", "Paid"
         FAILED = "failed", "Failed"
 
+    class ExamCardApprovalStatus(models.TextChoices):
+        PENDING = "pending", "Pending Approval"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
     student = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -1782,6 +1909,33 @@ class DepartmentalPayment(TimeStampedModel):
     paystack_public_key_used = models.CharField(max_length=255, blank=True)
     paystack_secret_key_used = models.CharField(max_length=255, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
+    # Payment confirmation and examination clearance are deliberately
+    # independent. A paid student must still be reviewed by the department's
+    # assigned Exam Officer before a card can be issued.
+    exam_card_approval_status = models.CharField(
+        max_length=20,
+        choices=ExamCardApprovalStatus.choices,
+        default=ExamCardApprovalStatus.PENDING,
+    )
+    exam_card_approved_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="exam_card_approvals",
+    )
+    exam_card_approved_at = models.DateTimeField(null=True, blank=True)
+    exam_card_rejection_reason = models.TextField(blank=True)
+    # An automatic decision is explicitly marked so Exam Officers can
+    # distinguish it from a decision they made themselves.
+    exam_card_approved_automatically = models.BooleanField(default=False)
+    exam_card_ai_verification = models.JSONField(default=dict, blank=True)
+    # The raw QR secret is never persisted.  A fresh card issuance rotates the
+    # token, making any earlier printed card invalid without exposing a PK.
+    exam_card_token_hash = models.CharField(max_length=64, blank=True, db_index=True)
+    exam_card_issued_at = models.DateTimeField(null=True, blank=True)
+    exam_card_version = models.PositiveIntegerField(default=0)
+    exam_card_revoked_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -1801,6 +1955,10 @@ class DepartmentalPayment(TimeStampedModel):
         return self.status == self.Status.PAID
 
     @property
+    def exam_card_is_approved(self):
+        return self.is_paid and self.exam_card_approval_status == self.ExamCardApprovalStatus.APPROVED
+
+    @property
     def semester_label(self):
         reference_time = self.paid_at or self.created_at or timezone.now()
         local_time = timezone.localtime(reference_time)
@@ -1808,6 +1966,31 @@ class DepartmentalPayment(TimeStampedModel):
 
     def __str__(self):
         return f"{self.student.full_name} - {self.session.name}"
+
+    @staticmethod
+    def exam_card_token_hash_for(token):
+        return salted_hmac("portal.exam-card-token", token, algorithm="sha256").hexdigest()
+
+    def issue_exam_card_token(self):
+        """Create an opaque one-time QR token while storing its keyed hash."""
+        token = secrets.token_urlsafe(32)
+        self.exam_card_token_hash = self.exam_card_token_hash_for(token)
+        self.exam_card_issued_at = timezone.now()
+        self.exam_card_version += 1
+        self.exam_card_revoked_at = None
+        self.save(update_fields=[
+            "exam_card_token_hash", "exam_card_issued_at", "exam_card_version",
+            "exam_card_revoked_at", "updated_at",
+        ])
+        return token
+
+    @property
+    def exam_card_is_valid(self):
+        return bool(
+            self.exam_card_is_approved
+            and self.exam_card_token_hash
+            and not self.exam_card_revoked_at
+        )
 
 
 class DepartmentalPaymentItem(TimeStampedModel):
@@ -1829,6 +2012,7 @@ class DepartmentalPaymentDocument(TimeStampedModel):
     class Category(models.TextChoices):
         WHITE_FORM = "white_form", "White Form"
         SCHOOL_RECEIPT = "school_receipt", "School Receipt"
+        COURSE_FORM = "course_form", "Course Form"
         # Keep the stored value stable so existing uploaded documents retain
         # their category when the label is renamed.
         MEDICAL_FITNESS = "supporting", "Medical fitness"
@@ -1841,6 +2025,84 @@ class DepartmentalPaymentDocument(TimeStampedModel):
 
     class Meta:
         ordering = ["category", "title", "created_at"]
+
+    def __str__(self):
+        return self.title
+
+
+class ExamCardAIConfiguration(TimeStampedModel):
+    """Department-owned, explainable rules for automatic card clearance."""
+
+    department = models.ForeignKey(
+        Department, on_delete=models.CASCADE, related_name="exam_card_ai_configurations"
+    )
+    academic_session = models.ForeignKey(
+        AcademicSession, on_delete=models.CASCADE, related_name="exam_card_ai_configurations"
+    )
+    semester = models.CharField(
+        max_length=20,
+        choices=Course.Semester.choices,
+        blank=True,
+        help_text="The semester which submitted and sample documents must show.",
+    )
+    automatic_processing_enabled = models.BooleanField(default=False)
+    require_white_form = models.BooleanField(default=True)
+    require_school_receipt = models.BooleanField(default=True)
+    require_course_form = models.BooleanField(default=True)
+    verify_student_identifier = models.BooleanField(default=True)
+    verify_academic_session = models.BooleanField(default=True)
+    configured_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="exam_card_ai_configurations",
+    )
+
+    class Meta:
+        ordering = ["department__name", "-academic_session__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["department", "academic_session"],
+                name="unique_exam_card_ai_department_session",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.department.name} - {self.academic_session.name}"
+
+    def clean(self):
+        if (
+            self.department_id
+            and self.academic_session_id
+            and self.department.institution_id != self.academic_session.institution_id
+        ):
+            raise ValidationError({
+                "academic_session": "Choose an academic session from this department's institution."
+            })
+
+
+class ExamCardAIReferenceDocument(TimeStampedModel):
+    """A trusted departmental sample used to validate automatic decisions."""
+
+    configuration = models.ForeignKey(
+        ExamCardAIConfiguration, on_delete=models.CASCADE, related_name="reference_documents"
+    )
+    category = models.CharField(
+        max_length=20,
+        choices=[
+            ("white_form", "White Form"),
+            ("school_receipt", "School Receipt"),
+            ("course_form", "Course Form"),
+        ],
+        blank=True,
+        help_text="The required departmental-payment document this sample represents.",
+    )
+    title = models.CharField(max_length=180)
+    file = models.FileField(
+        upload_to="exam_card_ai_references/%Y/%m/",
+        validators=[FileExtensionValidator(allowed_extensions=["pdf", "docx", "txt", "csv"])],
+    )
+
+    class Meta:
+        ordering = ["title", "created_at"]
 
     def __str__(self):
         return self.title

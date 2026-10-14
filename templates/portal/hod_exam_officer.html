@@ -7,7 +7,7 @@
     <div class="panel-head">
         <div>
             <h2>Exam Officer</h2>
-            <p class="muted-note">Department: {{ department.name }}. Assigning this duty retains each lecturer's existing Lecturer role.</p>
+            <p class="muted-note">Department: {{ department.name }}. One lecturer holds this duty at a time. Selecting another lecturer safely replaces the current Exam Officer while retaining both lecturers' Lecturer roles.</p>
         </div>
     </div>
     <div class="table-wrap">
@@ -20,13 +20,13 @@
                     <td>{{ lecturer.id_number|default:lecturer.username }}</td>
                     <td>Lecturer{% if lecturer.id in exam_officer_ids %} · Exam Officer{% endif %}</td>
                     <td>
-                        {% if lecturer.id in exam_officer_ids %}
+                        {% if exam_officer and lecturer.id == exam_officer.user_id %}
                             <span class="status-chip success">Assigned</span>
                         {% else %}
                             <form method="post">
                                 {% csrf_token %}
                                 <input type="hidden" name="lecturer_id" value="{{ lecturer.id }}">
-                                <button class="primary-btn small" type="submit">Assign as Exam Officer</button>
+                                <button class="primary-btn small" type="submit">{% if exam_officer %}Make Exam Officer{% else %}Assign as Exam Officer{% endif %}</button>
                             </form>
                         {% endif %}
                     </td>
