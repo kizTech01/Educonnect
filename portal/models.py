@@ -1505,9 +1505,22 @@ class AcademicSession(TimeStampedModel):
         ]
 
     def save(self, *args, **kwargs):
+        # A session rollover is a business event, not merely a flag change.
+        # Keep the historical rows for transcripts and receipts, but make sure
+        # no role carries a live course registration into the newly-current
+        # session.  This also covers sessions created outside the admin view.
+        was_current = False
+        if self.pk:
+            was_current = bool(
+                AcademicSession.all_objects.filter(pk=self.pk).values_list("is_current", flat=True).first()
+            )
         super().save(*args, **kwargs)
         if self.is_current:
-            AcademicSession.objects.exclude(pk=self.pk).filter(is_current=True).update(is_current=False)
+            AcademicSession.all_objects.filter(institution_id=self.institution_id, is_current=True).exclude(
+                pk=self.pk
+            ).update(is_current=False)
+            if not was_current:
+                reset_course_registrations_for_session_rollover(self.institution_id)
 
     def __str__(self):
         return self.name
@@ -2163,3 +2176,53 @@ class CourseReminderDispatch(TimeStampedModel):
 
     def __str__(self):
         return f"{self.course.code} - {self.recipient.full_name} - {self.channel}"
+
+
+def reset_course_registrations_for_session_rollover(institution_id):
+    """Deactivate all live course state when an institution starts a session.
+
+    Historical registrations, payment receipts and lecturer allocations are
+    deliberately retained.  Their live flags are cleared so the student,
+    lecturer and staff workspaces all start the new session unregistered.
+    ``all_objects`` is intentional: a model save can occur outside a request
+    and must still affect only its own institution.
+    """
+    if not institution_id:
+        return 0, 0
+
+    now = timezone.now()
+    course_ids = Course.all_objects.filter(institution_id=institution_id).values("pk")
+    lecturer_count = LecturerCourseRegistration.all_objects.filter(
+        course_id__in=course_ids,
+        is_active=True,
+    ).count()
+    student_count = StudentCourseRegistration.all_objects.filter(
+        institution_id=institution_id,
+        is_active=True,
+    ).count()
+    LecturerCourseRegistration.all_objects.filter(
+        course_id__in=course_ids,
+        is_active=True,
+    ).update(is_active=False, deactivated_at=now, updated_at=now)
+    StudentCourseRegistration.all_objects.filter(
+        institution_id=institution_id,
+        is_active=True,
+    ).update(
+        is_active=False,
+        superseded_at=now,
+        superseded_by_allocation=None,
+        updated_at=now,
+    )
+    CoursePayment.all_objects.filter(
+        institution_id=institution_id,
+        is_active_for_registration=True,
+    ).update(is_active_for_registration=False, updated_at=now)
+    Course.all_objects.filter(institution_id=institution_id).exclude(lecturer__isnull=True).update(
+        lecturer=None,
+        updated_at=now,
+    )
+    CourseAllocationUpload.all_objects.filter(
+        institution_id=institution_id,
+        is_active=True,
+    ).update(is_active=False, updated_at=now)
+    return lecturer_count, student_count

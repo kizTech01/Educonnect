@@ -1249,36 +1249,6 @@ def current_departmental_session():
     return created_session
 
 
-def reset_lecturer_course_registrations():
-    """Deactivate every live allocation/registration for a session rollover.
-
-    We retain the old rows for results, receipts and audit history, but every
-    role sees an empty course registration state in the new current session.
-    Outstanding old payment callbacks are disabled too, so they cannot restore
-    an old-session registration after the rollover.
-    """
-    now = timezone.now()
-    registration_count = LecturerCourseRegistration.objects.filter(is_active=True).count()
-    student_registration_count = StudentCourseRegistration.objects.filter(is_active=True).count()
-    LecturerCourseRegistration.objects.filter(is_active=True).update(
-        is_active=False,
-        deactivated_at=now,
-        updated_at=now,
-    )
-    StudentCourseRegistration.objects.filter(is_active=True).update(
-        is_active=False,
-        superseded_at=now,
-        superseded_by_allocation=None,
-        updated_at=now,
-    )
-    CoursePayment.objects.filter(is_active_for_registration=True).update(
-        is_active_for_registration=False,
-        updated_at=now,
-    )
-    Course.objects.exclude(lecturer__isnull=True).update(lecturer=None, updated_at=now)
-    return registration_count, student_registration_count
-
-
 def current_departmental_semester_label(reference_time=None):
     reference_time = reference_time or timezone.now()
     local_time = timezone.localtime(reference_time)
@@ -3189,6 +3159,9 @@ def lecturer_registered_courses_queryset(user):
     # Older and admin-imported courses may have a lecturer assigned directly
     # before a LecturerCourseRegistration record exists. Include both forms so
     # those courses remain visible and manageable by their assigned lecturer.
+    # A continuing curriculum can legitimately use a catalogue course first
+    # published in an earlier session, so its session is not a visibility
+    # boundary here; the active allocation row is.
     return Course.objects.filter(
         Q(lecturer=user) | Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True)
     ).select_related("department", "lecturer").distinct()
@@ -5286,16 +5259,12 @@ def admin_about(request):
             session = session_form.save()
             for department in Department.objects.all():
                 ensure_departmental_fees_for_department(department)
-            lecturer_reset_count, student_reset_count = (
-                reset_lecturer_course_registrations() if session.is_current else (0, 0)
-            )
             messages.success(
                 request,
                 f"Academic session {session.name} created"
                 + (
-                    f" and set as current. {lecturer_reset_count} lecturer and {student_reset_count} "
-                    "student course registration(s) were cleared. Every student must make a new "
-                    "departmental payment for this session."
+                    " and set as current. Live lecturer and student course registrations were cleared. "
+                    "Every student must make a new departmental payment for this session."
                     if session.is_current else "."
                 ),
             )

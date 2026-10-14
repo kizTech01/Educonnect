@@ -16,6 +16,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
+    AcademicSession,
     Course,
     CourseMaterial,
     CourseReminderDispatch,
@@ -442,7 +443,18 @@ def send_course_reminder_email(course: Course, recipients=None):
 
 
 def deliver_notification(notification):
-    students = User.objects.filter(role=User.Role.STUDENT, is_active=True)
+    # Messages and reminders must follow the active academic registration.
+    # Without this, a lecturer could unintentionally notify students from a
+    # previous session simply because their historical registration remains.
+    current_session = AcademicSession.all_objects.filter(
+        institution_id=notification.institution_id,
+        is_current=True,
+    ).first()
+    students = User.all_objects.filter(
+        institution_id=notification.institution_id,
+        role=User.Role.STUDENT,
+        is_active=True,
+    )
     department_ids = list(notification.departments.values_list("id", flat=True))
     course_ids = list(notification.courses.values_list("id", flat=True))
 
@@ -457,9 +469,15 @@ def deliver_notification(notification):
         ).distinct()
     elif notification.sender.has_role(User.Role.LECTURER) and not department_ids:
         students = students.filter(
-            student_registrations__course__lecturer=notification.sender,
+            Q(student_registrations__course__lecturer=notification.sender)
+            | Q(
+                student_registrations__course__lecturer_registrations__lecturer=notification.sender,
+                student_registrations__course__lecturer_registrations__is_active=True,
+            ),
             student_registrations__is_active=True,
         ).distinct()
+    if current_session:
+        students = students.filter(student_registrations__session=current_session)
 
     recipient_rows = []
     for student_id in students.distinct().values_list("id", flat=True).iterator(
@@ -613,10 +631,14 @@ def dispatch_due_course_reminders(now=None):
         if not (reminder_at <= local_now < class_starts_at):
             continue
 
-        recipients = []
+        recipients_by_id = {}
         if course.lecturer_id:
-            recipients.append(course.lecturer)
-        recipients.extend(
+            recipients_by_id[course.lecturer_id] = course.lecturer
+        for allocation in course.lecturer_registrations.filter(
+            is_active=True,
+        ).select_related("lecturer"):
+            recipients_by_id[allocation.lecturer_id] = allocation.lecturer
+        students = (
             User.objects.filter(
                 role=User.Role.STUDENT,
                 student_registrations__course=course,
@@ -624,6 +646,8 @@ def dispatch_due_course_reminders(now=None):
                 student_registrations__is_active=True,
             ).distinct()
         )
+        recipients_by_id.update({student.id: student for student in students})
+        recipients = list(recipients_by_id.values())
 
         email_targets = []
         email_dispatches = {}

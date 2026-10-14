@@ -4,10 +4,11 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from .automation import _allocation_key, import_course_allocations
+from .services import deliver_notification
 from .models import (
     AcademicSession, Course, CourseAllocationUpload, Department, DepartmentalPayment,
-    Faculty, Institution, LecturerCourseRegistration, Programme,
-    StudentCourseRegistration, User,
+    Faculty, Institution, LecturerCourseRegistration, Programme, CoursePayment,
+    Notification, NotificationRecipient, StudentCourseRegistration, User,
 )
 
 
@@ -92,6 +93,105 @@ class AllocationReconciliationTests(TestCase):
                 import_course_allocations(upload)
                 raise RuntimeError("simulate failure after import")
         self.assertFalse(Course.objects.filter(department=self.department, code="CSC101").exists())
+
+    def test_starting_a_new_current_session_unregisters_only_its_institution(self):
+        course = Course.objects.create(
+            institution=self.institution,
+            department=self.department,
+            academic_session=self.session,
+            code="CSC101",
+            title="Introduction",
+            level="100",
+        )
+        student = User.objects.create_user(
+            username="rollover-student", password="pass1234", role=User.Role.STUDENT,
+            institution=self.institution, department=self.department,
+        )
+        course.lecturer = self.lecturers[0]
+        course.save(update_fields=["lecturer", "updated_at"])
+        LecturerCourseRegistration.objects.create(
+            institution=self.institution, lecturer=self.lecturers[0], course=course,
+        )
+        StudentCourseRegistration.objects.create(
+            institution=self.institution, student=student, course=course, session=self.session,
+        )
+        payment = CoursePayment.objects.create(
+            institution=self.institution, student=student, course=course, session=self.session,
+            amount="0.00",
+        )
+
+        other_institution = Institution.objects.create(
+            name="Other University", institution_code="OTHER-U", email="other@example.test", subdomain="other-u",
+        )
+        other_faculty = Faculty.objects.create(institution=other_institution, name="Science", code="SCI")
+        other_department = Department.objects.create(
+            institution=other_institution, faculty=other_faculty, name="Physics", code="PHY",
+        )
+        other_session = AcademicSession.objects.create(
+            institution=other_institution, name="2026/2027", is_current=True,
+        )
+        other_lecturer = User.objects.create_user(
+            username="other-lecturer", password="pass1234", role=User.Role.LECTURER,
+            institution=other_institution, department=other_department,
+        )
+        other_course = Course.objects.create(
+            institution=other_institution, department=other_department, academic_session=other_session,
+            lecturer=other_lecturer, code="PHY101", title="Physics", level="100",
+        )
+        other_registration = LecturerCourseRegistration.objects.create(
+            institution=other_institution, lecturer=other_lecturer, course=other_course,
+        )
+
+        AcademicSession.objects.create(
+            institution=self.institution, name="2027/2028", is_current=True,
+        )
+
+        course.refresh_from_db()
+        payment.refresh_from_db()
+        other_course.refresh_from_db()
+        other_registration.refresh_from_db()
+        self.assertIsNone(course.lecturer)
+        self.assertFalse(LecturerCourseRegistration.objects.get(course=course).is_active)
+        self.assertFalse(StudentCourseRegistration.objects.get(student=student, course=course).is_active)
+        self.assertFalse(payment.is_active_for_registration)
+        self.assertEqual(other_course.lecturer, other_lecturer)
+        self.assertTrue(other_registration.is_active)
+
+    def test_lecturer_message_reaches_only_current_active_course_registrations(self):
+        course = Course.objects.create(
+            institution=self.institution,
+            department=self.department,
+            academic_session=self.session,
+            lecturer=self.lecturers[0],
+            code="CSC102",
+            title="Programming",
+            level="100",
+        )
+        current_student = User.objects.create_user(
+            username="current-student", password="pass1234", role=User.Role.STUDENT,
+            institution=self.institution, department=self.department,
+        )
+        former_student = User.objects.create_user(
+            username="former-student", password="pass1234", role=User.Role.STUDENT,
+            institution=self.institution, department=self.department,
+        )
+        old_session = AcademicSession.objects.create(
+            institution=self.institution, name="2025/2026", is_current=False,
+        )
+        StudentCourseRegistration.objects.create(
+            institution=self.institution, student=current_student, course=course, session=self.session,
+        )
+        StudentCourseRegistration.objects.create(
+            institution=self.institution, student=former_student, course=course, session=old_session,
+        )
+        notification = Notification.objects.create(
+            institution=self.institution, sender=self.lecturers[0], subject="Class update", body="Bring your notes.",
+        )
+
+        deliver_notification(notification)
+
+        self.assertTrue(NotificationRecipient.objects.filter(notification=notification, student=current_student).exists())
+        self.assertFalse(NotificationRecipient.objects.filter(notification=notification, student=former_student).exists())
 
 
 class ExamCardVerificationTests(TestCase):
