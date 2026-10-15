@@ -58,7 +58,7 @@ if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS = unique([*ALLOWED_HOSTS, RENDER_EXTERNAL_HOSTNAME])
 
 if DEBUG:
-    ALLOWED_HOSTS = unique([*ALLOWED_HOSTS, "localhost", "127.0.0.1"])
+    ALLOWED_HOSTS = unique([*ALLOWED_HOSTS, "localhost", "educonnect.devs.surf"])
 
 
 CSRF_TRUSTED_ORIGINS = unique(
