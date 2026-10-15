@@ -2078,7 +2078,9 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertRedirects(removal, detail_url)
         unallocated_course.refresh_from_db()
         self.assertIsNone(unallocated_course.lecturer)
-        self.assertFalse(LecturerCourseRegistration.objects.filter(lecturer=colleague, course=unallocated_course).exists())
+        registration = LecturerCourseRegistration.objects.get(lecturer=colleague, course=unallocated_course)
+        self.assertFalse(registration.is_active)
+        self.assertIsNotNone(registration.deactivated_at)
 
     def test_password_reset_uses_an_emailed_otp_to_set_a_new_password(self):
         self.client.post(reverse("portal:password-reset"), {"email": self.student.email})
@@ -2446,13 +2448,15 @@ class DashboardAndCourseFlowTests(TestCase):
         self.session.refresh_from_db()
         self.assertFalse(self.session.is_current)
         self.assertTrue(DepartmentalFee.objects.filter(session=new_session, department=self.department).exists())
-        self.assertFalse(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer).exists())
+        lecturer_registration = LecturerCourseRegistration.objects.get(lecturer=self.lecturer)
+        self.assertFalse(lecturer_registration.is_active)
+        self.assertIsNotNone(lecturer_registration.deactivated_at)
         self.paid_course.refresh_from_db()
         self.assertIsNone(self.paid_course.lecturer)
-        self.assertFalse(
-            StudentCourseRegistration.objects.filter(student=self.student, session=new_session).exists()
-        )
-        self.assertFalse(StudentCourseRegistration.objects.filter(student=self.student).exists())
+        self.assertFalse(StudentCourseRegistration.objects.filter(student=self.student, session=new_session).exists())
+        student_registration = StudentCourseRegistration.objects.get(student=self.student, session=self.session)
+        self.assertFalse(student_registration.is_active)
+        self.assertIsNotNone(student_registration.superseded_at)
 
         page_response = self.client.get(reverse("portal:admin-about"))
         self.assertContains(page_response, "Create Academic Session")
@@ -2481,7 +2485,7 @@ class DashboardAndCourseFlowTests(TestCase):
                 "action": "upload-allocations",
                 "file": SimpleUploadedFile(
                     "allocation.csv",
-                    b"lecturer_name,course_code\nAda Lecturer,CSC201\n",
+                    b"lecturer_id,course_code\nlecturer1,CSC201\n",
                     content_type="text/csv",
                 ),
             },

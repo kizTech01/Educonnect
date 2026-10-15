@@ -4485,19 +4485,23 @@ def lecturer_results(request):
 @require_http_methods(["GET", "POST"])
 def exam_results(request):
     """Department-scoped review and publication gate for results."""
-    selected_role = active_role(request)
-    if selected_role == User.Role.HOD:
-        department = hod_department_for(request)
-    else:
+    # Exam Officer is an additional lecturer responsibility. ``active_role()``
+    # deliberately keeps those users in the lecturer workspace, so result
+    # review must authorize the assigned responsibility rather than require a
+    # separate session role.
+    is_exam_officer = request.user.has_role(User.Role.EXAM_OFFICER)
+    if is_exam_officer:
         assignment = request.user.role_assignments.filter(
             role=User.Role.EXAM_OFFICER, is_active=True, department__isnull=False,
         ).select_related("department").first()
         department = assignment.department if assignment else request.user.department
+    else:
+        department = hod_department_for(request)
     if not department:
         raise PermissionDenied("An Exam Officer must be assigned to a department.")
     results = CourseResult.objects.filter(course__department=department).select_related("student", "course", "session")
     if request.method == "POST":
-        if selected_role != User.Role.EXAM_OFFICER:
+        if not is_exam_officer:
             raise PermissionDenied("Only an active Exam Officer may approve or publish results.")
         result = get_object_or_404(results, pk=request.POST.get("result_id"))
         action = request.POST.get("action")
@@ -4532,7 +4536,7 @@ def exam_results(request):
         return redirect("portal:exam-results")
     return render(request, "portal/exam_results.html", dashboard_context(
         request, "Result Review", results=results[:200], department=department,
-        can_review=selected_role == User.Role.EXAM_OFFICER,
+        can_review=is_exam_officer,
     ))
 
 

@@ -25,6 +25,11 @@ def seed_global_policies(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [("portal", "0044_globalpolicy_policyacceptance")]
+    # PostgreSQL cannot create the partial unique index used by this constraint
+    # while the seed inserts still have deferred trigger events in the current
+    # transaction.  Keep the data and schema operations in separate
+    # transactions so an existing deployment can apply this migration safely.
+    atomic = False
 
     operations = [
         migrations.RunPython(seed_global_policies, migrations.RunPython.noop),
