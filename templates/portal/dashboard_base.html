@@ -40,7 +40,7 @@
                     {% else %}
                         <a href="{{ item.url }}" class="{% if item.active %}active{% endif %}">
                             <span>{{ item.label }}</span>
-                            {% if item.badge_count %}<span class="sidebar-notification-counter" aria-label="{{ item.badge_count }} unread message{{ item.badge_count|pluralize }}">{{ item.badge_count }}</span>{% endif %}
+                            {% if item.badge_count %}<span class="sidebar-notification-counter" aria-label="{{ item.badge_count }} {{ item.badge_label }}{{ item.badge_count|pluralize }}">{{ item.badge_count }}</span>{% endif %}
                         </a>
                     {% endif %}
                 </li>

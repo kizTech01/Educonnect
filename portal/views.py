@@ -633,10 +633,29 @@ def _role_dashboard_name(role):
     return "portal:role-workspace"
 
 
+def pending_exam_card_count_for_user(user):
+    """Return pending paid exam-card requests assigned to one Exam Officer."""
+    if not user.is_authenticated or not user.has_role(User.Role.EXAM_OFFICER):
+        return 0
+
+    assigned_department_ids = RoleAssignment.objects.filter(
+        user=user,
+        role=User.Role.EXAM_OFFICER,
+        is_active=True,
+        department__isnull=False,
+    ).values("department_id")
+    return DepartmentalPayment.objects.filter(
+        department_id__in=assigned_department_ids,
+        status=DepartmentalPayment.Status.PAID,
+        exam_card_approval_status=DepartmentalPayment.ExamCardApprovalStatus.PENDING,
+    ).count()
+
+
 def sidebar_links(request):
     current = request.resolver_match.url_name if request.resolver_match else ""
     selected_role = active_role(request)
     unread_message_count = 0
+    pending_exam_card_count = pending_exam_card_count_for_user(request.user)
     if request.user.is_authenticated and selected_role == User.Role.STUDENT:
         unread_message_count = NotificationRecipient.objects.filter(
             student=request.user,
@@ -688,7 +707,12 @@ def sidebar_links(request):
     elif selected_role == User.Role.EXAM_OFFICER:
         links = [{"label": "Dashboard", "url_name": "portal:lecturer-dashboard"}]
         links.extend(
-            {"label": label, "url_name": "portal:exam-card-approvals"}
+            {
+                "label": label,
+                "url_name": "portal:exam-card-approvals",
+                "badge_count": pending_exam_card_count,
+                "badge_label": "unapproved exam card",
+            }
             if slug == "exam-cards"
             else
             {"label": label, "url_name": "portal:department-all-results"}
@@ -728,7 +752,12 @@ def sidebar_links(request):
                 {"label": "Assign Exam Officer", "url_name": "portal:hod-exam-officer"},
             ]
         if request.user.has_role(User.Role.EXAM_OFFICER):
-            links.insert(-1, {"label": "Exam Cards", "url_name": "portal:exam-card-approvals"})
+            links.insert(-1, {
+                "label": "Exam Cards",
+                "url_name": "portal:exam-card-approvals",
+                "badge_count": pending_exam_card_count,
+                "badge_label": "unapproved exam card",
+            })
         links.insert(-1, {"label": "EduConnect AI", "url_name": "portal:ai-assistant"})
     elif selected_role in ROLE_MODULES:
         links = [
@@ -747,7 +776,12 @@ def sidebar_links(request):
             {"label": "Dashboard", "url_name": "portal:student-dashboard"},
             {"label": "Departmental", "url_name": "portal:student-departmental"},
             {"label": "Course Registration", "url_name": "portal:student-courses"},
-            {"label": "Messages", "url_name": "portal:student-messages", "badge_count": unread_message_count},
+            {
+                "label": "Messages",
+                "url_name": "portal:student-messages",
+                "badge_count": unread_message_count,
+                "badge_label": "unread message",
+            },
             {"label": "Timetable and Handbook", "url_name": "portal:student-documents"},
             {"label": "Profile", "url_name": "portal:profile"},
         ]
@@ -775,6 +809,7 @@ def sidebar_links(request):
                 "url": url,
                 "active": active,
                 "badge_count": item.get("badge_count", 0),
+                "badge_label": item.get("badge_label", "notification"),
             })
     return resolved_links
 
@@ -3869,6 +3904,7 @@ def student_documents(request):
 @role_required(User.Role.LECTURER)
 def lecturer_dashboard(request):
     registered_courses = lecturer_registered_courses_queryset(request.user)
+    pending_exam_card_count = pending_exam_card_count_for_user(request.user)
     context = dashboard_context(
         request,
         "Lecturer Dashboard",
@@ -3880,6 +3916,8 @@ def lecturer_dashboard(request):
         upload_count=registered_courses.exclude(file="").count(),
         paid_course_count=registered_courses.filter(is_free=False).count(),
         message_count=Notification.objects.filter(sender=request.user).count(),
+        pending_exam_card_count=pending_exam_card_count,
+        is_exam_officer=request.user.has_role(User.Role.EXAM_OFFICER),
     )
     return render(request, "portal/lecturer_dashboard.html", context)
 

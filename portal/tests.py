@@ -147,6 +147,36 @@ class InstitutionalRBACTests(TestCase):
         self.client.force_login(student)
         self.assertEqual(self.client.get(reverse("portal:download-exam-card", args=[payment.id])).status_code, 200)
 
+    def test_exam_officer_sees_pending_exam_card_count_on_dashboard_and_menu(self):
+        session = AcademicSession.objects.create(name="2031/2032", is_current=True)
+        student = User.objects.create_user(
+            username="pending-exam-card-student", password="pass1234", role=User.Role.STUDENT,
+            department=self.department, level="100",
+        )
+        DepartmentalPayment.objects.create(
+            student=student, department=self.department, session=session,
+            status=DepartmentalPayment.Status.PAID, total_amount=Decimal("4000.00"),
+        )
+
+        other_department = Department.objects.create(name="Mathematics", code="MTH")
+        other_student = User.objects.create_user(
+            username="other-pending-exam-card-student", password="pass1234", role=User.Role.STUDENT,
+            department=other_department, level="100",
+        )
+        DepartmentalPayment.objects.create(
+            student=other_student, department=other_department, session=session,
+            status=DepartmentalPayment.Status.PAID, total_amount=Decimal("4000.00"),
+        )
+
+        self.client.force_login(self.hod)
+        self.client.post(reverse("portal:hod-exam-officer"), {"lecturer_id": self.lecturer.id})
+        self.client.force_login(self.lecturer)
+
+        response = self.client.get(reverse("portal:lecturer-dashboard"))
+
+        self.assertContains(response, "Exam Cards Awaiting Approval")
+        self.assertContains(response, 'aria-label="1 unapproved exam card"', html=False)
+
     def test_role_assignment_rejects_a_cross_tenant_department(self):
         other = Institution.objects.create(
             name="Other University", institution_code="OTHER-SEC", email="other@example.test",

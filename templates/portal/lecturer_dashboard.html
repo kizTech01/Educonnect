@@ -24,6 +24,12 @@
         <span>Messages Sent</span>
         <strong>{{ message_count }}</strong>
     </article>
+    {% if is_exam_officer %}
+        <article class="metric-card">
+            <span>Exam Cards Awaiting Approval</span>
+            <strong>{{ pending_exam_card_count }}</strong>
+        </article>
+    {% endif %}
 </section>
 
 <section class="split-layout">
