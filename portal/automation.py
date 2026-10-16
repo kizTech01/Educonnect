@@ -54,7 +54,15 @@ def extract_text(uploaded_file):
         for row in root.iter(f"{namespace}tr"):
             cells = []
             for cell in row.findall(f"{namespace}tc"):
-                cells.append(" ".join(text.strip() for text in cell.itertext() if text.strip()))
+                # A Word cell commonly contains one paragraph per allocated
+                # course.  Preserve a separator between those paragraphs;
+                # concatenating their XML text turns "Science" + "GST 108"
+                # into "ScienceGST 108", which prevents course-code parsing.
+                paragraphs = [
+                    "".join(paragraph.itertext()).strip()
+                    for paragraph in cell.iter(f"{namespace}p")
+                ]
+                cells.append(" ".join(paragraph for paragraph in paragraphs if paragraph))
             if any(cells):
                 table_rows.append("\t".join(cells))
         if table_rows:
@@ -273,6 +281,68 @@ def _field(row, *names):
     return ""
 
 
+def _course_allocation_records(text):
+    """Normalise both row-based sheets and Word allocation-table layouts.
+
+    A typical spreadsheet has one ``Lecturer ID`` / ``Course Code`` pair per
+    row.  Department allocation documents often instead have one lecturer per
+    row and an ``Allocated Courses`` cell containing several course codes and
+    titles.  Convert the latter to the same one-course-per-row representation
+    before matching it against the department catalogue.
+    """
+    records = []
+    carried_lecturer_id = ""
+    carried_lecturer_name = ""
+    for row in _rows(text):
+        lecturer_id = _field(row, "lecturer_id", "staff_id", "staff_no", "lecturer id")
+        lecturer_name = _field(row, "lecturer_name", "full_name", "lecturer name", "name")
+        if lecturer_id:
+            carried_lecturer_id = lecturer_id
+        if lecturer_name:
+            carried_lecturer_name = lecturer_name
+
+        # Support vertically merged lecturer cells in Word tables by carrying
+        # their identifier down to the course rows that follow.
+        normalised_row = dict(row)
+        if not lecturer_id and carried_lecturer_id:
+            normalised_row["lecturer_id"] = carried_lecturer_id
+        if not lecturer_name and carried_lecturer_name:
+            normalised_row["lecturer_name"] = carried_lecturer_name
+
+        course_code = _field(normalised_row, "course_code", "course", "code")
+        if course_code:
+            records.append(normalised_row)
+            continue
+
+        allocated_courses = _field(
+            normalised_row,
+            "allocated_courses", "allocated courses", "course allocations", "allocated course list",
+        )
+        if not allocated_courses:
+            # Word templates often label this column "Allocated Courses
+            # (Course Code - Course Title)".  The explanatory suffix varies,
+            # so accept any heading that begins with "Allocated Courses".
+            allocated_courses = next(
+                (
+                    str(value).strip()
+                    for key, value in normalised_row.items()
+                    if re.sub(r"[^a-z0-9]", "", str(key).lower()).startswith("allocatedcourses")
+                    and value not in (None, "")
+                ),
+                "",
+            )
+        matches = list(COURSE_CODE_RE.finditer(allocated_courses))
+        for index, match in enumerate(matches):
+            next_start = matches[index + 1].start() if index + 1 < len(matches) else len(allocated_courses)
+            title = allocated_courses[match.end():next_start].strip(" \t:-–—")
+            allocation_row = dict(normalised_row)
+            allocation_row["course_code"] = match.group(1)
+            if title:
+                allocation_row["course_title"] = title
+            records.append(allocation_row)
+    return records
+
+
 def _records_from_upload(upload, task):
     suffix = os.path.splitext(upload.file.name)[1].lower()
     if suffix in IMAGE_SUFFIXES:
@@ -282,10 +352,7 @@ def _records_from_upload(upload, task):
     if "lecturers with" in task:
         usable_rows = [row for row in local_rows if _field(row, "lecturer_id", "staff_id", "id") and _field(row, "full_name", "lecturer_name", "name")]
     else:
-        # Word tables often merge the lecturer cell across several course rows.
-        # Keep those continuation rows; import_course_allocations carries the
-        # preceding lecturer name forward to each of them.
-        usable_rows = [row for row in local_rows if _field(row, "course_code", "course", "code")]
+        usable_rows = _course_allocation_records(text)
     return usable_rows or _ai_extract(text, task) or local_rows
 
 

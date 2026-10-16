@@ -30,7 +30,7 @@
     <form method="post" enctype="multipart/form-data" class="stack-form">
         {% csrf_token %}
         <input type="hidden" name="action" value="upload-allocations">
-        <p class="muted-note">Upload one allocation file for {{ department.name }}. Use <strong>Lecturer ID</strong> and <strong>Course Code</strong> columns. Every lecturer and course is matched within this department, without programme, academic-session, or level restrictions.</p>
+        <p class="muted-note">Upload one allocation file for {{ department.name }}. Use <strong>Lecturer ID</strong> and <strong>Course Code</strong> columns, or a Word table with <strong>Lecturer Name</strong>, <strong>Lecturer ID</strong>, and <strong>Allocated Courses</strong>. Every lecturer and course is matched within this department, without programme, academic-session, or level restrictions.</p>
         <label>{{ allocation_form.file.label }} {{ allocation_form.file }} {{ allocation_form.file.errors }}</label>
         <button type="submit" class="primary-btn">Upload Course Allocation</button>
     </form>

@@ -1,6 +1,10 @@
+from io import BytesIO
+from xml.sax.saxutils import escape
+import zipfile
+
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import transaction
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from .automation import _allocation_key, import_course_allocations
@@ -12,6 +16,7 @@ from .models import (
 )
 
 
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class AllocationReconciliationTests(TestCase):
     def setUp(self):
         self.institution = Institution.objects.create(
@@ -35,6 +40,63 @@ class AllocationReconciliationTests(TestCase):
             institution=self.institution, department=self.department,
             file=SimpleUploadedFile("allocation.csv", content.encode(), content_type="text/csv"),
         )
+
+    def word_table_upload(self, rows):
+        """Build a minimal DOCX table like departmental allocation documents."""
+        def cell(value):
+            paragraphs = "".join(
+                f"<w:p><w:r><w:t>{escape(paragraph)}</w:t></w:r></w:p>"
+                for paragraph in value.split("\n")
+            )
+            return f"<w:tc>{paragraphs}</w:tc>"
+
+        table_rows = "".join(
+            "<w:tr>" + "".join(cell(value) for value in row) + "</w:tr>"
+            for row in rows
+        )
+        document_xml = (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            f"<w:body><w:tbl>{table_rows}</w:tbl></w:body></w:document>"
+        )
+        content = BytesIO()
+        with zipfile.ZipFile(content, "w") as archive:
+            archive.writestr("word/document.xml", document_xml)
+        return CourseAllocationUpload.objects.create(
+            institution=self.institution,
+            department=self.department,
+            file=SimpleUploadedFile(
+                "allocation.docx", content.getvalue(),
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        )
+
+    def test_word_allocation_table_expands_each_lecturers_course_list(self):
+        upload = self.word_table_upload([
+            ("Lecturer Name", "Lecturer ID", "Allocated Courses (Course Code - Course Title)"),
+            ("Prof. E. J. Garba", "LEC-CS-001", "CSC 101 - Introduction\nCSC 102 - Data Structures"),
+            ("Prof. A. Y. Gital", "LEC-CS-002", "CSC 103 - Programming"),
+        ])
+
+        summary = import_course_allocations(upload)
+
+        self.assertIn("3 allocations assigned", summary)
+        self.assertEqual(
+            set(LecturerCourseRegistration.objects.filter(is_active=True).values_list("course__code", flat=True)),
+            {"CSC101", "CSC102", "CSC103"},
+        )
+        self.assertEqual(Course.objects.get(code="CSC102").lecturer, self.lecturers[0])
+        self.assertEqual(Course.objects.get(code="CSC103").lecturer, self.lecturers[1])
+
+    def test_allocation_rows_inherit_a_vertically_merged_lecturer_id(self):
+        upload = self.upload([
+            "LEC-CS-001,CSC101,Introduction,3",
+            ",CSC102,Data Structures,3",
+        ])
+
+        summary = import_course_allocations(upload)
+
+        self.assertIn("2 allocations assigned", summary)
+        self.assertEqual(Course.objects.get(code="CSC102").lecturer, self.lecturers[0])
 
     def test_all_32_ids_normalise_and_do_not_duplicate_courses(self):
         existing = Course.objects.create(
