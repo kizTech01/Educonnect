@@ -16,7 +16,8 @@
         <div class="container nav-shell">
             <a href="{% url 'portal:home' %}" class="brand-mark">
                 {% if institution.logo %}
-                    <img src="{% url 'portal:institution-logo' %}" alt="{{ institution.name }} logo" onerror="this.hidden=true;this.nextElementSibling.hidden=false;">
+                    {% url 'portal:institution-logo' institution.subdomain as institution_logo_url %}
+                    <img src="{{ institution_logo_url }}?v={{ institution.updated_at|date:'U' }}" alt="{{ institution.name }} logo" onerror="this.hidden=true;this.nextElementSibling.hidden=false;">
                     <span class="institution-logo-placeholder" aria-label="{{ institution.name }} logo is unavailable" hidden>{{ institution.name|slice:":1"|upper }}</span>
                 {% else %}
                     <span class="institution-logo-placeholder" aria-label="{{ institution.name }} logo required">{{ institution.name|slice:":1"|upper }}</span>

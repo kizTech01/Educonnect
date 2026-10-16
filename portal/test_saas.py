@@ -140,13 +140,25 @@ class MultiInstitutionSaaSTests(TestCase):
         first.logo.save("first.png", SimpleUploadedFile("first.png", b"first-logo"), save=True)
         second.logo.save("second.png", SimpleUploadedFile("second.png", b"second-logo"), save=True)
 
-        first_response = self.client.get(reverse("portal:institution-logo"), HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
-        second_response = self.client.get(reverse("portal:institution-logo"), HTTP_HOST=f"second.{settings.CORE_DOMAIN}")
+        first_url = reverse("portal:institution-logo", args=[first.subdomain])
+        second_url = reverse("portal:institution-logo", args=[second.subdomain])
+        first_response = self.client.get(first_url, HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
+        second_response = self.client.get(second_url, HTTP_HOST=f"second.{settings.CORE_DOMAIN}")
 
+        self.assertNotEqual(first_url, second_url)
+        self.assertTrue(first.logo.name.startswith("institutions/first/"))
+        self.assertTrue(second.logo.name.startswith("institutions/second/"))
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(b"".join(first_response.streaming_content), b"first-logo")
         self.assertEqual(b"".join(second_response.streaming_content), b"second-logo")
+        self.assertEqual(first_response["Cache-Control"], "private, no-store, max-age=0")
+        first_home = self.client.get("/", HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
+        self.assertContains(first_home, f"{first_url}?v=")
+        self.assertEqual(
+            self.client.get(second_url, HTTP_HOST=f"first.{settings.CORE_DOMAIN}").status_code,
+            404,
+        )
 
     def test_tenant_without_a_logo_gets_a_neutral_placeholder_not_platform_branding(self):
         institution = self.make_institution("FIRST", "first")

@@ -57,6 +57,14 @@ def generate_api_secret():
     return uuid4().hex
 
 
+def institution_logo_upload_path(instance, filename):
+    """Keep each institution's logo in a unique tenant-specific location."""
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    suffix = f".{extension}" if extension else ""
+    subdomain = instance.subdomain or "unassigned"
+    return f"institutions/{subdomain}/{uuid4().hex}{suffix}"
+
+
 class Institution(models.Model):
     """A customer organisation hosted by the shared Educonnect application."""
 
@@ -83,7 +91,7 @@ class Institution(models.Model):
     country = models.CharField(max_length=100, default="Nigeria")
     timezone = models.CharField(max_length=64, default="Africa/Lagos", blank=True)
     academic_configuration = models.JSONField(default=dict, blank=True)
-    logo = models.FileField(upload_to="institutions/%Y/%m/", blank=True)
+    logo = models.FileField(upload_to=institution_logo_upload_path, blank=True)
     subdomain = models.SlugField(max_length=63, unique=True)
     custom_domain = models.CharField(max_length=253, blank=True, unique=True, null=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)

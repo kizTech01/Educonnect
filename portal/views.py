@@ -382,14 +382,26 @@ def _exam_card_verification_limited(request):
     return False
 
 
-def institution_logo(request):
-    """Serve only the logo belonging to the active institution portal."""
+def institution_logo(request, institution_subdomain):
+    """Serve a non-cacheable logo belonging only to the active institution."""
     institution = getattr(request, "institution", None)
     if institution is None and request.user.is_authenticated and not request.user.is_superuser:
         institution = request.user.institution
-    if institution is None or not institution.logo:
+    if (
+        institution is None
+        or not institution.logo
+        or institution.subdomain.casefold() != institution_subdomain.casefold()
+    ):
         raise Http404("Institution logo not found.")
-    return FileResponse(institution.logo.open("rb"), as_attachment=False)
+    try:
+        logo_file = institution.logo.open("rb")
+    except OSError as exc:
+        raise Http404("Institution logo file not found.") from exc
+    response = FileResponse(logo_file, as_attachment=False)
+    # The URL has a tenant segment and a version query string, but do not let
+    # a shared intermediary cache substitute any institution's branding.
+    response["Cache-Control"] = "private, no-store, max-age=0"
+    return response
 
 
 def login_form_for_role(role, data=None):
