@@ -1,5 +1,4 @@
 {% load static %}
-{% static 'images/kiz-tech-logo.png' as fallback_logo %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17,9 +16,10 @@
         <div class="container nav-shell">
             <a href="{% url 'portal:home' %}" class="brand-mark">
                 {% if institution.logo %}
-                    <img src="{% url 'portal:institution-logo' %}" alt="{{ institution.name }} logo" onerror="this.onerror=null;this.src='{{ fallback_logo }}';">
+                    <img src="{% url 'portal:institution-logo' %}" alt="{{ institution.name }} logo" onerror="this.hidden=true;this.nextElementSibling.hidden=false;">
+                    <span class="institution-logo-placeholder" aria-label="{{ institution.name }} logo is unavailable" hidden>{{ institution.name|slice:":1"|upper }}</span>
                 {% else %}
-                    <img src="{{ fallback_logo }}" alt="{{ institution.name }} logo">
+                    <span class="institution-logo-placeholder" aria-label="{{ institution.name }} logo required">{{ institution.name|slice:":1"|upper }}</span>
                 {% endif %}
                 <span>
                     <strong>{{ institution.name }}</strong>

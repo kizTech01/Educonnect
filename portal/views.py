@@ -383,8 +383,10 @@ def _exam_card_verification_limited(request):
 
 
 def institution_logo(request):
-    """Serve the public institution logo without exposing other uploaded files."""
-    institution = getattr(request, "institution", None) or InstitutionProfile.objects.first()
+    """Serve only the logo belonging to the active institution portal."""
+    institution = getattr(request, "institution", None)
+    if institution is None and request.user.is_authenticated and not request.user.is_superuser:
+        institution = request.user.institution
     if institution is None or not institution.logo:
         raise Http404("Institution logo not found.")
     return FileResponse(institution.logo.open("rb"), as_attachment=False)

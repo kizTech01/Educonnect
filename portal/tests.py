@@ -1476,6 +1476,10 @@ class DashboardAndCourseFlowTests(TestCase):
             status=CoursePayment.Status.PAID,
         )
         new_session = AcademicSession.objects.create(name="2027/2028", is_current=True)
+        # A new current session clears teaching assignments. Reassign the
+        # course before checking the newly assigned lecturer's empty roster.
+        self.paid_course.lecturer = self.lecturer
+        self.paid_course.save(update_fields=["lecturer", "updated_at"])
 
         self.client.force_login(self.lecturer)
         response = self.client.get(

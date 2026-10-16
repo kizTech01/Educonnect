@@ -41,7 +41,7 @@ from .models import (
     reset_current_institution,
     set_current_institution,
 )
-from .forms import InstitutionCreateForm, SubscriptionRenewalForm
+from .forms import InstitutionCreateForm, InstitutionUpdateForm, SubscriptionRenewalForm
 from .services import (
     TEMPORARY_ACCOUNT_PASSWORD,
     finalize_subscription_payment,
@@ -133,6 +133,49 @@ class MultiInstitutionSaaSTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["institution"], institution)
+
+    def test_each_tenant_logo_endpoint_serves_only_its_own_logo(self):
+        first = self.make_institution("FIRST", "first")
+        second = self.make_institution("SECOND", "second")
+        first.logo.save("first.png", SimpleUploadedFile("first.png", b"first-logo"), save=True)
+        second.logo.save("second.png", SimpleUploadedFile("second.png", b"second-logo"), save=True)
+
+        first_response = self.client.get(reverse("portal:institution-logo"), HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
+        second_response = self.client.get(reverse("portal:institution-logo"), HTTP_HOST=f"second.{settings.CORE_DOMAIN}")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(b"".join(first_response.streaming_content), b"first-logo")
+        self.assertEqual(b"".join(second_response.streaming_content), b"second-logo")
+
+    def test_tenant_without_a_logo_gets_a_neutral_placeholder_not_platform_branding(self):
+        institution = self.make_institution("FIRST", "first")
+
+        response = self.client.get("/", HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="institution-logo-placeholder"')
+        self.assertNotContains(response, "kiz-tech-logo.png")
+
+    def test_editing_an_institution_without_a_logo_requires_an_upload(self):
+        institution = self.make_institution("FIRST", "first")
+        form = InstitutionUpdateForm(data={
+            "name": institution.name,
+            "institution_code": institution.institution_code,
+            "institution_type": institution.institution_type,
+            "state": institution.state,
+            "email": institution.email,
+            "phone": institution.phone,
+            "address": institution.address,
+            "country": institution.country,
+            "timezone": institution.timezone,
+            "subdomain": institution.subdomain,
+            "custom_domain": institution.custom_domain or "",
+            "status": institution.status,
+        }, instance=institution)
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("logo", form.errors)
 
     def test_institutions_can_use_the_same_session_and_gateway_names(self):
         first = self.make_institution("FIRST", "first")
@@ -374,6 +417,11 @@ class ScreeningIntegrationTests(TestCase):
         self.institution = Institution.objects.create(
             name="Screening University", institution_code="SCREEN", institution_type=Institution.Type.UNIVERSITY,
             email="screen@example.test", subdomain="screen", status=Institution.Status.ACTIVE,
+        )
+        self.institution.logo.save(
+            "screening-university.png",
+            SimpleUploadedFile("screening-university.png", b"screening-logo"),
+            save=True,
         )
         self.institution_admin = User.all_objects.create_user(
             username="admin@screen.example.test", email="admin@screen.example.test", password="initial-password",

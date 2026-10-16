@@ -4,7 +4,7 @@
 <section class="split-layout">
   <section class="panel-card" id="delete-institution">
     <div class="panel-head"><h2>{{ institution.name }}</h2></div>
-    <p class="muted-note">Update the institution details, portal address, administrator email, or logo. A changed administrator email becomes that administrator's sign-in username.</p>
+    <p class="muted-note">Update the institution details, portal address, administrator email, or logo. Every institution must retain its own logo; a changed administrator email becomes that administrator's sign-in username.</p>
     <form method="post" enctype="multipart/form-data" class="stack-form">
       {% csrf_token %}
       {{ form.as_p }}

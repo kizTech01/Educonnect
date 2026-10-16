@@ -269,12 +269,25 @@ class InstitutionCreateForm(StyledModelForm):
 
 
 class InstitutionUpdateForm(InstitutionCreateForm):
-    """Edit an institution without requiring a replacement logo or admin email."""
+    """Edit an institution while preserving its required identity logo."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["logo"].required = False
         self.fields["logo"].help_text = "Leave blank to keep the current logo."
+
+    def clean(self):
+        cleaned_data = super().clean()
+        # An existing tenant may retain its logo without re-uploading it, but
+        # it must never be saved without an institution-specific logo. This
+        # also prevents the ClearableFileInput "clear" control from silently
+        # reverting a school portal to the platform branding.
+        if not cleaned_data.get("logo"):
+            self.add_error(
+                "logo",
+                "Every institution must have its own logo. Upload a replacement before saving.",
+            )
+        return cleaned_data
 
     def clean_email(self):
         email = self.cleaned_data["email"].lower()

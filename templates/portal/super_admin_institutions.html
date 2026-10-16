@@ -15,11 +15,12 @@
     <div class="panel-head"><h2>All institutions</h2></div>
     <div class="table-wrap">
       <table>
-        <tr><th>Name</th><th>Portal</th><th>Students</th><th>Staff</th><th>Plan</th><th>Institution administrators</th><th>Status</th><th>Actions</th></tr>
+        <tr><th>Name</th><th>Portal</th><th>Logo</th><th>Students</th><th>Staff</th><th>Plan</th><th>Institution administrators</th><th>Status</th><th>Actions</th></tr>
         {% for institution in institutions %}
           <tr>
             <td>{{ institution.name }}</td>
             <td>https://{{ institution.subdomain }}.{{ PLATFORM_BASE_DOMAIN }}</td>
+            <td>{% if institution.logo %}<span class="logo-status ready">Uploaded</span>{% else %}<span class="logo-status required">Logo required</span>{% endif %}</td>
             <td>{{ institution.student_count }}</td>
             <td>{{ institution.staff_count }}</td>
             <td>{{ institution.plan_name|default:"No plan" }}{% if institution.subscription_status %}<br><small>{{ institution.subscription_status|title }}</small>{% endif %}</td>
@@ -53,7 +54,7 @@
             </td>
           </tr>
         {% empty %}
-          <tr><td colspan="8">No institutions created.</td></tr>
+          <tr><td colspan="9">No institutions created.</td></tr>
         {% endfor %}
       </table>
     </div>
