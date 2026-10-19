@@ -622,6 +622,17 @@ class StudentCourseFilterForm(forms.Form):
                 department_id=student.department_id,
                 is_active=True,
             ) if student.department_id else Programme.objects.none()
+            # The course catalogue is already constrained to the student's
+            # curriculum.  Keeping this selector on the assigned programme
+            # makes that boundary clear and prevents a misleading filter for
+            # another programme in the same department.
+            if student.programme_id:
+                self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
+                    pk=student.programme_id
+                )
+                self.initial.setdefault("programme", student.programme_id)
+            if student.department_id:
+                self.initial.setdefault("department", student.department_id)
         self.fields["programme"].empty_label = "All programmes"
         self.fields["search"].widget.attrs["placeholder"] = "Course code, title, or lecturer"
         for field in self.fields.values():
@@ -958,6 +969,36 @@ class BaseProfileForm(StyledModelForm):
 class StudentProfileForm(BaseProfileForm):
     class Meta(BaseProfileForm.Meta):
         fields = BaseProfileForm.Meta.fields
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        department_id = self.data.get(self.add_prefix("department")) or self.instance.department_id
+        self.fields["programme"].queryset = (
+            Programme.objects.filter(department_id=department_id, is_active=True)
+            if department_id
+            else Programme.objects.none()
+        )
+        if self.instance.programme_id:
+            # Programme placement is an academic record set by the institution
+            # administrator. A student may see it in their profile but cannot
+            # switch to a different programme themselves.
+            self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
+                pk=self.instance.programme_id
+            )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        department = cleaned_data.get("department")
+        programme = cleaned_data.get("programme")
+        if programme and programme.department_id != getattr(department, "id", None):
+            self.add_error("programme", "Choose a programme under the selected department.")
+        if (
+            department
+            and Programme.objects.filter(department=department, is_active=True).exists()
+            and not programme
+        ):
+            self.add_error("programme", "Choose your programme before saving your profile.")
+        return cleaned_data
 
 
 class LecturerProfileForm(BaseProfileForm):

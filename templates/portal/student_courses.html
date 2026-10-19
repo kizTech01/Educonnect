@@ -8,7 +8,7 @@
         <div class="panel-head">
             <h2>Search Courses</h2>
         </div>
-        <p class="muted-note">Courses are limited to your department and current level. Filter by programme, level, or search to find any suitable course.</p>
+        <p class="muted-note">Only courses in your programme curriculum and current level are shown. Paid courses register automatically once Paystack confirms payment.</p>
         <form method="get" class="stack-form">
             <label>Department {{ filter_form.department }} {{ filter_form.department.errors }}</label>
             <label>Programme {{ filter_form.programme }} {{ filter_form.programme.errors }}</label>
@@ -163,7 +163,7 @@
                     </tr>
                 {% empty %}
                     <tr>
-                        <td colspan="7">{% if catalog_is_filtered %}No courses match your current filters.{% else %}Use a filter or search to view available courses.{% endif %}</td>
+                        <td colspan="7">No eligible courses match your current filters.</td>
                     </tr>
                 {% endfor %}
             </tbody>

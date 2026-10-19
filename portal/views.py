@@ -112,7 +112,6 @@ from .models import (
     DepartmentLecturerUpload,
     CourseAllocationUpload,
     Faculty,
-    InstitutionProfile,
     Institution,
     DepartmentPaymentGateway,
     DepartmentCoursePaymentGateway,
@@ -3529,24 +3528,32 @@ def student_courses(request):
     # A bound but invalid query (such as a different department ID) must not
     # fall back to the full catalogue. It remains empty and displays the form
     # error, preserving the student's department and curriculum boundaries.
-    catalog_is_filtered = filter_form.is_bound
-    if filter_form.is_valid():
-        department = filter_form.cleaned_data.get("department")
-        programme = filter_form.cleaned_data.get("programme")
-        level = filter_form.cleaned_data.get("level")
-        search = filter_form.cleaned_data.get("search")
-        catalog_is_filtered = bool(department or programme or level or search)
-        if department:
-            available_courses = available_courses.filter(department=department)
-        if programme:
-            available_courses = available_courses.filter(
-                Q(programmes=programme) | Q(programmes__isnull=True)
-            )
-        if level:
-            available_courses = available_courses.filter(curriculum_level=level)
-        available_courses = _search_filter(available_courses, search, "code", "title", "department__name", "lecturer__username")
+    # This queryset is already restricted to the student's curriculum,
+    # department and level. Show it immediately so a student can discover,
+    # pay for, and register an eligible paid course without first guessing a
+    # search term.
+    catalog_is_filtered = True
+    if filter_form.is_bound:
+        if filter_form.is_valid():
+            department = filter_form.cleaned_data.get("department")
+            programme = filter_form.cleaned_data.get("programme")
+            level = filter_form.cleaned_data.get("level")
+            search = filter_form.cleaned_data.get("search")
+            if department:
+                available_courses = available_courses.filter(department=department)
+            if programme:
+                available_courses = available_courses.filter(
+                    Q(programmes=programme) | Q(programmes__isnull=True)
+                )
+            if level:
+                available_courses = available_courses.filter(curriculum_level=level)
+            available_courses = _search_filter(available_courses, search, "code", "title", "department__name", "lecturer__username")
+        else:
+            # A forged programme/department value must never reveal the
+            # default catalogue when the form itself is invalid.
+            available_courses = Course.objects.none()
 
-    available_courses = available_courses.distinct() if catalog_is_filtered else Course.objects.none()
+    available_courses = available_courses.distinct()
     student_curriculum = _student_curriculum(request.user)
     registration_entries = CurriculumCourse.objects.filter(
         curriculum=student_curriculum,
@@ -5825,12 +5832,10 @@ def download_exam_card(request, payment_id):
         reverse("portal:verify-exam-card", args=[verification_token])
     )
     institution = payment.institution or request.institution
-    # Older single-tenant records are attached to the compatibility tenant;
-    # their administrator-managed InstitutionProfile remains the source of the
-    # public school name and logo. New tenant records use Institution directly.
+    # The super administrator's institution record is the sole branding
+    # authority. In particular, never substitute a legacy profile or a shared
+    # application logo on a student document.
     card_brand = institution
-    if institution and institution.institution_code == "EDUCONNECT-LEGACY":
-        card_brand = InstitutionProfile.all_objects.filter(institution=institution).first() or institution
     try:
         logo_path = card_brand.logo.path if card_brand and card_brand.logo else None
     except (NotImplementedError, OSError, ValueError):
@@ -5882,8 +5887,6 @@ def verify_exam_card(request, token):
         student=payment.student, session=payment.session, is_active=True,
     ).select_related("course").order_by("course__code")
     card_brand = payment.institution
-    if card_brand and card_brand.institution_code == "EDUCONNECT-LEGACY":
-        card_brand = InstitutionProfile.all_objects.filter(institution=card_brand).first() or card_brand
     return render(request, "portal/exam_card_verification.html", {
         "institution": card_brand,
         "payment": payment,

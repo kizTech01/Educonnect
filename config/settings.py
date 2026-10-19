@@ -58,7 +58,12 @@ if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS = unique([*ALLOWED_HOSTS, RENDER_EXTERNAL_HOSTNAME])
 
 if DEBUG:
-    ALLOWED_HOSTS = unique([*ALLOWED_HOSTS, "localhost", "educonnect.devs.surf"])
+    # Django's development server is commonly opened using either hostname.
+    # Include both so local requests are accepted without loosening production
+    # host validation.
+    ALLOWED_HOSTS = unique(
+        [*ALLOWED_HOSTS, "localhost", "127.0.0.1", "educonnect.devs.surf"]
+    )
 
 
 CSRF_TRUSTED_ORIGINS = unique(

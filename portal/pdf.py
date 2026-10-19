@@ -3,7 +3,6 @@ from __future__ import annotations
 import struct
 import zlib
 from io import BytesIO
-from functools import lru_cache
 from math import ceil
 from pathlib import Path
 
@@ -20,10 +19,6 @@ BODY_SIZE = 11
 CARD_WIDTH = 760
 CARD_HEIGHT = 430
 CARD_MARGIN = 24
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHOOL_LOGO_PATH = REPO_ROOT / "assets" / "images" / "sch-logo.png"
-
 
 def _rgb(red: float, green: float, blue: float) -> str:
     return f"{red:.3f} {green:.3f} {blue:.3f}"
@@ -227,11 +222,6 @@ def _load_png_image(image_path: Path):
     return _load_png_bytes(image_path.read_bytes())
 
 
-@lru_cache(maxsize=1)
-def _load_school_logo():
-    return _load_png_image(SCHOOL_LOGO_PATH)
-
-
 def _load_jpeg_image(image_path: Path):
     if not image_path.exists():
         return None
@@ -277,13 +267,13 @@ def _load_passport_photo(passport_photo_path: str | None):
 
 
 def _load_logo(logo_path: str | None):
-    """Load a tenant logo, falling back only when no usable tenant file exists."""
+    """Load only the logo supplied for the institution issuing this document."""
     if logo_path:
         image_path = Path(logo_path)
         logo = _load_png_image(image_path) or _load_jpeg_image(image_path)
         if logo:
             return logo
-    return _load_school_logo()
+    return None
 
 
 def _make_qr_code(verification_url: str | None):

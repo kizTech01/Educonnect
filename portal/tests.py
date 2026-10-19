@@ -817,6 +817,51 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertContains(response, reverse("portal:download-course-file", args=[self.free_course.id]))
 
+    def test_student_sees_eligible_paid_courses_without_a_search(self):
+        eligible_paid_course = Course.objects.create(
+            department=self.department,
+            lecturer=self.lecturer,
+            code="CSC102",
+            title="Programming Fundamentals",
+            level="100",
+            is_free=False,
+            amount=Decimal("1500.00"),
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(reverse("portal:student-courses"))
+
+        self.assertContains(response, eligible_paid_course.code)
+        self.assertContains(response, 'name="action" value="pay-course"', html=False)
+
+    def test_student_profile_and_course_filter_show_only_their_programme(self):
+        assigned_programme = Programme.objects.create(
+            department=self.department,
+            name="Computer Science",
+            code="BSC-CS",
+        )
+        other_programme = Programme.objects.create(
+            department=self.department,
+            name="Software Engineering",
+            code="BSC-SE",
+        )
+        self.student.programme = assigned_programme
+        self.student.save(update_fields=["programme"])
+
+        self.client.force_login(self.student)
+        profile_response = self.client.get(reverse("portal:profile"))
+        course_response = self.client.get(reverse("portal:student-courses"))
+
+        self.assertEqual(
+            list(profile_response.context["form"].fields["programme"].queryset),
+            [assigned_programme],
+        )
+        self.assertEqual(
+            list(course_response.context["filter_form"].fields["programme"].queryset),
+            [assigned_programme],
+        )
+        self.assertNotIn(other_programme, course_response.context["filter_form"].fields["programme"].queryset)
+
     def test_student_course_filter_combines_search_and_level(self):
         self.client.force_login(self.student)
 
@@ -2011,6 +2056,12 @@ class DashboardAndCourseFlowTests(TestCase):
         payment.refresh_from_db()
         self.assertEqual(response.status_code, 302)
         self.assertEqual(payment.status, CoursePayment.Status.PAID)
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            is_active=True,
+        ).exists())
 
     @patch("portal.views.verify_paystack_transaction")
     def test_course_payment_callback_unlocks_course_material_access(self, verify_paystack_transaction):
@@ -2153,7 +2204,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertIn(".pdf", response["Content-Disposition"])
         self.assertTrue(response.content.startswith(b"%PDF"))
-        self.assertIn(b"Example University", response.content)
+        self.assertIn(self.department.institution.name.encode("utf-8"), response.content)
         self.assertIn(self.student.full_name.encode("utf-8"), response.content)
         self.assertIn(self.free_course.code.encode("utf-8"), response.content)
         self.assertIn(self.paid_course.code.encode("utf-8"), response.content)
