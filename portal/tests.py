@@ -817,6 +817,24 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertContains(response, reverse("portal:download-course-file", args=[self.free_course.id]))
 
+    def test_student_can_register_a_free_course(self):
+        self.client.force_login(self.student)
+
+        response = self.client.post(
+            reverse("portal:student-courses"),
+            {"action": "register-course", "course_id": self.free_course.id},
+        )
+
+        self.assertRedirects(response, reverse("portal:student-courses"))
+        self.assertTrue(
+            StudentCourseRegistration.objects.filter(
+                student=self.student,
+                course=self.free_course,
+                session=self.session,
+                is_active=True,
+            ).exists()
+        )
+
     def test_student_sees_eligible_paid_courses_without_a_search(self):
         eligible_paid_course = Course.objects.create(
             department=self.department,
@@ -2055,6 +2073,10 @@ class DashboardAndCourseFlowTests(TestCase):
 
         payment.refresh_from_db()
         self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            f'{reverse("portal:student-courses")}#registered-courses',
+        )
         self.assertEqual(payment.status, CoursePayment.Status.PAID)
         self.assertTrue(StudentCourseRegistration.objects.filter(
             student=self.student,

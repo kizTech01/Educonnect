@@ -3758,6 +3758,9 @@ def course_payment_callback(request, payment_id):
     if not reference:
         messages.warning(request, f"{payment.course.code} payment is still pending confirmation.")
         return redirect("portal:student-courses")
+    registered_courses_url = _redirect_with_anchor(
+        "portal:student-courses", "registered-courses"
+    )
     try:
         verification = verify_paystack_transaction(payment.paystack_secret_key_used, reference)
     except ValueError as exc:
@@ -3765,6 +3768,7 @@ def course_payment_callback(request, payment_id):
         if _is_paystack_transport_error(exc) and payment.is_paid:
             _finalize_course_payment(payment)
             messages.success(request, f"{payment.course.code} payment confirmed successfully.")
+            return redirect(registered_courses_url)
         elif _is_paystack_transport_error(exc):
             messages.warning(request, f"{payment.course.code} payment was submitted, but confirmation is still in progress. Please refresh shortly.")
         else:
@@ -3773,6 +3777,7 @@ def course_payment_callback(request, payment_id):
     if _verification_matches_payment(verification, reference=payment.paystack_reference, amount=payment.amount):
         _finalize_course_payment(payment)
         messages.success(request, f"{payment.course.code} payment confirmed successfully.")
+        return redirect(registered_courses_url)
     else:
         payment.status = CoursePayment.Status.PENDING
         payment.paid_at = None
