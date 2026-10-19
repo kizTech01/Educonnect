@@ -838,6 +838,16 @@ class ScreeningIntegrationTests(TestCase):
             f'{reverse("portal:super-admin-institution-edit", args=[self.institution.id])}#delete-institution',
         )
 
+        delete_response = self.client.get(
+            reverse("portal:super-admin-institution-edit", args=[self.institution.id])
+        )
+        self.assertContains(
+            delete_response,
+            '<section class="panel-card" id="delete-institution" tabindex="-1">',
+            html=False,
+        )
+        self.assertContains(delete_response, "Permanently delete institution")
+
     def test_institution_admin_can_request_an_email_verified_password_change(self):
         self.client.force_login(self.institution_admin)
 

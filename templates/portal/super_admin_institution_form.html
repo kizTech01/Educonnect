@@ -2,7 +2,7 @@
 {% block super_title %}Edit institution{% endblock %}
 {% block super_content %}
 <section class="split-layout">
-  <section class="panel-card" id="delete-institution">
+  <section class="panel-card">
     <div class="panel-head"><h2>{{ institution.name }}</h2></div>
     <p class="muted-note">Update the institution details, portal address, or administrator email. The logo uploaded when this institution was created remains its portal identity; a changed administrator email becomes that administrator's sign-in username.</p>
     <form method="post" class="stack-form">
@@ -12,7 +12,7 @@
       <a class="ghost-btn" href="{% url 'portal:super-admin-institutions' %}">Cancel</a>
     </form>
   </section>
-  <section class="panel-card">
+  <section class="panel-card" id="delete-institution" tabindex="-1">
     <div class="panel-head"><h2>Delete institution</h2></div>
     <p class="muted-note">This permanently deletes {{ institution.name }}, its users, subscriptions, and all tenant data. Subscription plans shared by the platform are kept.</p>
     <form method="post" action="{% url 'portal:super-admin-institution-delete' institution.id %}" class="stack-form">
