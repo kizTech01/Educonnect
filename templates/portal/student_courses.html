@@ -40,11 +40,11 @@
                         <tr>
                             <td>
                                 <span class="table-cell-title">{{ row.registration.course.code }} - {{ row.registration.course.title }}</span>
-                                <span class="table-cell-subtext">{{ row.registration.course.department.name }} | Level {{ row.registration.course.level }}</span>
+                                <span class="table-cell-subtext">{{ row.registration.course.department.name }} | Level {{ row.curriculum_entry.level|default:row.registration.course.level }} | {{ row.registration.course.schedule_day|default:"TBA" }} {{ row.registration.course.schedule_time|time:"H:i"|default:"" }} {{ row.registration.course.venue }}{% if not row.registration.course.is_available %} | Unavailable{% endif %}</span>
                             </td>
                             <td>{{ row.registration.course.lecturer.full_name|default:"Pending assignment" }}</td>
                             <td>{{ row.registration.course.department.name }}</td>
-                            <td>{{ row.registration.course.level }}</td>
+                            <td>{{ row.curriculum_entry.level|default:row.registration.course.level }}</td>
                             <td>
                                 {% if row.group_name %}
                                     <span class="status-pill success">{{ row.group_name }}</span>
@@ -117,7 +117,7 @@
                             <span class="table-cell-subtext">{{ course.department.name }} | {{ course.lecturer.full_name|default:"Pending assignment" }}</span>
                         </td>
                         <td>{{ course.department.name }}</td>
-                        <td>{{ course.level }}</td>
+                        <td>{{ course.curriculum_level }}</td>
                         <td>{{ course.lecturer.full_name|default:"Pending assignment" }}</td>
                         <td>
                             {% if course.is_free %}
@@ -129,7 +129,9 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if course.id in registered_course_ids %}
+                                {% if not course.is_available %}
+                                    <span class="status-pill warning">Unavailable</span>
+                                {% elif course.id in registered_course_ids %}
                                 <span class="status-pill success">Registered</span>
                             {% elif course.is_free %}
                                 <span class="status-pill success">Free</span>
@@ -138,7 +140,9 @@
                             {% endif %}
                         </td>
                         <td class="actions-cell">
-                            {% if course.id in registered_course_ids %}
+                            {% if not course.is_available %}
+                                <span class="muted-note">Currently unavailable</span>
+                            {% elif course.id in registered_course_ids %}
                                 <span class="muted-note">Already registered</span>
                             {% elif course.is_free or course.id in paid_course_ids %}
                                 <form method="post" action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">

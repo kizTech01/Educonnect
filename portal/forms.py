@@ -13,6 +13,7 @@ from django.utils.text import slugify
 from .models import (
     AcademicSession,
     Course,
+    CurriculumCourse,
     CourseResult,
     CoursePaymentGateway,
     CourseMaterial,
@@ -513,7 +514,7 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
 
     class Meta:
         model = Course
-        fields = ["department", "title", "code", "lecturer", "level", "semester", "file", "is_free", "amount", "programmes"]
+        fields = ["department", "title", "code", "lecturer", "level", "semester", "file", "is_available", "is_free", "amount", "programmes"]
         widgets = {
             "amount": forms.NumberInput(attrs={"step": "0.01"}),
         }
@@ -538,6 +539,12 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         programmes = cleaned.get("programmes")
         if department and programmes and programmes.exclude(department=department).exists():
             self.add_error("programmes", "Every selected programme must belong to the selected department.")
+        code = "".join(char for char in (cleaned.get("code") or "").upper() if char.isalnum())
+        if department and code:
+            duplicate = Course.objects.filter(department=department, code__iexact=code).exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                self.add_error("code", "This department already has that course code. Add it to another programme curriculum instead.")
+            cleaned["code"] = code
         return cleaned
 
     def save(self, commit=True):
@@ -550,6 +557,16 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
                 curriculum = curriculum_for_programme(programme, session)
                 if curriculum:
                     course.curricula.add(curriculum)
+                    CurriculumCourse.objects.get_or_create(
+                        institution=course.institution,
+                        curriculum=curriculum,
+                        course=course,
+                        defaults={
+                            "level": course.level,
+                            "semester": course.semester,
+                            "credit_units": course.credit_units,
+                        },
+                    )
         return course
 
 
@@ -566,6 +583,7 @@ class CourseDetailsForm(CoursePricingMixin, StyledModelForm):
             "schedule_time",
             "venue",
             "file",
+            "is_available",
             "is_free",
             "amount",
         ]

@@ -19,9 +19,10 @@
             <label>Level {{ form.level }} {{ form.level.errors }}</label>
             <label>Semester {{ form.semester }} {{ form.semester.errors }}</label>
             <label>Course file {{ form.file }} {{ form.file.errors }}</label>
+            <label>Available for registration {{ form.is_available }} {{ form.is_available.errors }}</label>
             <label>Free course {{ form.is_free }} {{ form.is_free.errors }}</label>
             <label>Amount {{ form.amount }} {{ form.amount.errors }}</label>
-            <p class="muted-note">Select the programme or programmes this course belongs to. Leave it empty for a department-wide course. Entering an amount marks the course as paid automatically.</p>
+            <p class="muted-note">Select the programme or programmes that use this shared catalogue course. Each programme keeps its own curriculum level, semester, units, and requirement status. Leave it empty for a department-wide course. Entering an amount marks the course as paid automatically.</p>
             <button type="submit" class="primary-btn">Save Course</button>
         </form>
     </div>
@@ -55,6 +56,7 @@
                     <th>Code</th>
                     <th>Title</th>
                     <th>Department</th>
+                    <th>Used by programmes</th>
                     <th>Level</th>
                     <th>Lecturer</th>
                     <th>Fee</th>
@@ -69,11 +71,18 @@
                         <td>{{ course.code }}</td>
                         <td>{{ course.title }}</td>
                         <td>{{ course.department.name }}</td>
+                        <td>
+                            {% for entry in course.programme_curriculum_entries %}
+                                {{ entry.curriculum.programme.award|default:"" }} {{ entry.curriculum.programme.name }}{% if not forloop.last %}, {% endif %}
+                            {% empty %}
+                                <span class="muted-note">Department-wide / legacy</span>
+                            {% endfor %}
+                        </td>
                         <td>{{ course.level }}</td>
                         <td>{{ course.lecturer.full_name|default:"Pending" }}</td>
                         <td>{% if course.is_free %}Free{% else %}Paid {{ course.amount }}{% endif %}</td>
                         <td>{% if course.file %}<a href="{% url 'portal:download-course-file' course.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a> <a href="{% url 'portal:download-course-file' course.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>{% else %}<span class="muted-note">No file</span>{% endif %}</td>
-                        <td>{{ course.schedule_day|default:"TBA" }} {{ course.schedule_time|time:"H:i"|default:"" }} {{ course.venue|default:"" }}</td>
+                        <td>{{ course.schedule_day|default:"TBA" }} {{ course.schedule_time|time:"H:i"|default:"" }} {{ course.venue|default:"" }}{% if not course.is_available %} <span class="status-pill warning">Unavailable</span>{% endif %}</td>
                         <td class="actions-cell">
                             <a href="{% url 'portal:admin-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit</a>
                             <form method="post" action="{% url 'portal:admin-delete-course' course.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
@@ -84,7 +93,7 @@
                     </tr>
                 {% empty %}
                     <tr>
-                        <td colspan="9">No courses created yet.</td>
+                        <td colspan="10">No courses created yet.</td>
                     </tr>
                 {% endfor %}
             </tbody>
@@ -110,6 +119,7 @@
         <label>Schedule time {{ edit_form.schedule_time }} {{ edit_form.schedule_time.errors }}</label>
         <label>Venue {{ edit_form.venue }} {{ edit_form.venue.errors }}</label>
         <label>Course file {{ edit_form.file }} {{ edit_form.file.errors }}</label>
+        <label>Available for registration {{ edit_form.is_available }} {{ edit_form.is_available.errors }}</label>
         <label>Course type {{ edit_form.is_free }} {{ edit_form.is_free.errors }}</label>
         <label>Amount {{ edit_form.amount }} {{ edit_form.amount.errors }}</label>
         <p class="muted-note">Entering an amount marks the course as paid automatically. Leave it blank or at 0.00 for free courses.</p>

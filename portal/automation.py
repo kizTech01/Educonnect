@@ -22,7 +22,7 @@ from django.db import transaction
 from django.db.models import Max, Q
 from django.utils import timezone
 
-from .models import AcademicSession, AuditLog, Course, CourseAllocationUpload, CourseResult, Curriculum, Department, LecturerCourseRegistration, Programme, RoleAssignment, StudentCourseRegistration, User, curriculum_for_department, curriculum_for_programme
+from .models import AcademicSession, AuditLog, Course, CourseAllocationUpload, CourseResult, Curriculum, CurriculumCourse, Department, LecturerCourseRegistration, Programme, RoleAssignment, StudentCourseRegistration, User, curriculum_for_department, curriculum_for_programme
 from .services import TEMPORARY_ACCOUNT_PASSWORD
 
 
@@ -170,7 +170,7 @@ def _ai_extract_image(uploaded_file, task):
 
 
 def course_records(text):
-    ai = _ai_extract(text, "courses with code, title, level, semester, and credit_units")
+    ai = _ai_extract(text, "courses with code, title, level, semester, credit_units, and requirement (compulsory or elective)")
     if ai:
         return ai
     records = []
@@ -191,13 +191,14 @@ def course_records(text):
             "level": level_match.group(1) if level_match else f"{code[-3]}00" if code[-3:].isdigit() else "100",
             "semester": "second" if re.search(r"second|harmattan", line, re.I) else "first",
             "credit_units": int(units_match.group(1)) if units_match else 2,
+            "requirement": "elective" if re.search(r"\belective\b", line, re.I) else "compulsory",
         })
     return records
 
 
 def import_handbook_courses(handbook):
     records = course_records(extract_text(handbook.file))
-    created = updated = skipped = 0
+    created = linked = updated = skipped = 0
     session = AcademicSession.objects.filter(name=handbook.academic_session).first()
     if session is None:
         raise ValueError("The handbook must belong to an existing academic session.")
@@ -232,32 +233,61 @@ def import_handbook_courses(handbook):
             if not code or not title:
                 skipped += 1
                 continue
+            # The catalogue identity is the safely normalised course code in
+            # this department/institution, never a handbook version or a
+            # programme.  This is what prevents one CSC201 row per programme.
             existing = Course.objects.filter(
                 department=handbook.department,
                 code__iexact=code,
-                curriculum=curriculum,
-            ).first()
-            values = {
+            ).order_by("pk").first()
+            course_values = {
                 "title": title,
                 "level": str(record.get("level", "100")) if str(record.get("level", "100")) in {"100", "200", "300", "400", "500"} else "100",
                 "semester": "second" if str(record.get("semester", "")).lower().startswith("second") else "first",
                 "credit_units": max(1, int(record.get("credit_units") or 2)),
             }
+            curriculum_values = {
+                field: course_values[field] for field in ("level", "semester", "credit_units")
+            }
+            curriculum_values["requirement"] = (
+                CurriculumCourse.Requirement.ELECTIVE
+                if str(record.get("requirement", "")).lower() == CurriculumCourse.Requirement.ELECTIVE
+                else CurriculumCourse.Requirement.COMPULSORY
+            )
             if existing:
-                Course.objects.filter(pk=existing.pk).update(**values)
+                course = existing
+                # Do not silently overwrite a shared catalogue title or an
+                # active offering from a later handbook.  Curriculum-specific
+                # values live on CurriculumCourse below.
                 updated += 1
             else:
                 course = Course.objects.create(
+                    institution=handbook.institution,
                     department=handbook.department,
                     academic_session=session,
                     curriculum=curriculum,
                     code=code,
-                    **values,
+                    **course_values,
                 )
-                if handbook.programme_id:
-                    course.programmes.add(handbook.programme)
                 created += 1
-    return f"Course automation finished: {created} created, {updated} updated, {skipped} skipped."
+            entry, entry_created = CurriculumCourse.objects.get_or_create(
+                institution=handbook.institution,
+                curriculum=curriculum,
+                course=course,
+                defaults=curriculum_values,
+            )
+            if not entry_created:
+                for field, value in curriculum_values.items():
+                    setattr(entry, field, value)
+                entry.save(update_fields=[*curriculum_values, "updated_at"])
+            else:
+                linked += 1
+            # Keep the previous M2M in sync for integrations still reading it
+            # during the staged production upgrade.
+            course.curricula.add(curriculum)
+            if handbook.programme_id:
+                course.programmes.add(handbook.programme)
+    return f"Course automation finished: {created} catalogue courses created, {linked} curriculum entries linked, {updated} existing courses reused, {skipped} skipped."
 
 
 def _rows(text):
@@ -490,9 +520,8 @@ def _create_course_from_allocation(department, row, course_code, session):
     curriculum = curriculum_for_department(department, session)
     # ``Course.save`` assigns a curriculum to legacy catalogue rows.  Therefore
     # a course can already be in the requested curriculum even when an older
-    # catalogue/session lookup did not return it.  Reuse that exact catalogue
-    # row rather than attempting a duplicate insert (and failing the unique
-    # department/code/curriculum constraint).
+    # catalogue/session lookup did not return it. Reuse that exact catalogue
+    # row rather than attempting to create another catalogue record.
     existing = Course.all_objects.filter(
         department=department,
         curriculum=curriculum,
@@ -511,6 +540,22 @@ def _create_course_from_allocation(department, row, course_code, session):
         semester="second" if _field(row, "semester").lower().startswith("second") else Course.Semester.FIRST,
         credit_units=int(unit_match.group()) if unit_match else 2,
     )
+    # Allocation imports can introduce a course before a handbook does. Make
+    # its department-wide placement explicit immediately, so the shared-course
+    # relationship remains authoritative rather than relying only on the
+    # legacy Course.curriculum foreign key.
+    if curriculum:
+        CurriculumCourse.objects.get_or_create(
+            institution=department.institution,
+            curriculum=curriculum,
+            course=course,
+            defaults={
+                "level": course.level,
+                "semester": course.semester,
+                "credit_units": course.credit_units,
+            },
+        )
+        course.curricula.add(curriculum)
     return course
 
 

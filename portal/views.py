@@ -19,7 +19,8 @@ from django.core.cache import cache
 from django.core.mail import EmailMessage
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, models, transaction
-from django.db.models import Count, Max, OuterRef, Prefetch, Subquery, Sum
+from django.db.models import Count, F, Max, OuterRef, Prefetch, Subquery, Sum
+from django.db.models.functions import Coalesce
 from django.db.models import Q
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -103,6 +104,7 @@ from .models import (
     AccommodationApplication,
     AccommodationSession,
     Course,
+    CurriculumCourse,
     CourseResult,
     CoursePaymentGateway,
     CourseMaterial,
@@ -1525,23 +1527,42 @@ def _student_course_catalog_queryset(student):
     curriculum = _student_curriculum(student)
     if not curriculum:
         return Course.objects.none()
-    # Programmes are selected during course creation and can be used as a
-    # registration filter. Curriculum membership keeps each student's cohort
-    # catalogue stable when a later handbook is published.
-    queryset = Course.objects.select_related("department", "lecturer", "curriculum").filter(
-        department=student.department,
-    ).filter(Q(curricula=curriculum) | Q(curricula__isnull=True, curriculum=curriculum))
-    if student.programme_id:
-        queryset = queryset.filter(programmes=student.programme)
-    else:
-        queryset = queryset.filter(programmes__isnull=True)
+    # Curriculum membership, rather than the course's owner department or a
+    # programme-specific copy, decides eligibility.  This permits a programme
+    # to use a course owned by another department in the same institution while
+    # retaining the tenant and cohort boundary.
+    entries = CurriculumCourse.objects.filter(curriculum=curriculum).select_related("curriculum")
+    # Expose the programme curriculum's values alongside the shared catalogue
+    # course.  ``Course.level`` remains a legacy/default value and must not
+    # make a programme that places the same course at another level display
+    # the wrong information.
+    current_entry = CurriculumCourse.objects.filter(
+        curriculum=curriculum,
+        course_id=OuterRef("pk"),
+    )
+    queryset = Course.objects.select_related("department", "lecturer", "curriculum").prefetch_related(
+        Prefetch("curriculum_entries", queryset=entries, to_attr="current_curriculum_entries")
+    ).annotate(
+        curriculum_level=Coalesce(Subquery(current_entry.values("level")[:1]), F("level")),
+        curriculum_semester=Coalesce(Subquery(current_entry.values("semester")[:1]), F("semester")),
+        curriculum_credit_units=Coalesce(Subquery(current_entry.values("credit_units")[:1]), F("credit_units")),
+    ).filter(
+        Q(curriculum_entries__curriculum=curriculum)
+        # Compatibility for pre-through-model curriculum records.
+        | Q(curricula=curriculum)
+        | Q(curricula__isnull=True, curriculum=curriculum)
+    )
     if student.level:
-        queryset = queryset.filter(level=student.level)
+        queryset = queryset.filter(
+            Q(curriculum_entries__curriculum=curriculum, curriculum_entries__level=student.level)
+            | Q(curriculum_entries__isnull=True, level=student.level)
+        )
     return queryset.distinct()
 
 
 def _student_course_row_context(registration, payment, group_name=None):
     course = registration.course
+    curriculum_entry = next(iter(getattr(course, "current_curriculum_entries", ())), None)
     is_paid = course.is_free or bool(payment and payment.is_paid)
     display_amount = payment.amount if payment else course.amount
     return {
@@ -1552,6 +1573,7 @@ def _student_course_row_context(registration, payment, group_name=None):
         "needs_payment": not is_paid,
         "can_download": bool(course.file) and is_paid,
         "group_name": group_name,
+        "curriculum_entry": curriculum_entry,
     }
 
 
@@ -3521,15 +3543,25 @@ def student_courses(request):
                 Q(programmes=programme) | Q(programmes__isnull=True)
             )
         if level:
-            available_courses = available_courses.filter(level=level)
+            available_courses = available_courses.filter(curriculum_level=level)
         available_courses = _search_filter(available_courses, search, "code", "title", "department__name", "lecturer__username")
 
     available_courses = available_courses.distinct() if catalog_is_filtered else Course.objects.none()
+    student_curriculum = _student_curriculum(request.user)
+    registration_entries = CurriculumCourse.objects.filter(
+        curriculum=student_curriculum,
+    ) if student_curriculum else CurriculumCourse.objects.none()
     registrations = StudentCourseRegistration.objects.filter(
         student=request.user,
         session=current_session,
         is_active=True,
-    ).select_related("course", "course__lecturer")
+    ).select_related("course", "course__lecturer").prefetch_related(
+        Prefetch(
+            "course__curriculum_entries",
+            queryset=registration_entries,
+            to_attr="current_curriculum_entries",
+        )
+    )
     registered_course_ids = set(registrations.values_list("course_id", flat=True))
     payments = {
         payment.course_id: payment
@@ -3549,6 +3581,10 @@ def student_courses(request):
     if request.method == "POST":
         action = request.POST.get("action")
         course = get_object_or_404(_student_course_catalog_queryset(request.user), pk=request.POST.get("course_id"))
+
+        if action in {"pay-course", "register-course"} and not course.is_available:
+            messages.error(request, f"{course.code} is not currently available for registration.")
+            return redirect(_redirect_with_query(request, "portal:student-courses"))
 
         if action == "pay-course":
             if course.is_free:
@@ -5351,7 +5387,15 @@ def admin_delete_department(request, department_id):
 def admin_courses(request):
     form = CourseForm()
     filter_form = CourseBrowseFilterForm(request.GET or None)
-    courses = Course.objects.select_related("department", "lecturer")
+    courses = Course.objects.select_related("department", "lecturer").prefetch_related(
+        Prefetch(
+            "curriculum_entries",
+            queryset=CurriculumCourse.objects.select_related("curriculum__programme").filter(
+                curriculum__programme__isnull=False,
+            ),
+            to_attr="programme_curriculum_entries",
+        )
+    )
     if filter_form.is_valid():
         department = filter_form.cleaned_data.get("department")
         level = filter_form.cleaned_data.get("level")

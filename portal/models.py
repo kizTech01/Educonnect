@@ -914,6 +914,12 @@ class SubscriptionNotification(models.Model):
 
 
 class Course(TimeStampedModel):
+    """The institution's reusable course catalogue record.
+
+    A course is deliberately not a programme-curriculum row.  Teaching and
+    registration records point here, so a change to its allocation, timetable
+    or material is shared by every programme that includes it.
+    """
     class Semester(models.TextChoices):
         FIRST = "first", "First Semester"
         SECOND = "second", "Second Semester"
@@ -942,9 +948,9 @@ class Course(TimeStampedModel):
         on_delete=models.PROTECT,
         related_name="courses",
     )
-    # ``curriculum`` is retained as the source/legacy curriculum for backwards
-    # compatibility.  A course can also be included in more than one programme
-    # curriculum, which is what makes a genuinely shared course possible.
+    # ``curriculum`` and ``curricula`` are retained as legacy membership data.
+    # New code must use ``curriculum_entries``: it carries the metadata that
+    # differs from one programme curriculum to another.
     curricula = models.ManyToManyField("Curriculum", blank=True, related_name="catalogue_courses")
     programmes = models.ManyToManyField("Programme", blank=True, related_name="courses")
     lecturer = models.ForeignKey(
@@ -965,6 +971,10 @@ class Course(TimeStampedModel):
     schedule_time = models.TimeField(null=True, blank=True)
     venue = models.CharField(max_length=120, blank=True)
     file = models.FileField(upload_to="courses/%Y/%m/", blank=True)
+    # This belongs to the shared offering.  Turning it off affects eligibility
+    # for every curriculum that references this catalogue course, while
+    # preserving existing registrations and their historic records.
+    is_available = models.BooleanField(default=True)
     is_free = models.BooleanField(default=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
 
@@ -972,12 +982,30 @@ class Course(TimeStampedModel):
         ordering = ["code"]
         constraints = [
             models.UniqueConstraint(
-                fields=["department", "code", "curriculum"],
-                name="unique_department_curriculum_course",
+                fields=["institution", "department", "code"],
+                condition=~models.Q(code=""),
+                name="unique_institution_department_course_code",
             )
         ]
 
     def clean(self):
+        catalogue_institution_id = self.institution_id or (
+            self.department.institution_id if self.department_id else None
+        )
+        if self.department_id and self.code:
+            duplicate = Course.all_objects.filter(
+                department_id=self.department_id,
+                institution_id=catalogue_institution_id,
+                code__iexact=self.code,
+            ).exclude(pk=self.pk)
+            if duplicate.exists():
+                raise ValidationError({
+                    "code": "This catalogue course already exists. Reuse it through a CurriculumCourse entry."
+                })
+        if self.department_id and self.institution_id and self.department.institution_id != self.institution_id:
+            raise ValidationError({"department": "A course department must belong to the same institution."})
+        if self.curriculum_id and self.institution_id and self.curriculum.institution_id != self.institution_id:
+            raise ValidationError({"curriculum": "A course curriculum must belong to the same institution."})
         if self.amount and self.amount > 0:
             self.is_free = False
         elif self.is_free:
@@ -986,6 +1014,10 @@ class Course(TimeStampedModel):
             raise ValidationError({"amount": "Paid courses must have an amount greater than zero."})
 
     def save(self, *args, **kwargs):
+        # Course codes are the stable academic identity used by handbook and
+        # allocation imports.  Store their canonical representation so callers
+        # cannot create accidental variants such as "CSC 201" and "csc-201".
+        self.code = "".join(char for char in (self.code or "").upper() if char.isalnum())
         if not self.academic_session_id:
             self.academic_session = AcademicSession.objects.filter(is_current=True).first()
         if not self.curriculum_id and self.department_id:
@@ -1042,7 +1074,18 @@ class StudentCourseRegistration(TimeStampedModel):
     def save(self, *args, **kwargs):
         if not self.session_id:
             self.session = AcademicSession.objects.filter(is_current=True).first()
+        if self.student_id and not self.institution_id:
+            self.institution = self.student.institution
+        self.full_clean()
         super().save(*args, **kwargs)
+
+    def clean(self):
+        if self.student_id and self.student.role != User.Role.STUDENT:
+            raise ValidationError({"student": "Only students can register for courses."})
+        for field in ("student", "course", "session"):
+            item = getattr(self, field, None)
+            if item is not None and self.institution_id and getattr(item, "institution_id", self.institution_id) != self.institution_id:
+                raise ValidationError("Course registrations cannot cross institutions.")
 
     def __str__(self):
         return f"{self.student.full_name} - {self.course.code}"
@@ -1549,6 +1592,15 @@ class Curriculum(TimeStampedModel):
         related_name="curricula",
     )
     version = models.PositiveSmallIntegerField(default=1)
+    # ``courses`` remains the legacy reverse FK name on Course.curriculum.
+    # ``catalogue`` is the explicit shared-course relationship used by new
+    # curriculum and registration logic.
+    catalogue = models.ManyToManyField(
+        Course,
+        through="CurriculumCourse",
+        related_name="curriculum_catalogues",
+        blank=True,
+    )
 
     class Meta:
         ordering = ["department__name", "-effective_session__name", "-version"]
@@ -1562,6 +1614,51 @@ class Curriculum(TimeStampedModel):
     def __str__(self):
         owner = self.programme.code if self.programme_id else self.department.code
         return f"{owner} curriculum ({self.effective_session.name}, v{self.version})"
+
+
+class CurriculumCourse(TimeStampedModel):
+    """A course's placement and requirements inside one curriculum version.
+
+    This through model is the authoritative curriculum relationship.  It lets
+    CSC201 remain one catalogue/offering record while, for example, Computer
+    Science and Cyber Security assign it different levels, semesters, units or
+    compulsory status.
+    """
+
+    class Requirement(models.TextChoices):
+        COMPULSORY = "compulsory", "Compulsory"
+        ELECTIVE = "elective", "Elective"
+
+    curriculum = models.ForeignKey(Curriculum, on_delete=models.CASCADE, related_name="course_entries")
+    course = models.ForeignKey(Course, on_delete=models.PROTECT, related_name="curriculum_entries")
+    level = models.CharField(max_length=20, choices=LEVEL_CHOICES)
+    semester = models.CharField(max_length=20, choices=Course.Semester.choices, default=Course.Semester.FIRST)
+    credit_units = models.PositiveSmallIntegerField(default=2)
+    requirement = models.CharField(max_length=16, choices=Requirement.choices, default=Requirement.COMPULSORY)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["curriculum", "level", "semester", "course__code"]
+        constraints = [
+            models.UniqueConstraint(fields=["curriculum", "course"], name="unique_curriculum_course_entry"),
+        ]
+        indexes = [
+            models.Index(fields=["curriculum", "level", "semester"]),
+        ]
+
+    def clean(self):
+        if self.curriculum_id and self.course_id:
+            if self.curriculum.institution_id != self.course.institution_id:
+                raise ValidationError("A curriculum and course must belong to the same institution.")
+
+    def save(self, *args, **kwargs):
+        if self.curriculum_id and not self.institution_id:
+            self.institution = self.curriculum.institution
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.curriculum}: {self.course.code}"
 
 
 class Programme(TimeStampedModel):

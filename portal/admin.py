@@ -6,6 +6,7 @@ from .models import (
     AccommodationApplication,
     AccommodationSession,
     Course,
+    CurriculumCourse,
     CourseResult,
     CoursePayment,
     CourseStudentGroup,
@@ -103,9 +104,23 @@ class CourseAllocationUploadAdmin(admin.ModelAdmin):
 
 @admin.register(Course)
 class CourseAdmin(admin.ModelAdmin):
-    list_display = ("code", "title", "department", "lecturer", "level", "semester", "is_free", "amount", "venue")
+    list_display = ("code", "title", "department", "programme_usage", "lecturer", "level", "semester", "is_free", "amount", "venue")
     list_filter = ("department", "level", "semester", "is_free")
     search_fields = ("code", "title", "venue", "department__name", "lecturer__username")
+
+    @admin.display(description="Programmes")
+    def programme_usage(self, course):
+        programme_codes = course.curriculum_entries.exclude(
+            curriculum__programme__isnull=True
+        ).values_list("curriculum__programme__code", flat=True).distinct()
+        return ", ".join(programme_codes) or "Department-wide / legacy"
+
+
+@admin.register(CurriculumCourse)
+class CurriculumCourseAdmin(admin.ModelAdmin):
+    list_display = ("course", "curriculum", "level", "semester", "credit_units", "requirement")
+    list_filter = ("level", "semester", "requirement", "curriculum__programme")
+    search_fields = ("course__code", "course__title", "curriculum__programme__name")
 
 
 @admin.register(CourseResult)

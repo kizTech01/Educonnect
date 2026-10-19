@@ -2535,7 +2535,7 @@ class DashboardAndCourseFlowTests(TestCase):
             [self.paid_course.id],
         )
 
-    def test_current_handbook_creates_courses_only_for_its_session(self):
+    def test_current_handbook_reuses_the_catalogue_course_for_a_new_curriculum(self):
         old_course = Course.objects.create(
             department=self.department,
             academic_session=self.session,
@@ -2558,12 +2558,16 @@ class DashboardAndCourseFlowTests(TestCase):
         from .automation import import_handbook_courses
 
         import_handbook_courses(handbook)
-        new_course = Course.objects.get(
+        reused_course = Course.objects.get(
             department=self.department,
-            academic_session=new_session,
             code="CSC901",
         )
-        self.assertNotEqual(new_course.pk, old_course.pk)
+        self.assertEqual(reused_course.pk, old_course.pk)
+        self.assertTrue(
+            reused_course.curriculum_entries.filter(
+                curriculum__effective_session=new_session,
+            ).exists()
+        )
 
         # This account predates curriculum cohorts; its first catalogue visit
         # should therefore resolve the handbook current at that time.
@@ -2571,8 +2575,10 @@ class DashboardAndCourseFlowTests(TestCase):
         self.student.save(update_fields=["curriculum"])
         self.client.force_login(self.student)
         response = self.client.get(reverse("portal:student-courses"), {"search": "CSC901"})
-        self.assertContains(response, "New Curriculum Course")
-        self.assertNotContains(response, "Previous Curriculum")
+        # A course title is catalogue data.  The new handbook adds curriculum
+        # metadata without creating a second CSC901 offering.
+        self.assertContains(response, "Previous Curriculum")
+        self.assertEqual(Course.objects.filter(department=self.department, code="CSC901").count(), 1)
 
     def test_student_message_menu_counter_clears_when_message_is_opened(self):
         notification = Notification.objects.create(
