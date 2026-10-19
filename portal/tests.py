@@ -869,6 +869,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.paid_course.refresh_from_db()
         self.assertEqual(self.paid_course.amount, Decimal("3200.00"))
+        self.assertTrue(self.paid_course.is_available)
 
     def test_lecturer_amount_keeps_course_paid_even_if_free_flag_is_checked(self):
         self.client.force_login(self.lecturer)

@@ -270,25 +270,19 @@ class InstitutionCreateForm(StyledModelForm):
 
 
 class InstitutionUpdateForm(InstitutionCreateForm):
-    """Edit an institution while preserving its required identity logo."""
+    """Edit institution details without replacing its creation-time logo."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["logo"].required = False
-        self.fields["logo"].help_text = "Leave blank to keep the current logo."
+        # An institution's uploaded logo is its stable portal identity. Keep
+        # replacements out of the edit form so unrelated profile updates can
+        # never replace or clear the file after deployment.
+        self.fields.pop("logo", None)
 
     def clean(self):
-        cleaned_data = super().clean()
-        # An existing tenant may retain its logo without re-uploading it, but
-        # it must never be saved without an institution-specific logo. This
-        # also prevents the ClearableFileInput "clear" control from silently
-        # reverting a school portal to the platform branding.
-        if not cleaned_data.get("logo"):
-            self.add_error(
-                "logo",
-                "Every institution must have its own logo. Upload a replacement before saving.",
-            )
-        return cleaned_data
+        # Deliberately bypass InstitutionCreateForm.clean(): that validation
+        # requires a logo only while creating an institution.
+        return forms.ModelForm.clean(self)
 
     def clean_email(self):
         email = self.cleaned_data["email"].lower()
@@ -599,7 +593,14 @@ class CourseDetailsForm(CoursePricingMixin, StyledModelForm):
 
 
 class LecturerCourseUpdateForm(CourseDetailsForm):
-    pass
+    class Meta(CourseDetailsForm.Meta):
+        # Registration availability is an institution-level publishing
+        # decision. Lecturer pricing edits previously submitted no
+        # ``is_available`` value (the field is not rendered in the form),
+        # causing Django to save it as False and hide newly paid courses from
+        # students. Preserve the existing availability while a lecturer edits
+        # schedule, material, or pricing details.
+        fields = [field for field in CourseDetailsForm.Meta.fields if field != "is_available"]
 
 
 class StudentCourseFilterForm(forms.Form):

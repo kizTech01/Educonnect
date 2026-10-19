@@ -169,8 +169,10 @@ class MultiInstitutionSaaSTests(TestCase):
         self.assertContains(response, 'class="institution-logo-placeholder"')
         self.assertNotContains(response, "kiz-tech-logo.png")
 
-    def test_editing_an_institution_without_a_logo_requires_an_upload(self):
+    def test_editing_an_institution_preserves_its_creation_time_logo(self):
         institution = self.make_institution("FIRST", "first")
+        institution.logo.save("first.png", SimpleUploadedFile("first.png", b"original-logo"), save=True)
+        original_logo_name = institution.logo.name
         form = InstitutionUpdateForm(data={
             "name": institution.name,
             "institution_code": institution.institution_code,
@@ -184,10 +186,13 @@ class MultiInstitutionSaaSTests(TestCase):
             "subdomain": institution.subdomain,
             "custom_domain": institution.custom_domain or "",
             "status": institution.status,
-        }, instance=institution)
+        }, files={"logo": SimpleUploadedFile("replacement.png", b"replacement-logo")}, instance=institution)
 
-        self.assertFalse(form.is_valid())
-        self.assertIn("logo", form.errors)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertNotIn("logo", form.fields)
+        form.save()
+        institution.refresh_from_db()
+        self.assertEqual(institution.logo.name, original_logo_name)
 
     def test_institutions_can_use_the_same_session_and_gateway_names(self):
         first = self.make_institution("FIRST", "first")
