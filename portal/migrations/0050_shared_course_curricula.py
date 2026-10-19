@@ -203,6 +203,18 @@ class Migration(migrations.Migration):
         ('portal', '0049_institution_logo_tenant_path'),
     ]
 
+    # The backfill and consolidation update rows which are protected by
+    # PostgreSQL foreign-key triggers.  A transactional migration keeps those
+    # deferred trigger events pending until *after* the later ALTER TABLE used
+    # by RemoveConstraint, which PostgreSQL rejects.  Running the operations
+    # without one outer transaction commits the data work before the schema
+    # changes and retains the same migration state and constraints.
+    #
+    # This migration has not been recorded as applied in the available local
+    # migration history; changing its transaction boundary therefore repairs
+    # the failed deployment rather than rewriting an applied migration.
+    atomic = False
+
     operations = [
         migrations.CreateModel(
             name='CurriculumCourse',
