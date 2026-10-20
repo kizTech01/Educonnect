@@ -52,12 +52,16 @@
                                             <a href="{% url 'portal:lecturer-paid-course-students-pdf' course.id %}" class="ghost-btn small" download>Download Paid IDs</a>
                                             <a href="{% url 'portal:lecturer-course-groups' course.id %}" class="ghost-btn small">Student Grouping</a>
                                             <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit Course</a>
-                                            <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
-                                                {% csrf_token %}
-                                                <input type="hidden" name="action" value="remove-course">
-                                                <input type="hidden" name="course_id" value="{{ course.id }}">
-                                                <button type="submit" class="danger-btn small">Remove Course</button>
-                                            </form>
+                                            {% if course.id in manually_registered_course_ids %}
+                                                <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                                    {% csrf_token %}
+                                                    <input type="hidden" name="action" value="remove-course">
+                                                    <input type="hidden" name="course_id" value="{{ course.id }}">
+                                                    <button type="submit" class="danger-btn small">Unregister Course</button>
+                                                </form>
+                                            {% else %}
+                                                <span class="muted-note">Allocated by HOD</span>
+                                            {% endif %}
                                         </div>
                                     </details>
                                 </div>
@@ -78,7 +82,7 @@
         <div class="panel-head">
             <h2>Search Course Catalog</h2>
         </div>
-        <p class="muted-note">Choose a department or level, or enter a search term, to view unassigned courses.</p>
+        <p class="muted-note">Choose a department or level, or enter a search term, to add an eligible course from your department to your workspace.</p>
         <form method="get" class="stack-form">
             <label>Department {{ filter_form.department }}</label>
             <label>Programme {{ filter_form.programme }}</label>
@@ -143,12 +147,16 @@
                                                 <a href="{% url 'portal:lecturer-course-groups' course.id %}" class="ghost-btn small">Student Grouping</a>
                                             {% endif %}
                                             <a href="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}&edit={{ course.id }}{% else %}?edit={{ course.id }}{% endif %}" class="ghost-btn small">Edit Course</a>
-                                            <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
-                                                {% csrf_token %}
-                                                <input type="hidden" name="action" value="remove-course">
-                                                <input type="hidden" name="course_id" value="{{ course.id }}">
-                                                <button type="submit" class="danger-btn small">Remove Course</button>
-                                            </form>
+                                            {% if course.id in manually_registered_course_ids %}
+                                                <form method="post" action="{% url 'portal:lecturer-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                                    {% csrf_token %}
+                                                    <input type="hidden" name="action" value="remove-course">
+                                                    <input type="hidden" name="course_id" value="{{ course.id }}">
+                                                    <button type="submit" class="danger-btn small">Unregister Course</button>
+                                                </form>
+                                            {% else %}
+                                                <span class="muted-note">Allocated by HOD</span>
+                                            {% endif %}
                                         </div>
                                     </details>
                                 </div>

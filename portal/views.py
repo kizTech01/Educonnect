@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlencode
 
 from django.apps import apps
 from django.contrib import messages
@@ -104,6 +105,7 @@ from .models import (
     AccommodationApplication,
     AccommodationSession,
     Course,
+    Curriculum,
     CurriculumCourse,
     CourseResult,
     CoursePaymentGateway,
@@ -396,8 +398,19 @@ def institution_logo(request, institution_subdomain):
         raise Http404("Institution logo not found.")
     try:
         logo_file = institution.logo.open("rb")
-    except OSError as exc:
-        raise Http404("Institution logo file not found.") from exc
+    except OSError:
+        # A deployment may outlive local media storage. Keep the branding area
+        # stable instead of rendering a broken image and a second fallback.
+        initial = re.sub(r"[^A-Za-z0-9]", "", institution.name or "")[:1].upper() or "E"
+        placeholder = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" '
+            'aria-label="Institution logo unavailable"><rect width="64" height="64" rx="12" '
+            'fill="#eef5ff"/><text x="32" y="42" text-anchor="middle" font-family="Arial, sans-serif" '
+            'font-size="30" font-weight="700" fill="#1668d8">%s</text></svg>'
+        ) % initial
+        response = HttpResponse(placeholder, content_type="image/svg+xml")
+        response["Cache-Control"] = "private, no-store, max-age=0"
+        return response
     response = FileResponse(logo_file, as_attachment=False)
     # The URL has a tenant segment and a version query string, but do not let
     # a shared intermediary cache substitute any institution's branding.
@@ -706,6 +719,7 @@ def sidebar_links(request):
         links = [
             {"label": "Dashboard", "url_name": "portal:lecturer-dashboard"},
             {"label": "Programmes", "url_name": "portal:hod-programmes"},
+            {"label": "Timetable and Handbook", "url_name": "portal:lecturer-documents"},
             {
                 "label": "Departmental",
                 "children": [
@@ -718,7 +732,10 @@ def sidebar_links(request):
             },
         ]
     elif selected_role == User.Role.EXAM_OFFICER:
-        links = [{"label": "Dashboard", "url_name": "portal:lecturer-dashboard"}]
+        links = [
+            {"label": "Dashboard", "url_name": "portal:lecturer-dashboard"},
+            {"label": "Timetable and Handbook", "url_name": "portal:lecturer-documents"},
+        ]
         links.extend(
             {
                 "label": label,
@@ -3305,6 +3322,25 @@ def _filtered_handbooks(request, prefix="hb"):
     return form, queryset
 
 
+def _staff_document_department_ids(user):
+    """Return only the departments a staff member may read documents from."""
+    department_ids = set()
+    if user.department_id:
+        department_ids.add(user.department_id)
+    department_ids.update(
+        RoleAssignment.objects.filter(
+            user=user,
+            role__in=[User.Role.HOD, User.Role.EXAM_OFFICER],
+            is_active=True,
+            department__isnull=False,
+        ).values_list("department_id", flat=True)
+    )
+    department_ids.update(
+        Department.objects.filter(head_of_department=user).values_list("id", flat=True)
+    )
+    return department_ids
+
+
 @role_required(User.Role.STUDENT)
 def student_dashboard(request):
     current_session = current_departmental_session()
@@ -3995,7 +4031,16 @@ def lecturer_departmental(request):
 @role_required(User.Role.LECTURER)
 def lecturer_courses(request):
     filter_form = LecturerCourseFilterForm(request.GET or None)
-    available_courses = _course_catalog_queryset().filter(lecturer__isnull=True)
+    institution = request.institution or request.user.institution
+    # A lecturer may manually add a course from their own department even if
+    # the allocation sheet has already named another co-lecturer.  The
+    # registration row, not ``Course.lecturer``, is the source of workspace
+    # access, so this does not overwrite the HOD's lead allocation.
+    available_courses = _course_catalog_queryset().filter(department=request.user.department)
+    available_courses = available_courses.exclude(
+        Q(lecturer=request.user)
+        | Q(lecturer_registrations__lecturer=request.user, lecturer_registrations__is_active=True)
+    )
     paid_courses_only = request.GET.get("fee_type") == "paid"
     catalog_is_filtered = False
     if filter_form.is_valid():
@@ -4008,10 +4053,15 @@ def lecturer_courses(request):
             available_courses = available_courses.filter(department=department)
         if programme:
             available_courses = available_courses.filter(
-                Q(programmes=programme) | Q(programmes__isnull=True)
+                Q(curriculum_entries__curriculum__programme=programme)
+                | Q(programmes=programme)
+                | Q(programmes__isnull=True)
             )
         if level:
-            available_courses = available_courses.filter(level=level)
+            available_courses = available_courses.filter(
+                Q(curriculum_entries__level=level)
+                | Q(curriculum_entries__isnull=True, level=level)
+            )
         available_courses = _search_filter(available_courses, search, "code", "title", "department__name")
     available_courses = available_courses.distinct() if catalog_is_filtered else Course.objects.none()
 
@@ -4023,23 +4073,56 @@ def lecturer_courses(request):
         action = request.POST.get("action")
         if action == "register-course":
             course = get_object_or_404(
-                _course_catalog_queryset().filter(lecturer__isnull=True),
+                _course_catalog_queryset().filter(department=request.user.department),
                 pk=request.POST.get("course_id"),
             )
-            course.lecturer = request.user
-            course.save(update_fields=["lecturer", "updated_at"])
-            registration, created = LecturerCourseRegistration.objects.get_or_create(lecturer=request.user, course=course)
+            with transaction.atomic():
+                registration, created = LecturerCourseRegistration.all_objects.get_or_create(
+                    institution=institution,
+                    lecturer=request.user,
+                    course=course,
+                )
+                # A lecturer-created registration deliberately has no
+                # allocation upload. Future allocation imports reconcile
+                # their own rows only and therefore cannot erase it.
+                if not created and (not registration.is_active or registration.allocation_upload_id):
+                    registration.is_active = True
+                    registration.deactivated_at = None
+                    registration.allocation_upload = None
+                    registration.save(update_fields=[
+                        "is_active", "deactivated_at", "allocation_upload", "updated_at",
+                    ])
+                if course.lecturer_id is None:
+                    course.lecturer = request.user
+                    course.save(update_fields=["lecturer", "updated_at"])
             if created:
                 messages.success(request, "Course registered for your lecturer workspace.")
             else:
-                messages.info(request, "That course is already in your workspace.")
+                messages.success(request, "Course registered for your lecturer workspace.")
             return redirect(_redirect_with_query(request, "portal:lecturer-courses"))
         elif action == "remove-course":
             course = get_object_or_404(registered_courses, pk=request.POST.get("course_id"))
             with transaction.atomic():
-                LecturerCourseRegistration.objects.filter(lecturer=request.user, course=course).delete()
+                registration = get_object_or_404(
+                    LecturerCourseRegistration.all_objects,
+                    institution=institution,
+                    lecturer=request.user,
+                    course=course,
+                    is_active=True,
+                )
+                if registration.allocation_upload_id:
+                    messages.info(request, "This course is allocated by the HOD and cannot be removed here.")
+                    return redirect(_redirect_with_query(request, "portal:lecturer-courses"))
+                registration.is_active = False
+                registration.deactivated_at = timezone.now()
+                registration.save(update_fields=["is_active", "deactivated_at", "updated_at"])
                 if course.lecturer_id == request.user.id:
-                    course.lecturer = None
+                    replacement = LecturerCourseRegistration.all_objects.filter(
+                        institution=institution,
+                        course=course,
+                        is_active=True,
+                    ).exclude(lecturer=request.user).select_related("lecturer").first()
+                    course.lecturer = replacement.lecturer if replacement else None
                     course.save(update_fields=["lecturer", "updated_at"])
             messages.success(request, "Course removed from your lecturer workspace.")
             return redirect(_redirect_with_query(request, "portal:lecturer-courses"))
@@ -4068,6 +4151,13 @@ def lecturer_courses(request):
         edit_course=edit_course,
         edit_form=edit_form,
         paid_courses_only=paid_courses_only,
+        manually_registered_course_ids=set(
+            LecturerCourseRegistration.objects.filter(
+                lecturer=request.user,
+                is_active=True,
+                allocation_upload__isnull=True,
+            ).values_list("course_id", flat=True)
+        ),
     )
     return render(request, "portal/lecturer_courses.html", context)
 
@@ -4322,13 +4412,18 @@ def lecturer_delete_message(request, notification_id):
     return redirect("portal:lecturer-messages")
 
 
-@role_required(User.Role.LECTURER)
+@role_required(User.Role.LECTURER, User.Role.HOD, User.Role.EXAM_OFFICER)
 def lecturer_documents(request):
     timetable_filter_form, timetables = _filtered_timetables(request, prefix="tt")
     handbook_filter_form, handbooks = _filtered_handbooks(request, prefix="hb")
     timetable_form = TimetableForm()
+    department_ids = _staff_document_department_ids(request.user)
+    timetables = timetables.filter(department_id__in=department_ids)
+    handbooks = handbooks.filter(department_id__in=department_ids)
+    timetable_form.fields["department"].queryset = Department.objects.filter(pk__in=department_ids)
     if request.method == "POST" and request.POST.get("action") == "create-timetable":
         timetable_form = TimetableForm(request.POST, request.FILES)
+        timetable_form.fields["department"].queryset = Department.objects.filter(pk__in=department_ids)
         if timetable_form.is_valid():
             timetable_form.save()
             messages.success(request, "Timetable uploaded.")
@@ -5355,6 +5450,42 @@ def admin_programmes(request):
 
 
 @role_required(User.Role.ADMIN)
+@require_http_methods(["POST"])
+def admin_delete_programme(request, programme_id):
+    """Permanently delete a programme owned by the active institution."""
+    institution = request.institution or request.user.institution
+    if institution is None:
+        raise PermissionDenied("An institution context is required to manage programmes.")
+    programme = get_object_or_404(Programme, pk=programme_id, institution=institution)
+    if request.POST.get("confirmation", "").strip() != programme.code:
+        messages.error(request, "Type the exact programme code to delete it.")
+        return redirect("portal:admin-programmes")
+
+    programme_code = programme.code
+    programme_name = programme.name
+    with transaction.atomic():
+        curricula = Curriculum.all_objects.filter(programme=programme)
+        # Preserve shared catalogue courses and historic registrations. Their
+        # programme-specific curriculum links are removed with the programme.
+        Course.all_objects.filter(curriculum__in=curricula).update(curriculum=None)
+        User.all_objects.filter(
+            Q(programme=programme) | Q(curriculum__in=curricula)
+        ).update(programme=None, curriculum=None)
+        programme.delete()
+        AuditLog.objects.create(
+            institution=institution,
+            user=request.user,
+            action="programme_deleted",
+            object_type="Programme",
+            description=f"Institution Admin deleted programme {programme_name} ({programme_code}).",
+            old_value={"code": programme_code, "name": programme_name},
+            ip_address=_client_ip(request),
+        )
+    messages.success(request, f"{programme_name} was deleted.")
+    return redirect("portal:admin-programmes")
+
+
+@role_required(User.Role.ADMIN)
 def admin_about(request):
     session_form = AcademicSessionForm(initial={"is_current": True})
     if request.method == "POST":
@@ -5410,13 +5541,22 @@ def admin_courses(request):
     )
     if filter_form.is_valid():
         department = filter_form.cleaned_data.get("department")
+        programme = filter_form.cleaned_data.get("programme")
         level = filter_form.cleaned_data.get("level")
         fee_type = filter_form.cleaned_data.get("fee_type")
         search = filter_form.cleaned_data.get("search")
         if department:
             courses = courses.filter(department=department)
+        if programme:
+            courses = courses.filter(
+                Q(curriculum_entries__curriculum__programme=programme)
+                | Q(programmes=programme)
+            )
         if level:
-            courses = courses.filter(level=level)
+            courses = courses.filter(
+                Q(curriculum_entries__level=level)
+                | Q(curriculum_entries__isnull=True, level=level)
+            )
         if fee_type == "free":
             courses = courses.filter(is_free=True)
         elif fee_type == "paid":
@@ -5450,8 +5590,12 @@ def admin_courses(request):
         filter_form=filter_form,
         edit_course=edit_course,
         edit_form=edit_form,
-        courses=courses,
+        courses=courses.distinct(),
         course_programmes=list(Programme.objects.filter(is_active=True).values("id", "name", "code", "department_id")),
+        course_lecturers=list(User.objects.filter(
+            role=User.Role.LECTURER,
+            is_approved=True,
+        ).values("id", "first_name", "last_name", "username", "department_id")),
     )
     return render(request, "portal/admin_courses.html", context)
 
@@ -5460,8 +5604,15 @@ def admin_courses(request):
 def admin_delete_course(request, course_id):
     course = get_object_or_404(Course, pk=course_id)
     if request.method == "POST":
-        course.delete()
-        messages.success(request, "Course deleted.")
+        if CourseResult.objects.filter(course=course).exists():
+            messages.error(request, "This course has recorded results and cannot be deleted. Mark it unavailable instead.")
+        else:
+            # Curriculum links protect shared catalogue records. Remove only
+            # those links first; registrations and related payment/material
+            # records follow the course's existing cascade rules.
+            CurriculumCourse.objects.filter(course=course).delete()
+            course.delete()
+            messages.success(request, "Course deleted.")
     return redirect(_redirect_with_query(request, "portal:admin-courses"))
 
 
@@ -5833,8 +5984,12 @@ def download_exam_card(request, payment_id):
     # A freshly rendered card gets a fresh opaque secret. Only a keyed hash is
     # retained, so a leaked database cannot turn into usable QR links.
     verification_token = payment.issue_exam_card_token()
+    # The QR keeps its opaque, rotating token while carrying the semester as
+    # non-authoritative display metadata. The verification view always reads
+    # the actual semester from the protected payment record.
     verification_url = request.build_absolute_uri(
         reverse("portal:verify-exam-card", args=[verification_token])
+        + "?" + urlencode({"semester": payment.semester_label})
     )
     institution = payment.institution or request.institution
     # The super administrator's institution record is the sole branding
@@ -6076,7 +6231,7 @@ def download_notification_attachment(request, attachment_id):
     )
 
 
-@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
+@role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN, User.Role.HOD, User.Role.EXAM_OFFICER)
 def download_document(request, kind, document_id):
     model = Timetable if kind == "timetable" else Handbook
     document = get_object_or_404(model.objects.select_related("department", "programme"), pk=document_id)
@@ -6084,6 +6239,9 @@ def download_document(request, kind, document_id):
         if request.user.department_id != document.department_id:
             raise PermissionDenied
         if kind == "timetable" and document.programme_id and document.programme_id != request.user.programme_id:
+            raise PermissionDenied
+    elif request.user.role != User.Role.ADMIN:
+        if document.department_id not in _staff_document_department_ids(request.user):
             raise PermissionDenied
     if not document.file:
         raise Http404

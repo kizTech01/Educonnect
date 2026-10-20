@@ -655,7 +655,14 @@ def import_course_allocations(upload):
             )
 
         scoped_courses = Course.all_objects.filter(department=upload.department)
-        previous = LecturerCourseRegistration.all_objects.filter(course__in=scoped_courses, is_active=True)
+        # Manual lecturer registrations have no source upload. Reconcile only
+        # records created by an allocation sheet so a new HOD upload never
+        # erases a lecturer's separate manual workspace choice.
+        previous = LecturerCourseRegistration.all_objects.filter(
+            course__in=scoped_courses,
+            is_active=True,
+            allocation_upload__isnull=False,
+        )
         for record in previous.select_related("course", "lecturer"):
             expected = incoming.get(record.course_id)
             expected_ids = {lecturer.pk for lecturer in expected["lecturers"]} if expected else set()
@@ -681,11 +688,21 @@ def import_course_allocations(upload):
                 course.lecturer = lecturers[0]
                 course.save(update_fields=["lecturer", "updated_at"])
             for lecturer in lecturers:
-                record, _ = LecturerCourseRegistration.all_objects.get_or_create(lecturer=lecturer, course=course)
+                record, created = LecturerCourseRegistration.all_objects.get_or_create(
+                    institution=upload.institution,
+                    lecturer=lecturer,
+                    course=course,
+                )
                 record.is_active = True
                 record.deactivated_at = None
-                record.allocation_upload = upload
-                record.save(update_fields=["is_active", "deactivated_at", "allocation_upload", "updated_at"])
+                # A matching manual record already grants this lecturer
+                # access. Do not relabel it as upload-managed or a later
+                # allocation file could deactivate the manual registration.
+                if created or record.allocation_upload_id:
+                    record.allocation_upload = upload
+                    record.save(update_fields=["is_active", "deactivated_at", "allocation_upload", "updated_at"])
+                else:
+                    record.save(update_fields=["is_active", "deactivated_at", "updated_at"])
                 assigned += 1
 
         # Lecturer allocation changes must never alter a student's registered

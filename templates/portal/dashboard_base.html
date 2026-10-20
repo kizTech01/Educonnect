@@ -2,14 +2,18 @@
 
 {% block body_class %}dashboard-page{% endblock %}
 
+{# The sidebar is the dashboard's single branding location.  Keeping the
+   header text-only prevents the same uploaded institution logo appearing
+   twice on every dashboard page. #}
+{% block header_institution_logo %}{% endblock %}
+
 {% block content %}
 <main class="dashboard-layout" data-dashboard-layout>
     <aside class="dashboard-sidebar" id="dashboard-sidebar" data-dashboard-sidebar aria-label="Dashboard navigation">
         <div class="sidebar-brand">
             {% if institution.logo %}
                 {% url 'portal:institution-logo' institution.subdomain as institution_logo_url %}
-                <img src="{{ institution_logo_url }}?v={{ institution.updated_at|date:'U' }}" alt="{{ institution.name }} logo" onerror="this.hidden=true;this.nextElementSibling.hidden=false;">
-                <span class="institution-logo-placeholder" aria-label="{{ institution.name }} logo is unavailable" hidden>{{ institution.name|slice:":1"|upper }}</span>
+                <img src="{{ institution_logo_url }}?v={{ institution.updated_at|date:'U' }}" alt="{{ institution.name }} logo" onerror="this.hidden=true;">
             {% else %}
                 <span class="institution-logo-placeholder" aria-label="{{ institution.name }} logo required">{{ institution.name|slice:":1"|upper }}</span>
             {% endif %}

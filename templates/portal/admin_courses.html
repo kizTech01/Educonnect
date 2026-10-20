@@ -129,14 +129,19 @@
 {% endif %}
 
 {{ course_programmes|json_script:"course-programmes" }}
+{{ course_lecturers|json_script:"course-lecturers" }}
 <script>
 (() => {
   const dataNode = document.getElementById("course-programmes");
+  const lecturersNode = document.getElementById("course-lecturers");
   const department = document.getElementById("id_department");
   const programmes = document.getElementById("id_programmes");
-  if (!dataNode || !department || !programmes) return;
+  const lecturers = document.getElementById("id_lecturer");
+  if (!dataNode || !lecturersNode || !department || !programmes || !lecturers) return;
   const items = JSON.parse(dataNode.textContent);
+  const lecturerItems = JSON.parse(lecturersNode.textContent);
   const selected = new Set(Array.from(programmes.selectedOptions).map(option => option.value));
+  const selectedLecturer = lecturers.value;
   const updateProgrammes = () => {
     const chosenDepartment = department.value;
     programmes.replaceChildren();
@@ -146,8 +151,21 @@
       programmes.add(new Option(`${item.name} (${item.code})`, item.id, selected.has(String(item.id)), selected.has(String(item.id))));
     });
   };
-  department.addEventListener("change", updateProgrammes);
+  const updateLecturers = () => {
+    const chosenDepartment = department.value;
+    lecturers.replaceChildren(new Option("Select lecturer", ""));
+    lecturers.disabled = !chosenDepartment;
+    lecturerItems.filter(item => String(item.department_id) === chosenDepartment).forEach(item => {
+      const name = `${item.first_name || ""} ${item.last_name || ""}`.trim() || item.username;
+      lecturers.add(new Option(name, item.id, String(item.id) === selectedLecturer, String(item.id) === selectedLecturer));
+    });
+  };
+  department.addEventListener("change", () => {
+    updateProgrammes();
+    updateLecturers();
+  });
   updateProgrammes();
+  updateLecturers();
 })();
 </script>
 {% endblock %}
