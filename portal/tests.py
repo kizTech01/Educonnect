@@ -1892,6 +1892,10 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertFalse(CourseStudentGroupMembership.objects.filter(student=self.student).exists())
 
     @patch("portal.views.initialize_paystack_transaction")
+    @override_settings(
+        ALLOWED_HOSTS=["mau.educonnect.devs.surf"],
+        PLATFORM_BASE_DOMAIN="",
+    )
     def test_course_payment_redirects_to_paystack_authorization_url(self, initialize_paystack_transaction):
         initialize_paystack_transaction.return_value = {"authorization_url": "https://checkout.paystack.com/mock-course"}
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
@@ -1900,11 +1904,19 @@ class DashboardAndCourseFlowTests(TestCase):
         response = self.client.post(
             reverse("portal:student-courses"),
             {"action": "pay-course", "course_id": self.paid_course.id},
+            HTTP_HOST="mau.educonnect.devs.surf",
+            secure=True,
         )
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, "https://checkout.paystack.com/mock-course")
         initialize_paystack_transaction.assert_called_once()
+        payment = CoursePayment.objects.get(student=self.student, course=self.paid_course)
+        self.assertEqual(
+            initialize_paystack_transaction.call_args.kwargs["callback_url"],
+            "https://mau.educonnect.devs.surf"
+            f"{reverse('portal:course-payment-callback', args=[payment.id])}",
+        )
         self.assertEqual(initialize_paystack_transaction.call_args.kwargs["secret_key"], "sk_test_course")
         self.assertEqual(
             initialize_paystack_transaction.call_args.kwargs["metadata"]["student_id"],
