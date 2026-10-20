@@ -266,13 +266,14 @@ class TimeStampedModel(models.Model):
 
 
 class InstitutionProfile(TimeStampedModel):
-    """The administrator-managed identity shown within one institution portal."""
+    """Supplementary contact details for one institution portal.
+
+    Branding belongs exclusively to :class:`Institution`.  Keeping a second
+    logo field here previously allowed two competing logos for the same
+    institution, even though the portal has always rendered ``Institution.logo``.
+    """
 
     name = models.CharField(max_length=200, default="Educonnect")
-    logo = models.FileField(
-        upload_to="institution/%Y/%m/", blank=True,
-        validators=[FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "svg", "webp"])],
-    )
     website = models.URLField(blank=True)
     email = models.EmailField(blank=True)
 
@@ -1004,6 +1005,8 @@ class Course(TimeStampedModel):
                 })
         if self.department_id and self.institution_id and self.department.institution_id != self.institution_id:
             raise ValidationError({"department": "A course department must belong to the same institution."})
+        if self.academic_session_id and self.institution_id and self.academic_session.institution_id != self.institution_id:
+            raise ValidationError({"academic_session": "A course session must belong to the same institution."})
         if self.curriculum_id and self.institution_id and self.curriculum.institution_id != self.institution_id:
             raise ValidationError({"curriculum": "A course curriculum must belong to the same institution."})
         if self.amount and self.amount > 0:
@@ -1018,10 +1021,21 @@ class Course(TimeStampedModel):
         # allocation imports.  Store their canonical representation so callers
         # cannot create accidental variants such as "CSC 201" and "csc-201".
         self.code = "".join(char for char in (self.code or "").upper() if char.isalnum())
+        institution_id = self.institution_id or (
+            self.department.institution_id if self.department_id else None
+        )
+        if not self.institution_id and institution_id:
+            # A course is always owned by its department's institution.  Set
+            # this before validation so all related tenant checks use the same
+            # context even outside a request (imports, scripts, and tests).
+            self.institution_id = institution_id
         if not self.academic_session_id:
-            self.academic_session = AcademicSession.objects.filter(is_current=True).first()
+            sessions = AcademicSession.all_objects.filter(is_current=True)
+            if institution_id:
+                sessions = sessions.filter(institution_id=institution_id)
+            self.academic_session = sessions.first()
         if not self.curriculum_id and self.department_id:
-            session = self.academic_session or AcademicSession.objects.filter(is_current=True).first()
+            session = self.academic_session
             if session:
                 self.curriculum = curriculum_for_department(self.department, session)
         self.full_clean()
@@ -1896,18 +1910,23 @@ def curriculum_for_department(department, session=None):
     """
     if not department:
         return None
-    session = session or AcademicSession.objects.filter(is_current=True).first()
+    session = session or AcademicSession.all_objects.filter(
+        institution_id=department.institution_id,
+        is_current=True,
+    ).first()
     if not session:
         return None
 
-    curriculum = Curriculum.objects.filter(
+    curricula = Curriculum.all_objects.filter(
+        institution_id=department.institution_id,
         department=department,
         effective_session=session,
     ).order_by("-version", "-created_at").first()
-    if curriculum:
-        return curriculum
+    if curricula:
+        return curricula
 
-    curriculum = Curriculum.objects.filter(
+    curriculum = Curriculum.all_objects.filter(
+        institution_id=department.institution_id,
         department=department,
         effective_session__name__lte=session.name,
     ).order_by("-effective_session__name", "-version", "-created_at").first()
@@ -1916,11 +1935,16 @@ def curriculum_for_department(department, session=None):
 
     # This is the one-time compatibility path for a department that already
     # has courses but has not uploaded its first handbook in the portal.
-    curriculum, _ = Curriculum.objects.get_or_create(
+    curriculum, _ = Curriculum.all_objects.get_or_create(
+        institution_id=department.institution_id,
         department=department,
         effective_session=session,
     )
-    Course.objects.filter(department=department, curriculum__isnull=True).update(curriculum=curriculum)
+    Course.all_objects.filter(
+        institution_id=department.institution_id,
+        department=department,
+        curriculum__isnull=True,
+    ).update(curriculum=curriculum)
     return curriculum
 
 
@@ -1933,22 +1957,28 @@ def curriculum_for_programme(programme, session=None):
     """
     if not programme:
         return None
-    session = session or AcademicSession.objects.filter(is_current=True).first()
+    session = session or AcademicSession.all_objects.filter(
+        institution_id=programme.institution_id,
+        is_current=True,
+    ).first()
     if not session:
         return None
-    curriculum = Curriculum.objects.filter(
+    curriculum = Curriculum.all_objects.filter(
+        institution_id=programme.institution_id,
         programme=programme,
         effective_session=session,
     ).order_by("-version", "-created_at").first()
     if curriculum:
         return curriculum
-    curriculum = Curriculum.objects.filter(
+    curriculum = Curriculum.all_objects.filter(
+        institution_id=programme.institution_id,
         programme=programme,
         effective_session__name__lte=session.name,
     ).order_by("-effective_session__name", "-version", "-created_at").first()
     if curriculum:
         return curriculum
-    return Curriculum.objects.create(
+    return Curriculum.all_objects.create(
+        institution_id=programme.institution_id,
         department=programme.department,
         programme=programme,
         effective_session=session,

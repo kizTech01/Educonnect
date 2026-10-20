@@ -132,6 +132,7 @@ urlpatterns = [
     path("admin-portal/users/<int:user_id>/reset-password/", views.admin_reset_user_password, name="admin-reset-user-password"),
     path("admin-portal/users/<int:user_id>/delete/", views.admin_delete_user, name="admin-delete-user"),
     path("admin-portal/departments/<int:department_id>/delete/", views.admin_delete_department, name="admin-delete-department"),
+    path("admin-portal/programmes/<int:programme_id>/delete/", views.admin_delete_programme, name="admin-delete-programme"),
     path("admin-portal/courses/<int:course_id>/delete/", views.admin_delete_course, name="admin-delete-course"),
     path("admin-portal/materials/<int:material_id>/delete/", views.admin_delete_material, name="admin-delete-material"),
     path("admin-portal/documents/<str:kind>/<int:document_id>/delete/", views.admin_delete_document, name="admin-delete-document"),

@@ -54,11 +54,14 @@ from .models import (
     User,
     UserAlert,
     RoleAssignment,
+    SubscriptionPlan,
+    SubscriptionPlanDuration,
     get_default_institution,
     set_current_institution,
     reset_current_institution,
 )
 from .services import dispatch_due_course_reminders, ensure_default_admin_user
+from .forms import CourseForm
 from .views import AI_ROLE_EXAMPLES, _ai_answer, sidebar_links
 from .automation import import_course_allocations, import_department_lecturers, import_programmes
 
@@ -415,15 +418,24 @@ class CurriculumCohortTests(TestCase):
 
         self.client.force_login(new_student)
         new_catalog = self.client.get(reverse("portal:student-courses"), {"search": "CSC101"})
-        self.assertContains(new_catalog, "New Foundations")
-        self.assertNotContains(new_catalog, "Old Foundations")
+        # A catalogue course is shared across handbook versions, so its title
+        # remains stable. The cohort-specific teaching values are stored on
+        # the CurriculumCourse entry instead.
+        self.assertContains(new_catalog, "Old Foundations")
+        new_entry = new_curriculum.course_entries.get(course__code="CSC101")
+        self.assertEqual(new_entry.credit_units, 3)
 
-        old_course = old_curriculum.courses.get(code="CSC101")
-        blocked_registration = self.client.post(
+        shared_course = old_curriculum.courses.get(code="CSC101")
+        registration = self.client.post(
             reverse("portal:student-courses"),
-            {"action": "register-course", "course_id": old_course.id},
+            {"action": "register-course", "course_id": shared_course.id},
         )
-        self.assertEqual(blocked_registration.status_code, 404)
+        self.assertEqual(registration.status_code, 302)
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=new_student,
+            course=shared_course,
+            is_active=True,
+        ).exists())
 
     def test_latest_handbook_stays_in_force_when_a_new_session_has_none(self):
         self.upload_handbook(self.old_session, b"CSC102 Continuing Curriculum 100 2 units")
@@ -579,6 +591,32 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, reverse("portal:student-dashboard"))
+
+    def test_student_signup_shows_an_error_for_a_duplicate_institution_id(self):
+        response = self.client.post(
+            reverse("portal:student-signup"),
+            {
+                "username": "duplicate-student-id",
+                "first_name": "Duplicate",
+                "last_name": "Student",
+                "email": "duplicate-id@example.com",
+                "id_number": self.student.id_number,
+                "department": self.department.id,
+                "level": "100",
+                "phone_number": "08000000001",
+                "password1": "pass1234",
+                "password2": "pass1234",
+                "accept_terms": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFormError(
+            response.context["signup_form"],
+            "id_number",
+            "An account with this student or staff ID already exists at this institution.",
+        )
+        self.assertFalse(User.objects.filter(username="duplicate-student-id").exists())
 
     def test_lecturer_without_department_can_open_departmental_download(self):
         self.lecturer.department = None
@@ -890,6 +928,110 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertContains(response, self.free_course.code)
         self.assertNotContains(response, self.paid_course.code)
+
+    def test_student_can_register_courses_from_any_level_in_their_curriculum(self):
+        self.student.level = "100"
+        self.student.save(update_fields=["level"])
+        higher_level_course = Course.objects.create(
+            department=self.department,
+            lecturer=self.lecturer,
+            code="CSC401",
+            title="Advanced Computing",
+            level="400",
+            is_free=True,
+        )
+
+        self.client.force_login(self.student)
+        page = self.client.get(reverse("portal:student-courses"), {"search": "CSC401"})
+        self.assertContains(page, higher_level_course.code)
+        response = self.client.post(
+            reverse("portal:student-courses"),
+            {"action": "register-course", "course_id": higher_level_course.id},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=self.student, course=higher_level_course, is_active=True,
+        ).exists())
+
+    def test_course_form_only_accepts_a_lecturer_from_the_course_department(self):
+        other_department = Department.objects.create(name="Mathematics", code="MTH")
+        other_lecturer = User.objects.create_user(
+            username="math-lecturer", password="pass1234", role=User.Role.LECTURER,
+            department=other_department, is_approved=True,
+        )
+
+        form = CourseForm(
+            data={
+                "department": self.department.id,
+                "title": "Department Ownership",
+                "code": "CSC350",
+                "lecturer": other_lecturer.id,
+                "level": "300",
+                "semester": Course.Semester.FIRST,
+                "is_available": "on",
+                "is_free": "on",
+            },
+            institution=self.department.institution,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("lecturer", form.errors)
+
+    def test_course_uses_the_current_session_from_its_own_institution(self):
+        other_institution = Institution.objects.create(
+            name="Other University",
+            institution_code="OTHER-U",
+            email="other@example.test",
+            subdomain="other-university",
+        )
+        other_session = AcademicSession.all_objects.create(
+            institution=other_institution,
+            name="9999/10000",
+            is_current=True,
+        )
+
+        course = Course.objects.create(
+            department=self.department,
+            lecturer=self.lecturer,
+            code="CSC370",
+            title="Tenant Session Safety",
+            level="300",
+            is_free=True,
+        )
+
+        self.assertEqual(course.academic_session, self.session)
+        self.assertNotEqual(course.academic_session, other_session)
+
+    def test_course_can_be_shared_with_a_programme_in_another_department(self):
+        other_department = Department.objects.create(name="Information Systems", code="IFS")
+        programme = Programme.objects.create(
+            department=other_department,
+            name="Information Systems",
+            code="BIS",
+        )
+        form = CourseForm(
+            data={
+                "department": self.department.id,
+                "title": "Shared Computing",
+                "code": "CSC360",
+                "lecturer": self.lecturer.id,
+                "programmes": [programme.id],
+                "level": "300",
+                "semester": Course.Semester.FIRST,
+                "is_available": "on",
+                "is_free": "on",
+            },
+            institution=self.department.institution,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        course = form.save()
+        self.assertEqual(course.lecturer, self.lecturer)
+        self.assertTrue(course.programmes.filter(pk=programme.pk).exists())
+        self.assertTrue(course.curriculum_entries.filter(
+            curriculum__programme=programme,
+        ).exists())
 
     def test_student_course_filter_rejects_another_department(self):
         other_department = Department.objects.create(name="Mathematics", code="MTH")
@@ -2470,7 +2612,7 @@ class DashboardAndCourseFlowTests(TestCase):
             ).exists()
         )
 
-    def test_course_catalogs_are_hidden_until_a_filter_or_search_is_supplied(self):
+    def test_student_course_catalogue_is_available_without_a_search(self):
         unassigned_course = Course.objects.create(
             department=self.department,
             code="CSC303",
@@ -2480,7 +2622,8 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.client.force_login(self.student)
         student_response = self.client.get(reverse("portal:student-courses"))
-        self.assertEqual(student_response.context["available_courses"].count(), 0)
+        self.assertGreater(student_response.context["available_courses"].count(), 0)
+        self.assertContains(student_response, self.free_course.code)
         student_filtered_response = self.client.get(reverse("portal:student-courses"), {"search": self.free_course.code})
         self.assertContains(student_filtered_response, self.free_course.code)
 

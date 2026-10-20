@@ -37,6 +37,7 @@ from .models import (
     StudentCourseRegistration,
     Timetable,
     User,
+    get_default_institution,
     SubscriptionPlan,
     SubscriptionPlanDuration,
     SubscriptionPaymentGateway,
@@ -513,17 +514,34 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
             "amount": forms.NumberInput(attrs={"step": "0.01"}),
         }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, institution=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.institution = institution
+        if institution is not None:
+            self.fields["department"].queryset = Department.objects.filter(institution=institution)
+            self.fields["programmes"].queryset = Programme.objects.select_related("department").filter(
+                institution=institution,
+                is_active=True,
+            )
+        else:
+            self.fields["programmes"].queryset = Programme.objects.select_related("department").filter(is_active=True)
         self.fields["amount"].required = False
-        self.fields["programmes"].queryset = Programme.objects.select_related("department").filter(is_active=True)
+        # Do not expose an institution-wide lecturer list. The course's owning
+        # department determines who may teach it, and the queryset below also
+        # protects against a crafted POST that names another department's user.
+        self.fields["lecturer"].queryset = User.objects.none()
         selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
         if not selected_department and self.instance.department_id:
             selected_department = self.instance.department_id
         if selected_department:
-            self.fields["programmes"].queryset = self.fields["programmes"].queryset.filter(
-                department_id=selected_department
+            lecturer_queryset = User.objects.filter(
+                role=User.Role.LECTURER,
+                department_id=selected_department,
+                is_approved=True,
             )
+            if institution is not None:
+                lecturer_queryset = lecturer_queryset.filter(institution=institution)
+            self.fields["lecturer"].queryset = lecturer_queryset.order_by("first_name", "last_name", "username")
         if self.instance.pk:
             self.initial["programmes"] = self.instance.programmes.all()
 
@@ -531,8 +549,11 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         cleaned = super().clean()
         department = cleaned.get("department")
         programmes = cleaned.get("programmes")
-        if department and programmes and programmes.exclude(department=department).exists():
-            self.add_error("programmes", "Every selected programme must belong to the selected department.")
+        if department and programmes and programmes.exclude(institution=department.institution).exists():
+            self.add_error("programmes", "Every selected programme must belong to this institution.")
+        lecturer = cleaned.get("lecturer")
+        if lecturer and (not department or lecturer.department_id != department.id):
+            self.add_error("lecturer", "Choose a lecturer in the selected department.")
         code = "".join(char for char in (cleaned.get("code") or "").upper() if char.isalnum())
         if department and code:
             duplicate = Course.objects.filter(department=department, code__iexact=code).exclude(pk=self.instance.pk)
@@ -542,11 +563,20 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         return cleaned
 
     def save(self, commit=True):
-        course = super().save(commit=commit)
+        course = super().save(commit=False)
+        # Requests resolve the active tenant in middleware, but retaining the
+        # explicitly supplied institution also makes this form safe in admin
+        # scripts and tests that run outside a request context.
+        if self.institution is not None:
+            course.institution = self.institution
         if commit:
+            course.save()
             programmes = self.cleaned_data.get("programmes")
             course.programmes.set(programmes)
-            session = course.academic_session or AcademicSession.objects.filter(is_current=True).first()
+            session = course.academic_session or AcademicSession.all_objects.filter(
+                institution_id=course.institution_id,
+                is_current=True,
+            ).first()
             for programme in programmes:
                 curriculum = curriculum_for_programme(programme, session)
                 if curriculum:
@@ -692,16 +722,20 @@ class CourseBrowseFilterForm(forms.Form):
     fee_type = forms.ChoiceField(choices=FEE_TYPE_CHOICES, required=False)
     search = forms.CharField(required=False)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, institution=None, **kwargs):
         super().__init__(*args, **kwargs)
+        faculties = Faculty.objects.filter(institution=institution) if institution else Faculty.objects.none()
+        departments = Department.objects.filter(institution=institution) if institution else Department.objects.none()
+        programmes = Programme.objects.filter(institution=institution, is_active=True) if institution else Programme.objects.none()
+        self.fields["faculty"].queryset = faculties
         self.fields["faculty"].empty_label = "All faculties"
-        self.fields["department"].queryset = Department.objects.all()
+        self.fields["department"].queryset = departments
         selected_faculty = self.data.get(self.add_prefix("faculty")) or self.initial.get("faculty")
         if selected_faculty:
             self.fields["department"].queryset = self.fields["department"].queryset.filter(
                 faculty_id=selected_faculty
             )
-        self.fields["programme"].queryset = Programme.objects.filter(is_active=True)
+        self.fields["programme"].queryset = programmes
         selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
         if selected_department:
             self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
@@ -1090,9 +1124,11 @@ class BaseUserForm(StyledModelForm):
         super().__init__(*args, **kwargs)
         # Set this before ModelForm validation so a duplicate student ID is a
         # field error instead of an IntegrityError after a successful-looking
-        # signup submission.
+        # signup submission. Localhost does not resolve a tenant from its
+        # hostname, but User.save() assigns the compatibility institution in
+        # that case, so validate against that same institution here.
+        self.instance.institution = institution or get_default_institution()
         if institution:
-            self.instance.institution = institution
             self.fields["faculty"].queryset = Faculty.objects.filter(institution=institution)
             self.fields["department"].queryset = Department.objects.filter(institution=institution)
             if "programme" in self.fields:
@@ -1129,6 +1165,20 @@ class BaseUserForm(StyledModelForm):
         ):
             self.add_error("programme", "Choose your programme before creating a student account.")
         return cleaned_data
+
+    def clean_id_number(self):
+        id_number = (self.cleaned_data.get("id_number") or "").strip()
+        if not id_number:
+            return id_number
+        existing_user = User.all_objects.filter(
+            institution=self.instance.institution,
+            id_number__iexact=id_number,
+        ).exclude(pk=self.instance.pk).first()
+        if existing_user:
+            raise forms.ValidationError(
+                "An account with this student or staff ID already exists at this institution."
+            )
+        return id_number
 
     def save(self, commit=True):
         user = super().save(commit=False)

@@ -1001,7 +1001,6 @@ class InstitutionDeletionStorageTests(TransactionTestCase):
         profile = InstitutionProfile.all_objects.create(
             institution=institution,
             name=f"{prefix} profile",
-            logo=SimpleUploadedFile(f"{prefix}-profile.png", b"profile"),
         )
         subscription = Subscription.objects.create(
             institution=institution,
@@ -1036,7 +1035,7 @@ class InstitutionDeletionStorageTests(TransactionTestCase):
             "integration": integration,
             "screening": screening,
             "audit_log": audit_log,
-            "files": [institution.logo.name, user.passport_photo.name, upload.file.name, profile.logo.name],
+            "files": [institution.logo.name, user.passport_photo.name, upload.file.name],
         }
 
     def assert_no_direct_tenant_records(self, institution_id):

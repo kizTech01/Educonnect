@@ -1,3 +1,26 @@
 {% extends 'portal/dashboard_base.html' %}
 {% block title %}Renew subscription | Educonnect{% endblock %}
-{% block dashboard_content %}<section class="panel narrow-panel"><h2>Renew {{ institution.name }}</h2><p>Select a plan, then choose its duration. The amount displayed for that duration is the amount sent to Paystack.</p><form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="primary-btn">Continue to secure checkout</button></form></section>{% endblock %}
+{% block dashboard_content %}
+<section class="panel narrow-panel">
+    <h2>Renew {{ institution.name }}</h2>
+    <p>Select a plan and duration. The selected duration price is the amount sent to Paystack.</p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Plan</th><th>What it includes</th><th>Limits</th><th>Available durations</th></tr></thead>
+            <tbody>
+                {% for plan in plans %}
+                    <tr>
+                        <td><strong>{{ plan.name }}</strong></td>
+                        <td>{{ plan.description|default:"No additional description supplied." }}</td>
+                        <td>{{ plan.max_students|default:"Unlimited" }} students · {{ plan.max_staff|default:"Unlimited" }} staff · {{ plan.max_storage_mb|default:"Unlimited" }} MB storage</td>
+                        <td>{% for duration in plan.durations.all %}{% if duration.is_active %}{{ duration.duration_label }} — ₦{{ duration.price|floatformat:2 }}{% if not forloop.last %}<br>{% endif %}{% endif %}{% empty %}No active duration{% endfor %}</td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="4">No subscription plans are currently available.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="primary-btn">Continue to secure checkout</button></form>
+</section>
+{% endblock %}

@@ -104,6 +104,7 @@ from .models import (
     AccommodationApplication,
     AccommodationSession,
     Course,
+    Curriculum,
     CurriculumCourse,
     CourseResult,
     CoursePaymentGateway,
@@ -1551,11 +1552,6 @@ def _student_course_catalog_queryset(student):
         | Q(curricula=curriculum)
         | Q(curricula__isnull=True, curriculum=curriculum)
     )
-    if student.level:
-        queryset = queryset.filter(
-            Q(curriculum_entries__curriculum=curriculum, curriculum_entries__level=student.level)
-            | Q(curriculum_entries__isnull=True, level=student.level)
-        )
     return queryset.distinct()
 
 
@@ -2968,6 +2964,10 @@ def billing_renew(request):
         "Renew Subscription",
         form=form,
         institution=institution,
+        plans=SubscriptionPlan.objects.filter(
+            is_active=True,
+            is_trial=False,
+        ).prefetch_related("durations"),
     ))
 
 
@@ -5355,6 +5355,42 @@ def admin_programmes(request):
 
 
 @role_required(User.Role.ADMIN)
+@require_http_methods(["POST"])
+def admin_delete_programme(request, programme_id):
+    """Delete one institution-owned programme without deleting shared courses."""
+    institution = request.institution or request.user.institution
+    if institution is None:
+        raise PermissionDenied("An institution context is required to manage programmes.")
+    programme = get_object_or_404(Programme, pk=programme_id, institution=institution)
+    if request.POST.get("confirmation", "").strip() != programme.code:
+        messages.error(request, "Type the exact programme code to delete it.")
+        return redirect("portal:admin-programmes")
+
+    programme_code = programme.code
+    programme_name = programme.name
+    with transaction.atomic():
+        curricula = Curriculum.all_objects.filter(programme=programme)
+        # A shared course is owned by its department, not by any one programme.
+        # Remove only this programme's curriculum links and student assignments.
+        Course.all_objects.filter(curriculum__in=curricula).update(curriculum=None)
+        User.all_objects.filter(
+            Q(programme=programme) | Q(curriculum__in=curricula)
+        ).update(programme=None, curriculum=None)
+        programme.delete()
+        AuditLog.objects.create(
+            institution=institution,
+            user=request.user,
+            action="programme_deleted",
+            object_type="Programme",
+            description=f"Institution Admin deleted programme {programme_name} ({programme_code}).",
+            old_value={"code": programme_code, "name": programme_name},
+            ip_address=_client_ip(request),
+        )
+    messages.success(request, f"{programme_name} was deleted.")
+    return redirect("portal:admin-programmes")
+
+
+@role_required(User.Role.ADMIN)
 def admin_about(request):
     session_form = AcademicSessionForm(initial={"is_current": True})
     if request.method == "POST":
@@ -5397,9 +5433,12 @@ def admin_delete_department(request, department_id):
 
 @role_required(User.Role.ADMIN)
 def admin_courses(request):
-    form = CourseForm()
-    filter_form = CourseBrowseFilterForm(request.GET or None)
-    courses = Course.objects.select_related("department", "lecturer").prefetch_related(
+    institution = request.institution or request.user.institution
+    if institution is None:
+        raise PermissionDenied("An institution context is required to manage courses.")
+    form = CourseForm(institution=institution)
+    filter_form = CourseBrowseFilterForm(request.GET or None, institution=institution)
+    courses = Course.objects.filter(institution=institution).select_related("department", "lecturer").prefetch_related(
         Prefetch(
             "curriculum_entries",
             queryset=CurriculumCourse.objects.select_related("curriculum__programme").filter(
@@ -5427,13 +5466,13 @@ def admin_courses(request):
     if request.method == "POST":
         action = request.POST.get("action")
         if action == "create-course":
-            form = CourseForm(request.POST, request.FILES)
+            form = CourseForm(request.POST, request.FILES, institution=institution)
             if form.is_valid():
                 form.save()
                 messages.success(request, "Course saved.")
                 return redirect(_redirect_with_query(request, "portal:admin-courses"))
         elif action == "update-course":
-            edit_course = get_object_or_404(Course, pk=request.POST.get("course_id"))
+            edit_course = get_object_or_404(Course, pk=request.POST.get("course_id"), institution=institution)
             edit_form = LecturerCourseUpdateForm(request.POST, request.FILES, instance=edit_course)
             if edit_form.is_valid():
                 edit_form.save()
@@ -5441,7 +5480,7 @@ def admin_courses(request):
                 return redirect(_redirect_with_query(request, "portal:admin-courses"))
     edit_id = request.GET.get("edit")
     if edit_id and edit_form is None:
-        edit_course = get_object_or_404(Course, pk=edit_id)
+        edit_course = get_object_or_404(Course, pk=edit_id, institution=institution)
         edit_form = LecturerCourseUpdateForm(instance=edit_course)
     context = dashboard_context(
         request,
@@ -5451,17 +5490,31 @@ def admin_courses(request):
         edit_course=edit_course,
         edit_form=edit_form,
         courses=courses,
-        course_programmes=list(Programme.objects.filter(is_active=True).values("id", "name", "code", "department_id")),
+        course_programmes=list(Programme.objects.filter(institution=institution, is_active=True).values("id", "name", "code", "department_id")),
+        course_lecturers=list(User.objects.filter(
+            institution=institution,
+            role=User.Role.LECTURER,
+            is_approved=True,
+        ).values("id", "first_name", "last_name", "username", "department_id")),
     )
     return render(request, "portal/admin_courses.html", context)
 
 
 @role_required(User.Role.ADMIN)
 def admin_delete_course(request, course_id):
-    course = get_object_or_404(Course, pk=course_id)
+    institution = request.institution or request.user.institution
+    if institution is None:
+        raise PermissionDenied("An institution context is required to manage courses.")
+    course = get_object_or_404(Course, pk=course_id, institution=institution)
     if request.method == "POST":
-        course.delete()
-        messages.success(request, "Course deleted.")
+        if CourseResult.objects.filter(course=course).exists():
+            messages.error(request, "This course has recorded results and cannot be deleted. Mark it unavailable instead.")
+        else:
+            # Shared courses can belong to several programme curricula. Clear
+            # those links first, then delete the catalogue course itself.
+            CurriculumCourse.objects.filter(course=course).delete()
+            course.delete()
+            messages.success(request, "Course deleted.")
     return redirect(_redirect_with_query(request, "portal:admin-courses"))
 
 

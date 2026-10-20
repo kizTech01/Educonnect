@@ -199,7 +199,10 @@ def course_records(text):
 def import_handbook_courses(handbook):
     records = course_records(extract_text(handbook.file))
     created = linked = updated = skipped = 0
-    session = AcademicSession.objects.filter(name=handbook.academic_session).first()
+    session = AcademicSession.all_objects.filter(
+        institution_id=handbook.institution_id,
+        name=handbook.academic_session,
+    ).first()
     if session is None:
         raise ValueError("The handbook must belong to an existing academic session.")
     if not session.is_current:

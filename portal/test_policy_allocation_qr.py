@@ -307,7 +307,10 @@ class ExamCardVerificationTests(TestCase):
         self.client.force_login(self.student)
         response = self.client.get(reverse("portal:download-exam-card", args=[self.payment.pk]))
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"/Im1", response.content)
+        # /Im3 is reserved for the generated verification QR. /Im1 is the
+        # optional institution logo, so checking it would not prove that a QR
+        # code is present for institutions without uploaded branding.
+        self.assertIn(b"/Im3 Do", response.content)
         self.payment.refresh_from_db()
         self.assertTrue(self.payment.exam_card_token_hash)
 
