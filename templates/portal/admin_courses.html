@@ -22,7 +22,7 @@
             <label>Available for registration {{ form.is_available }} {{ form.is_available.errors }}</label>
             <label>Free course {{ form.is_free }} {{ form.is_free.errors }}</label>
             <label>Amount {{ form.amount }} {{ form.amount.errors }}</label>
-            <p class="muted-note">Select the programme or programmes that use this shared catalogue course. Each programme keeps its own curriculum level, semester, units, and requirement status. Leave it empty for a department-wide course. Entering an amount marks the course as paid automatically.</p>
+            <p class="muted-note">Select the programme or programmes that use this shared catalogue course, including programmes in other departments. Each programme keeps its own curriculum level, semester, units, and requirement status. Leave it empty for a department-wide course. Entering an amount marks the course as paid automatically.</p>
             <button type="submit" class="primary-btn">Save Course</button>
         </form>
     </div>
@@ -145,9 +145,8 @@
   const updateProgrammes = () => {
     const chosenDepartment = department.value;
     programmes.replaceChildren();
-    programmes.disabled = !chosenDepartment;
-    if (!chosenDepartment) return;
-    items.filter(item => String(item.department_id) === chosenDepartment).forEach(item => {
+    programmes.disabled = false;
+    items.forEach(item => {
       programmes.add(new Option(`${item.name} (${item.code})`, item.id, selected.has(String(item.id)), selected.has(String(item.id))));
     });
   };

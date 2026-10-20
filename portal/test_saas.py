@@ -247,6 +247,36 @@ class MultiInstitutionSaaSTests(TestCase):
         self.assertFalse(changed)
         self.assertEqual(subscription.end_date, previous_expiry + timedelta(days=365))
 
+    def test_institution_admin_sees_plan_details_before_checkout(self):
+        institution = self.make_institution("PLANS", "plans")
+        plan = SubscriptionPlan.objects.create(
+            name="Professional details",
+            description="For growing institutions with reporting and support.",
+            price=Decimal("45000.00"),
+            billing_period=SubscriptionPlan.BillingPeriod.YEARLY,
+        )
+        SubscriptionPlanDuration.objects.create(
+            plan=plan,
+            duration_days=365,
+            price=Decimal("45000.00"),
+        )
+        administrator = User.all_objects.create_user(
+            "plans-admin", password="safe-password-123", role=User.Role.ADMIN,
+            institution=institution,
+        )
+
+        self.client.force_login(administrator)
+        response = self.client.get(
+            reverse("portal:billing-renew"),
+            HTTP_HOST=f"{institution.subdomain}.{settings.CORE_DOMAIN}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, plan.name)
+        self.assertContains(response, plan.description)
+        self.assertContains(response, "1 year")
+        self.assertContains(response, "45,000.00")
+
     def test_subscription_enforcement_applies_on_tenant_and_central_hosts(self):
         plan = SubscriptionPlan.objects.create(
             name="Host enforcement plan",
