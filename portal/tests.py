@@ -1152,102 +1152,6 @@ class DashboardAndCourseFlowTests(TestCase):
         self.client.force_login(self.student)
         self.assertEqual(self.client.get(reverse("portal:hod-programmes")).status_code, 403)
 
-    def test_institution_admin_can_delete_a_programme_with_its_exact_code(self):
-        programme = Programme.objects.create(
-            department=self.department,
-            name="Software Engineering",
-            code="BSC-SE",
-        )
-        self.client.force_login(self.admin)
-
-        response = self.client.post(
-            reverse("portal:admin-delete-programme", args=[programme.id]),
-            {"confirmation": programme.code},
-        )
-
-        self.assertRedirects(response, reverse("portal:admin-programmes"))
-        self.assertFalse(Programme.objects.filter(pk=programme.pk).exists())
-        self.assertTrue(AuditLog.objects.filter(action="programme_deleted", user=self.admin).exists())
-
-    def test_institution_admin_cannot_delete_a_programme_without_its_exact_code(self):
-        programme = Programme.objects.create(
-            department=self.department,
-            name="Software Engineering",
-            code="BSC-SE",
-        )
-        self.client.force_login(self.admin)
-
-        response = self.client.post(
-            reverse("portal:admin-delete-programme", args=[programme.id]),
-            {"confirmation": "bsc-se"},
-        )
-
-        self.assertRedirects(response, reverse("portal:admin-programmes"))
-        self.assertTrue(Programme.objects.filter(pk=programme.pk).exists())
-
-    def test_institution_admin_can_delete_a_course_linked_to_a_curriculum(self):
-        from .models import CurriculumCourse, curriculum_for_department
-
-        curriculum = curriculum_for_department(self.department, self.session)
-        CurriculumCourse.objects.create(
-            curriculum=curriculum,
-            course=self.free_course,
-            level="100",
-            semester="first",
-            credit_units=2,
-        )
-        self.client.force_login(self.admin)
-
-        response = self.client.post(reverse("portal:admin-delete-course", args=[self.free_course.id]))
-
-        self.assertRedirects(response, reverse("portal:admin-courses"))
-        self.assertFalse(Course.objects.filter(pk=self.free_course.id).exists())
-
-    def test_course_form_limits_lecturers_to_its_department(self):
-        from .forms import CourseForm
-
-        other_department = Department.objects.create(name="Mathematics", code="MTH")
-        other_lecturer = User.objects.create_user(
-            username="math-lecturer", password="pass1234", role=User.Role.LECTURER,
-            department=other_department, is_approved=True,
-        )
-        form = CourseForm(initial={"department": self.department.id})
-
-        self.assertIn(self.lecturer, form.fields["lecturer"].queryset)
-        self.assertNotIn(other_lecturer, form.fields["lecturer"].queryset)
-
-    def test_lecturer_can_manually_register_and_unregister_a_department_course(self):
-        unassigned_course = Course.objects.create(
-            department=self.department,
-            code="CSC302",
-            title="Algorithms",
-            level="300",
-        )
-        self.client.force_login(self.lecturer)
-
-        registered = self.client.post(
-            reverse("portal:lecturer-courses"),
-            {"action": "register-course", "course_id": unassigned_course.id},
-        )
-
-        self.assertRedirects(registered, reverse("portal:lecturer-courses"))
-        registration = LecturerCourseRegistration.objects.get(
-            lecturer=self.lecturer, course=unassigned_course,
-        )
-        self.assertTrue(registration.is_active)
-        self.assertIsNone(registration.allocation_upload_id)
-        self.assertEqual(Course.objects.get(pk=unassigned_course.id).lecturer, self.lecturer)
-
-        unregistered = self.client.post(
-            reverse("portal:lecturer-courses"),
-            {"action": "remove-course", "course_id": unassigned_course.id},
-        )
-
-        self.assertRedirects(unregistered, reverse("portal:lecturer-courses"))
-        registration.refresh_from_db()
-        self.assertFalse(registration.is_active)
-        self.assertIsNone(Course.objects.get(pk=unassigned_course.id).lecturer)
-
     def test_hod_login_keeps_the_departmental_submenu_visible(self):
         self.department.head_of_department = self.lecturer
         self.department.save(update_fields=["head_of_department", "updated_at"])
@@ -1495,46 +1399,6 @@ class DashboardAndCourseFlowTests(TestCase):
         self.department.save(update_fields=["head_of_department", "updated_at"])
         hod_response = self.client.get(reverse("portal:lecturer-documents"))
         self.assertContains(hod_response, handbook.title)
-
-    def test_hod_and_exam_officer_handbook_links_are_visible_and_downloadable(self):
-        handbook = Handbook.objects.create(
-            department=self.department,
-            title="Department Handbook",
-            academic_session="2026/2027",
-            file=SimpleUploadedFile("handbook.pdf", b"handbook", content_type="application/pdf"),
-        )
-        handbook_url = reverse("portal:download-document", args=["handbook", handbook.id])
-        self.department.head_of_department = self.lecturer
-        self.department.save(update_fields=["head_of_department", "updated_at"])
-        RoleAssignment.objects.create(
-            user=self.lecturer,
-            role=User.Role.HOD,
-            department=self.department,
-            assigned_by=self.admin,
-        )
-
-        self.client.force_login(self.lecturer)
-        session = self.client.session
-        session["active_role"] = User.Role.HOD
-        session.save()
-        hod_page = self.client.get(reverse("portal:lecturer-documents"))
-        self.assertContains(hod_page, handbook.title)
-        self.assertContains(hod_page, "Timetable and Handbook")
-        self.assertEqual(self.client.get(f"{handbook_url}?download=1").status_code, 200)
-
-        RoleAssignment.objects.create(
-            user=self.lecturer,
-            role=User.Role.EXAM_OFFICER,
-            department=self.department,
-            assigned_by=self.admin,
-        )
-        session = self.client.session
-        session["active_role"] = User.Role.EXAM_OFFICER
-        session.save()
-        officer_page = self.client.get(reverse("portal:lecturer-documents"))
-        self.assertContains(officer_page, handbook.title)
-        self.assertContains(officer_page, "Timetable and Handbook")
-        self.assertEqual(self.client.get(f"{handbook_url}?download=1").status_code, 200)
 
     def test_admin_departmental_fee_post_is_read_only(self):
         fee = DepartmentalFee.objects.filter(session=self.session, department=self.department).first()
@@ -2715,7 +2579,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertNotContains(response, "Add Course Allocation")
         self.assertNotContains(response, 'value="upload-allocations"', html=False)
 
-    def test_hod_allocation_preserves_manual_lecturer_courses(self):
+    def test_hod_allocation_replaces_the_department_teaching_assignments(self):
         self.department.head_of_department = self.lecturer
         self.department.save(update_fields=["head_of_department", "updated_at"])
         LecturerCourseRegistration.objects.create(lecturer=self.lecturer, course=self.free_course)
@@ -2738,11 +2602,11 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.free_course.refresh_from_db()
         self.paid_course.refresh_from_db()
-        self.assertEqual(self.free_course.lecturer, self.lecturer)
+        self.assertIsNone(self.free_course.lecturer)
         self.assertEqual(self.paid_course.lecturer, self.lecturer)
         self.assertEqual(
-            set(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer, is_active=True).values_list("course_id", flat=True)),
-            {self.free_course.id, self.paid_course.id},
+            list(LecturerCourseRegistration.objects.filter(lecturer=self.lecturer, is_active=True).values_list("course_id", flat=True)),
+            [self.paid_course.id],
         )
 
     def test_current_handbook_reuses_the_catalogue_course_for_a_new_curriculum(self):

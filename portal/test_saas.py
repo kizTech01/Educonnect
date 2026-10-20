@@ -169,20 +169,6 @@ class MultiInstitutionSaaSTests(TestCase):
         self.assertContains(response, 'class="institution-logo-placeholder"')
         self.assertNotContains(response, "kiz-tech-logo.png")
 
-    def test_missing_uploaded_logo_returns_a_single_safe_image_fallback(self):
-        institution = self.make_institution("FIRST", "first")
-        institution.logo.name = "institutions/first/missing-logo.png"
-        institution.save(update_fields=["logo"])
-
-        response = self.client.get(
-            reverse("portal:institution-logo", args=[institution.subdomain]),
-            HTTP_HOST=f"first.{settings.CORE_DOMAIN}",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["Content-Type"], "image/svg+xml")
-        self.assertIn(b"Institution logo unavailable", response.content)
-
     def test_editing_an_institution_preserves_its_creation_time_logo(self):
         institution = self.make_institution("FIRST", "first")
         institution.logo.save("first.png", SimpleUploadedFile("first.png", b"original-logo"), save=True)

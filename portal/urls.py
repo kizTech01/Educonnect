@@ -123,7 +123,6 @@ urlpatterns = [
     path("admin-portal/hods/", views.admin_hods, name="admin-hods"),
     path("admin-portal/faculties/", views.admin_faculties, name="admin-faculties"),
     path("admin-portal/programmes/", views.admin_programmes, name="admin-programmes"),
-    path("admin-portal/programmes/<int:programme_id>/delete/", views.admin_delete_programme, name="admin-delete-programme"),
     path("admin-portal/about/", views.admin_about, name="admin-about"),
     path("admin-portal/courses/", views.admin_courses, name="admin-courses"),
     path("admin-portal/documents/", views.admin_documents, name="admin-documents"),

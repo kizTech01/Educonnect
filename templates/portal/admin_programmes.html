@@ -42,17 +42,6 @@
     {% endif %}
 </section>
 
-{% if programmes %}
-<section class="panel-card">
-    <div class="panel-head"><h2>Delete programme</h2></div>
-    <p class="muted-note">This permanently removes the programme and its programme-specific curriculum. Shared course records and historic student registrations are retained. Type the exact programme code to confirm.</p>
-    <div class="table-wrap"><table>
-        <thead><tr><th>Programme</th><th>Department</th><th>Confirmation</th><th></th></tr></thead>
-        <tbody>{% for programme in programmes %}<tr><td>{{ programme.name }}<br><span class="table-cell-subtext">{{ programme.code }}</span></td><td>{{ programme.department.name }}</td><td colspan="2"><form method="post" action="{% url 'portal:admin-delete-programme' programme.id %}" class="inline-form">{% csrf_token %}<input class="input-field" name="confirmation" aria-label="Confirm deletion of {{ programme.name }}" placeholder="Type {{ programme.code }}" required><button class="danger-btn small" type="submit">Delete</button></form></td></tr>{% endfor %}</tbody>
-    </table></div>
-</section>
-{% endif %}
-
 {{ programme_departments|json_script:"programme-departments" }}
 <script>
 (() => {

@@ -517,12 +517,6 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         super().__init__(*args, **kwargs)
         self.fields["amount"].required = False
         self.fields["programmes"].queryset = Programme.objects.select_related("department").filter(is_active=True)
-        # Do not expose an institution-wide lecturer list while an admin is
-        # creating a course.  A lecturer may only be selected from the course
-        # department; the browser updates this list after department changes
-        # and this server-side queryset enforces the same rule for crafted
-        # requests.
-        self.fields["lecturer"].queryset = User.objects.none()
         selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
         if not selected_department and self.instance.department_id:
             selected_department = self.instance.department_id
@@ -530,11 +524,6 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
             self.fields["programmes"].queryset = self.fields["programmes"].queryset.filter(
                 department_id=selected_department
             )
-            self.fields["lecturer"].queryset = User.objects.filter(
-                role=User.Role.LECTURER,
-                department_id=selected_department,
-                is_approved=True,
-            ).order_by("first_name", "last_name", "username")
         if self.instance.pk:
             self.initial["programmes"] = self.instance.programmes.all()
 
@@ -544,9 +533,6 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         programmes = cleaned.get("programmes")
         if department and programmes and programmes.exclude(department=department).exists():
             self.add_error("programmes", "Every selected programme must belong to the selected department.")
-        lecturer = cleaned.get("lecturer")
-        if lecturer and (not department or lecturer.department_id != department.id):
-            self.add_error("lecturer", "Choose a lecturer in the selected department.")
         code = "".join(char for char in (cleaned.get("code") or "").upper() if char.isalnum())
         if department and code:
             duplicate = Course.objects.filter(department=department, code__iexact=code).exclude(pk=self.instance.pk)
