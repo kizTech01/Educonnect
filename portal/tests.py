@@ -2234,6 +2234,34 @@ class DashboardAndCourseFlowTests(TestCase):
         ).exists())
 
     @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_repairs_registration_for_webhook_paid_payment(self, verify_paystack_transaction):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(
+            reverse("portal:course-payment-callback", args=[payment.id]),
+        )
+
+        self.assertEqual(
+            response.url,
+            f'{reverse("portal:student-courses")}#registered-courses',
+        )
+        verify_paystack_transaction.assert_not_called()
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            is_active=True,
+        ).exists())
+
+    @patch("portal.views.verify_paystack_transaction")
     def test_course_payment_callback_unlocks_course_material_access(self, verify_paystack_transaction):
         registration = StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
         material_one = CourseMaterial.objects.create(

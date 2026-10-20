@@ -3807,17 +3807,26 @@ def course_payment_callback(request, payment_id):
     if reference and reference != payment.paystack_reference:
         messages.error(request, "The course payment reference did not match this record.")
         return redirect("portal:student-courses")
-    if not reference:
-        messages.warning(request, f"{payment.course.code} payment is still pending confirmation.")
-        return redirect("portal:student-courses")
     registered_courses_url = _redirect_with_anchor(
         "portal:student-courses", "registered-courses"
     )
+    # Paystack may deliver its authenticated webhook before returning the
+    # browser, and a browser return can occasionally omit its query string.
+    # A payment already marked paid is authoritative, so use this visit to
+    # repair any missing registration instead of leaving the student locked
+    # out of a course they have paid for.
+    if payment.is_paid:
+        _finalize_course_payment(payment)
+        messages.success(request, f"{payment.course.code} payment confirmed successfully.")
+        return redirect(registered_courses_url)
+    if not reference:
+        messages.warning(request, f"{payment.course.code} payment is still pending confirmation.")
+        return redirect("portal:student-courses")
     try:
         verification = verify_paystack_transaction(payment.paystack_secret_key_used, reference)
     except ValueError as exc:
         payment.refresh_from_db(fields=["status", "paid_at"])
-        if _is_paystack_transport_error(exc) and payment.is_paid:
+        if payment.is_paid:
             _finalize_course_payment(payment)
             messages.success(request, f"{payment.course.code} payment confirmed successfully.")
             return redirect(registered_courses_url)
