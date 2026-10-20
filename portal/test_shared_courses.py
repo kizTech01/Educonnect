@@ -4,7 +4,6 @@ from django.test import TestCase
 from django.urls import reverse
 
 from .automation import _create_course_from_allocation, import_handbook_courses
-from .forms import CourseForm
 from .models import (
     AcademicSession,
     Course,
@@ -110,59 +109,6 @@ class SharedCourseCurriculumTests(TestCase):
 
         self.assertContains(response, "CSC201 - Data Structures")
         self.assertContains(response, ">300<", html=False)
-
-    def test_student_can_register_a_course_from_any_curriculum_level(self):
-        self._upload(self.computer_science, b"CSC401 Advanced Algorithms 400 3 units")
-        course = Course.objects.get(department=self.department, code="CSC401")
-        student = User.objects.create_user(
-            username="all-level-student", password="pass1234", role=User.Role.STUDENT,
-            department=self.department, programme=self.computer_science, level="100",
-            id_number="ALL-1", email="all-level@example.com",
-        )
-
-        self.client.force_login(student)
-        page = self.client.get(reverse("portal:student-courses"), {"search": course.code})
-        self.assertContains(page, "Advanced Algorithms")
-        response = self.client.post(reverse("portal:student-courses"), {
-            "action": "register-course", "course_id": course.pk,
-        })
-        self.assertEqual(response.status_code, 302)
-        self.assertTrue(StudentCourseRegistration.objects.filter(student=student, course=course).exists())
-
-    def test_course_form_shares_a_course_with_a_programme_in_another_department(self):
-        mathematics = Department.objects.create(name="Mathematics", code="MTH")
-        statistics = Programme.objects.create(
-            institution=mathematics.institution,
-            department=mathematics,
-            name="Statistics", code="BSTAT",
-        )
-        lecturer = User.objects.create_user(
-            username="shared-course-lecturer", password="pass1234", role=User.Role.LECTURER,
-            department=self.department, is_approved=True,
-        )
-        form = CourseForm(data={
-            "department": self.department.pk,
-            "title": "Research Methods",
-            "code": "GST301",
-            "lecturer": lecturer.pk,
-            "programmes": [self.computer_science.pk, statistics.pk],
-            "level": "300",
-            "semester": Course.Semester.FIRST,
-            "is_available": "on",
-            "is_free": "on",
-            "amount": "",
-        })
-
-        self.assertTrue(form.is_valid(), form.errors)
-        course = form.save()
-        self.assertEqual(
-            set(course.programmes.values_list("pk", flat=True)),
-            {self.computer_science.pk, statistics.pk},
-        )
-        self.assertTrue(CurriculumCourse.objects.filter(
-            course=course,
-            curriculum__programme=statistics,
-        ).exists())
 
     def test_course_codes_are_isolated_by_institution(self):
         other = Institution.objects.create(

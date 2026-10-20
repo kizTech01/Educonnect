@@ -503,7 +503,7 @@ class CourseAllocationUploadForm(StyledModelForm):
 class CourseForm(CoursePricingMixin, StyledModelForm):
     programmes = forms.ModelMultipleChoiceField(
         queryset=Programme.objects.none(), required=False,
-        help_text="Choose one or more programmes, including programmes in other departments, that use this shared course.",
+        help_text="Choose one programme for an exclusive course, or several to share it.",
     )
 
     class Meta:
@@ -527,6 +527,9 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         if not selected_department and self.instance.department_id:
             selected_department = self.instance.department_id
         if selected_department:
+            self.fields["programmes"].queryset = self.fields["programmes"].queryset.filter(
+                department_id=selected_department
+            )
             self.fields["lecturer"].queryset = User.objects.filter(
                 role=User.Role.LECTURER,
                 department_id=selected_department,
@@ -539,6 +542,8 @@ class CourseForm(CoursePricingMixin, StyledModelForm):
         cleaned = super().clean()
         department = cleaned.get("department")
         programmes = cleaned.get("programmes")
+        if department and programmes and programmes.exclude(department=department).exists():
+            self.add_error("programmes", "Every selected programme must belong to the selected department.")
         lecturer = cleaned.get("lecturer")
         if lecturer and (not department or lecturer.department_id != department.id):
             self.add_error("lecturer", "Choose a lecturer in the selected department.")
@@ -618,18 +623,13 @@ class StudentCourseFilterForm(forms.Form):
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
     search = forms.CharField(required=False)
 
-    def __init__(self, *args, student=None, curriculum=None, **kwargs):
+    def __init__(self, *args, student=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["department"].queryset = Department.objects.all()
         if student is not None:
-            # A curriculum may include a catalogue course owned by another
-            # department. The catalogue queryset remains the authorization
-            # boundary; this selector only narrows already-eligible courses.
             self.fields["department"].queryset = (
-                Department.objects.filter(
-                    courses__curriculum_entries__curriculum=curriculum,
-                ).distinct()
-                if curriculum
+                Department.objects.filter(pk=student.department_id)
+                if student.department_id
                 else Department.objects.none()
             )
             self.fields["programme"].queryset = Programme.objects.filter(
@@ -645,6 +645,8 @@ class StudentCourseFilterForm(forms.Form):
                     pk=student.programme_id
                 )
                 self.initial.setdefault("programme", student.programme_id)
+            if student.department_id:
+                self.initial.setdefault("department", student.department_id)
         self.fields["programme"].empty_label = "All programmes"
         self.fields["search"].widget.attrs["placeholder"] = "Course code, title, or lecturer"
         for field in self.fields.values():

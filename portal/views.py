@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import json
-import logging
 import re
 import secrets
 import time
@@ -189,7 +188,6 @@ from .automation import (
 LOGIN_ROLES = set(User.Role.values)
 SCREENING_SIGNATURE_HEADER = "HTTP_X_EDUCONNECT_SIGNATURE"
 SCREENING_TIMESTAMP_HEADER = "HTTP_X_EDUCONNECT_TIMESTAMP"
-logger = logging.getLogger(__name__)
 SCREENING_INSTITUTION_HEADER = "HTTP_X_EDUCONNECT_INSTITUTION"
 
 POLICY_VERSION = "2026-10-09"
@@ -1045,7 +1043,6 @@ def _mark_payment_paid_from_paystack(reference, amount, *, signing_secret):
 
 
 def _finalize_course_payment(payment):
-    """Record a verified payment without letting optional setup break checkout."""
     with transaction.atomic():
         payment = CoursePayment.objects.select_for_update().select_related("student", "course", "session").get(pk=payment.pk)
         if not payment.is_paid:
@@ -1066,16 +1063,10 @@ def _finalize_course_payment(payment):
             registration.superseded_at = None
             registration.superseded_by_allocation = None
             registration.save(update_fields=["is_active", "superseded_at", "superseded_by_allocation", "updated_at"])
-    try:
         if created:
             sync_material_access_for_registration(registration)
         _assign_student_to_existing_course_group(payment.student, payment.course, payment.session)
         _sync_course_material_access_for_paid_course(payment.student, payment.course)
-    except Exception:
-        # The verified payment and registration are already committed. A
-        # failure in auxiliary material/group setup must not send the student
-        # back a 500 response after a successful Paystack checkout.
-        logger.exception("Could not complete optional course access setup for payment %s", payment.pk)
 
 
 def _finalize_departmental_payment(payment):
@@ -1435,12 +1426,9 @@ def _assign_student_to_existing_course_group(student, course, session):
             group_name = base_name
             if groups.filter(name=group_name).exists():
                 group_name = f"{base_name} ({department.code})" if department else "No department (new)"
-            group_lecturer = course.lecturer or groups.select_related("lecturer").first().lecturer
-            if group_lecturer is None:
-                return
             target_group = CourseStudentGroup.objects.create(
                 course=course,
-                lecturer=group_lecturer,
+                lecturer=course.lecturer,
                 session=session,
                 name=group_name,
                 grouping_method=grouping_method,
@@ -1580,6 +1568,11 @@ def _student_course_catalog_queryset(student):
         | Q(curricula=curriculum)
         | Q(curricula__isnull=True, curriculum=curriculum)
     )
+    if student.level:
+        queryset = queryset.filter(
+            Q(curriculum_entries__curriculum=curriculum, curriculum_entries__level=student.level)
+            | Q(curriculum_entries__isnull=True, level=student.level)
+        )
     return queryset.distinct()
 
 
@@ -2992,11 +2985,6 @@ def billing_renew(request):
         "Renew Subscription",
         form=form,
         institution=institution,
-        plans=SubscriptionPlan.objects.filter(
-            is_active=True,
-            is_trial=False,
-            durations__is_active=True,
-        ).prefetch_related("durations").distinct(),
     ))
 
 
@@ -3570,12 +3558,7 @@ def student_departmental(request):
 @role_required(User.Role.STUDENT)
 def student_courses(request):
     current_session = current_departmental_session()
-    student_curriculum = _student_curriculum(request.user)
-    filter_form = StudentCourseFilterForm(
-        request.GET or None,
-        student=request.user,
-        curriculum=student_curriculum,
-    )
+    filter_form = StudentCourseFilterForm(request.GET or None, student=request.user)
 
     available_courses = _student_course_catalog_queryset(request.user)
     # A bound but invalid query (such as a different department ID) must not
@@ -3607,6 +3590,7 @@ def student_courses(request):
             available_courses = Course.objects.none()
 
     available_courses = available_courses.distinct()
+    student_curriculum = _student_curriculum(request.user)
     registration_entries = CurriculumCourse.objects.filter(
         curriculum=student_curriculum,
     ) if student_curriculum else CurriculumCourse.objects.none()
