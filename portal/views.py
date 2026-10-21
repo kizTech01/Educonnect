@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import re
 import secrets
 import time
@@ -10,7 +11,7 @@ from zipfile import BadZipFile, ZipFile
 from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from django.apps import apps
 from django.contrib import messages
@@ -419,23 +420,35 @@ def institution_logo(request, institution_subdomain):
 
 
 def _download_file_response(uploaded_file, request):
-    """Return an inline or attachment response without exposing storage errors.
+    """Stream a protected uploaded file as an inline view or an attachment.
 
-    Every document download uses this helper so desktop and mobile browsers get
-    the same filename/disposition behaviour and a missing storage object is a
-    normal 404 rather than a server error.
+    The same protected endpoint handles the distinct View and Download buttons:
+    a normal request is inline, while ``?download=1`` is an attachment.  A
+    browser will safely download an unknown MIME type instead of attempting to
+    render it.  Storage errors deliberately become a normal 404 so a stale
+    database reference never exposes a server error or an empty response.
     """
     if not uploaded_file or not uploaded_file.name:
+        raise Http404("Document not found.")
+    filename = PurePosixPath(str(uploaded_file.name).replace("\\", "/")).name
+    if not filename or filename in {".", "/"}:
         raise Http404("Document not found.")
     try:
         source = uploaded_file.open("rb")
     except (OSError, ValueError) as exc:
         raise Http404("Document file not found.") from exc
-    return FileResponse(
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    response = FileResponse(
         source,
         as_attachment=request.GET.get("download") == "1",
-        filename=uploaded_file.name.rsplit("/", 1)[-1],
+        filename=filename,
+        content_type=content_type,
     )
+    # These routes serve private, role-scoped records.  Do not let a shared
+    # browser or proxy cache make one user's document available to another.
+    response["Cache-Control"] = "private, no-store, max-age=0"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 def login_form_for_role(role, data=None):

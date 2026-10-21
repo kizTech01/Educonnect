@@ -800,6 +800,120 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(download_response.status_code, 200)
         self.assertIn("attachment", download_response["Content-Disposition"])
 
+    def test_protected_file_actions_keep_view_and_download_separate(self):
+        """Every uploaded-file endpoint streams the right file and disposition."""
+        StudentCourseRegistration.objects.create(
+            student=self.student,
+            course=self.free_course,
+            session=self.session,
+            registered_by=self.student,
+        )
+        material = CourseMaterial.objects.create(
+            course=self.free_course,
+            lecturer=self.lecturer,
+            title="Week one notes",
+            file=SimpleUploadedFile("week-one.pdf", b"material file", content_type="application/pdf"),
+        )
+        message = Notification.objects.create(
+            sender=self.lecturer,
+            subject="Class handout",
+            body="See the attached handout.",
+            attachment=SimpleUploadedFile("handout.pdf", b"message file", content_type="application/pdf"),
+        )
+        NotificationRecipient.objects.create(notification=message, student=self.student)
+        additional_attachment = NotificationAttachment.objects.create(
+            notification=message,
+            file=SimpleUploadedFile("reading.pdf", b"additional message file", content_type="application/pdf"),
+        )
+        payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+        )
+        departmental_document = DepartmentalPaymentDocument.objects.create(
+            payment=payment,
+            category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="White Form",
+            file=SimpleUploadedFile("white-form.pdf", b"departmental file", content_type="application/pdf"),
+        )
+        timetable = Timetable.objects.create(
+            department=self.department,
+            title="First semester timetable",
+            academic_session=self.session.name,
+            semester=Course.Semester.FIRST,
+            level="100",
+            file=SimpleUploadedFile("timetable.pdf", b"timetable file", content_type="application/pdf"),
+        )
+        handbook = Handbook.objects.create(
+            department=self.department,
+            title="Student handbook",
+            academic_session=self.session.name,
+            file=SimpleUploadedFile("handbook.pdf", b"handbook file", content_type="application/pdf"),
+        )
+        file_actions = (
+            (reverse("portal:download-course-file", args=[self.free_course.id]), self.free_course.file.name.rsplit("/", 1)[-1], b"free course file"),
+            (reverse("portal:download-material", args=[material.id]), material.file.name.rsplit("/", 1)[-1], b"material file"),
+            (reverse("portal:download-message-attachment", args=[message.id]), message.attachment.name.rsplit("/", 1)[-1], b"message file"),
+            (reverse("portal:download-notification-attachment", args=[additional_attachment.id]), additional_attachment.file.name.rsplit("/", 1)[-1], b"additional message file"),
+            (reverse("portal:download-departmental-document", args=[departmental_document.id]), departmental_document.file.name.rsplit("/", 1)[-1], b"departmental file"),
+            (reverse("portal:download-document", args=["timetable", timetable.id]), timetable.file.name.rsplit("/", 1)[-1], b"timetable file"),
+            (reverse("portal:download-document", args=["handbook", handbook.id]), handbook.file.name.rsplit("/", 1)[-1], b"handbook file"),
+        )
+
+        self.client.force_login(self.student)
+        for url, expected_filename, expected_content in file_actions:
+            with self.subTest(url=url, action="view"):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response["Content-Type"], "application/pdf")
+                self.assertTrue(response["Content-Disposition"].startswith("inline"))
+                self.assertIn(expected_filename, response["Content-Disposition"])
+                self.assertIn("private", response["Cache-Control"])
+                self.assertIn("no-store", response["Cache-Control"])
+                self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+                self.assertEqual(b"".join(response.streaming_content), expected_content)
+            with self.subTest(url=url, action="download"):
+                response = self.client.get(url, {"download": "1"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response["Content-Type"], "application/pdf")
+                self.assertTrue(response["Content-Disposition"].startswith("attachment"))
+                self.assertIn(expected_filename, response["Content-Disposition"])
+                self.assertEqual(b"".join(response.streaming_content), expected_content)
+
+        other_student = User.objects.create_user(
+            username="other-file-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=self.department,
+        )
+        self.client.force_login(other_student)
+        self.assertEqual(
+            self.client.get(reverse("portal:download-departmental-document", args=[departmental_document.id])).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.get(reverse("portal:download-message-attachment", args=[message.id])).status_code,
+            403,
+        )
+
+        self.client.force_login(self.student)
+        missing_document = DepartmentalPaymentDocument.objects.create(
+            payment=payment,
+            category=DepartmentalPaymentDocument.Category.ADDITIONAL,
+            title="Missing supporting document",
+        )
+        # This simulates a stale database reference after an externally
+        # deleted storage object without deleting a file held open by the
+        # streaming responses on Windows.
+        missing_document.file.name = "departmental/missing-file.pdf"
+        missing_document.save(update_fields=["file", "updated_at"])
+        self.assertEqual(
+            self.client.get(reverse("portal:download-departmental-document", args=[missing_document.id])).status_code,
+            404,
+        )
+
     def test_paid_student_can_upload_additional_departmental_documents(self):
         from .models import DepartmentalPaymentDocument
 
@@ -2963,7 +3077,7 @@ class DashboardAndCourseFlowTests(TestCase):
 
     def test_due_course_reminder_sends_email_30_minutes_before_class(self):
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
-        now = timezone.localtime().replace(second=0, microsecond=0)
+        now = timezone.localtime().replace(hour=10, minute=0, second=0, microsecond=0)
         if now.weekday() == 6:
             now = now - timedelta(days=1)
         weekday_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
@@ -2992,7 +3106,7 @@ class DashboardAndCourseFlowTests(TestCase):
     @patch("portal.services.get_connection")
     def test_failed_course_reminder_email_is_recorded_for_retry(self, get_connection):
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
-        now = timezone.localtime().replace(second=0, microsecond=0)
+        now = timezone.localtime().replace(hour=10, minute=0, second=0, microsecond=0)
         if now.weekday() == 6:
             now = now - timedelta(days=1)
         weekday_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
@@ -3013,7 +3127,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.student.browser_alerts_enabled = True
         self.student.class_reminder_alerts_enabled = True
         self.student.save(update_fields=["browser_alerts_enabled", "class_reminder_alerts_enabled"])
-        now = timezone.localtime().replace(second=0, microsecond=0)
+        now = timezone.localtime().replace(hour=10, minute=0, second=0, microsecond=0)
         if now.weekday() == 6:
             now = now - timedelta(days=1)
         weekday_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
