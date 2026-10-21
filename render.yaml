@@ -17,7 +17,7 @@ services:
       - key: DJANGO_DEBUG
         value: "False"
       - key: CORE_DOMAIN
-        value: educonnect-gmcl.onrender.com
+        value: educonnect.devs.surf
       - key: DJANGO_TIME_ZONE
         value: Africa/Lagos
       # Docker runs the application from /app; store uploads on Render's

@@ -150,8 +150,8 @@ class MultiInstitutionSaaSTests(TestCase):
         self.assertTrue(second.logo.name.startswith("institutions/second/"))
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
-        self.assertEqual(b"".join(first_response.streaming_content), b"first-logo")
-        self.assertEqual(b"".join(second_response.streaming_content), b"second-logo")
+        self.assertEqual(first_response.content, b"first-logo")
+        self.assertEqual(second_response.content, b"second-logo")
         self.assertEqual(first_response["Cache-Control"], "private, no-store, max-age=0")
         first_home = self.client.get("/", HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
         self.assertContains(first_home, f"{first_url}?v=")
@@ -178,13 +178,14 @@ class MultiInstitutionSaaSTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, logo_bytes)
 
-    def test_tenant_without_a_logo_does_not_show_a_second_brand_mark(self):
+    def test_tenant_without_a_logo_shows_a_clean_tenant_initial_fallback(self):
         institution = self.make_institution("FIRST", "first")
 
         response = self.client.get("/", HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'class="institution-logo-placeholder"')
+        self.assertContains(response, 'class="institution-logo-placeholder"')
+        self.assertContains(response, ">F</span>", html=False)
         self.assertNotContains(response, "kiz-tech-logo.png")
 
     def test_editing_an_institution_can_replace_its_single_logo(self):

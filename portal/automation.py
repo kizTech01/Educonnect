@@ -468,19 +468,35 @@ def _allocation_key(value):
     return re.sub(r"[^A-Z0-9]", "", value.upper())
 
 
-def _find_department_lecturer(department, lecturer_key):
+def _find_department_lecturer(department, lecturer_key, lecturer_name=""):
+    """Find one lecturer in the selected department without cross-tenant matching.
+
+    A staff ID is the preferred allocation key. Some departmental sheets only
+    contain a lecturer name, so accept an exact normalised full-name match only
+    when it identifies exactly one lecturer. Ambiguous names remain unmatched
+    rather than assigning a course to the wrong person.
+    """
     requested_id = _allocation_key(lecturer_key)
-    if not requested_id:
-        return None
     lecturers = list(User.all_objects.filter(
         institution=department.institution,
         department=department,
     ).filter(Q(role=User.Role.LECTURER) | Q(role_assignments__role=User.Role.LECTURER, role_assignments__is_active=True)).distinct())
-    direct_matches = [
+    if requested_id:
+        direct_matches = [
+            lecturer for lecturer in lecturers
+            if _allocation_key(lecturer.id_number) == requested_id or _allocation_key(lecturer.username) == requested_id
+        ]
+        if len(direct_matches) == 1:
+            return direct_matches[0]
+
+    requested_name = _allocation_key(lecturer_name)
+    if not requested_name:
+        return None
+    name_matches = [
         lecturer for lecturer in lecturers
-        if _allocation_key(lecturer.id_number) == requested_id or _allocation_key(lecturer.username) == requested_id
+        if _allocation_key(lecturer.full_name) == requested_name
     ]
-    return direct_matches[0] if len(direct_matches) == 1 else None
+    return name_matches[0] if len(name_matches) == 1 else None
 
 
 def _find_department_course(department, course_code, session=None):
@@ -629,21 +645,30 @@ def import_course_allocations(upload):
         return upload.processing_summary
 
     assigned = created_courses = skipped = reassigned = removed = preserved = superseded = 0
+    unmatched_lecturers = unmatched_courses = 0
     with transaction.atomic():
         incoming = {}
         for row in rows:
-            # A departmental lecturer ID, not a display name, is the stable
-            # allocation key.  It prevents a similarly named lecturer from
-            # receiving a course by mistake.
-            lecturer_key = _field(row, "lecturer_id", "staff_id", "staff_no", "lecturer id")
+            # A departmental lecturer ID is the preferred, stable allocation
+            # key.  Name-only sheets are supported only when the normalized
+            # name identifies exactly one departmental lecturer.
+            lecturer_key = _field(
+                row, "lecturer_id", "staff_id", "staff_no", "staff number",
+                "lecturer id", "lecturer code",
+            )
+            lecturer_name = _field(
+                row, "lecturer_name", "full_name", "lecturer name", "name", "lecturer", "instructor",
+            )
             course_code = _allocation_key(_field(row, "course_code", "course", "code"))
-            lecturer = _find_department_lecturer(upload.department, lecturer_key)
+            lecturer = _find_department_lecturer(upload.department, lecturer_key, lecturer_name)
             course = _find_department_course(upload.department, course_code, session)
             if not course and lecturer:
                 course = _create_course_from_allocation(upload.department, row, course_code, session)
                 created_courses += bool(course)
             if not lecturer or not course:
                 skipped += 1
+                unmatched_lecturers += not bool(lecturer)
+                unmatched_courses += not bool(course)
                 continue
             allocation = incoming.setdefault(course.pk, {"course": course, "lecturers": []})
             if lecturer not in allocation["lecturers"]:
@@ -654,7 +679,9 @@ def import_course_allocations(upload):
         # allocation untouched until at least one ID/course pair is valid.
         if not incoming:
             raise ValueError(
-                "No valid lecturer ID and course-code pairs were found for this department; the existing allocation was kept."
+                "No valid lecturer/course pairs were found for this department; the existing allocation was kept. "
+                f"{unmatched_lecturers} row(s) did not match a unique departmental lecturer and "
+                f"{unmatched_courses} row(s) did not match a course. Use a lecturer ID or an exact unique lecturer name and a course code."
             )
 
         scoped_courses = Course.all_objects.filter(department=upload.department)
@@ -696,7 +723,15 @@ def import_course_allocations(upload):
         CourseAllocationUpload.all_objects.filter(**scope, is_active=True).exclude(pk=upload.pk).update(is_active=False)
         upload.content_hash = content_hash
         upload.is_active = True
-        upload.reconciliation = {"assigned": assigned, "created_courses": created_courses, "reassigned": reassigned, "removed": removed, "skipped": skipped}
+        upload.reconciliation = {
+            "assigned": assigned,
+            "created_courses": created_courses,
+            "reassigned": reassigned,
+            "removed": removed,
+            "skipped": skipped,
+            "unmatched_lecturers": unmatched_lecturers,
+            "unmatched_courses": unmatched_courses,
+        }
         upload.processing_summary = (f"Course-allocation reconciliation finished: {assigned} allocations assigned, {created_courses} courses created, "
                                      f"{reassigned} lecturer changes, {removed} removed allocations, {skipped} unmatched rows.")
         upload.save(update_fields=["content_hash", "is_active", "reconciliation", "processing_summary", "updated_at"])

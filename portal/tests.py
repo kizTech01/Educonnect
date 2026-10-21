@@ -4,6 +4,7 @@ import hmac
 import json
 from datetime import timedelta
 from decimal import Decimal
+from unittest import skipUnless
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -11,7 +12,7 @@ from django.conf import settings
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.test import Client
 from django.test import RequestFactory
 from django.test import TestCase
@@ -325,6 +326,52 @@ class DepartmentAutomationTests(TestCase):
         created_course = Course.objects.get(code="CSC424")
         self.assertEqual(created_course.level, "400")
         self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=co_lecturer, course=created_course).exists())
+
+    def test_allocation_upload_accepts_an_exact_unique_lecturer_name(self):
+        lecturer = User.objects.create_user(
+            username="LEC-CS-NAME",
+            password="password",
+            role=User.Role.LECTURER,
+            department=self.department,
+            first_name="Ada",
+            last_name="Lovelace",
+        )
+        allocation_upload = CourseAllocationUpload.objects.create(
+            department=self.department,
+            file=SimpleUploadedFile(
+                "allocation-by-name.csv",
+                b"Lecturer Name,Course Code\nAda Lovelace,CSC508\n",
+                content_type="text/csv",
+            ),
+        )
+
+        self.assertIn("1 allocations assigned", import_course_allocations(allocation_upload))
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.lecturer, lecturer)
+
+    def test_allocation_upload_rejects_an_ambiguous_lecturer_name(self):
+        for username in ("lecturer-one", "lecturer-two"):
+            User.objects.create_user(
+                username=username,
+                password="password",
+                role=User.Role.LECTURER,
+                department=self.department,
+                first_name="Ada",
+                last_name="Lovelace",
+            )
+        allocation_upload = CourseAllocationUpload.objects.create(
+            department=self.department,
+            file=SimpleUploadedFile(
+                "ambiguous-allocation.csv",
+                b"Lecturer Name,Course Code\nAda Lovelace,CSC508\n",
+                content_type="text/csv",
+            ),
+        )
+
+        with self.assertRaisesMessage(ValueError, "did not match a unique departmental lecturer"):
+            import_course_allocations(allocation_upload)
+        self.course.refresh_from_db()
+        self.assertIsNone(self.course.lecturer)
 
     def test_scanned_allocation_uses_vision_records(self):
         lecturer = User.objects.create_user(
@@ -2268,6 +2315,33 @@ class DashboardAndCourseFlowTests(TestCase):
             course=self.paid_course,
             session=self.session,
             is_active=True,
+        ).exists())
+
+    @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row-locking semantics.")
+    def test_course_payment_finalization_locks_a_payment_with_a_null_session_on_postgresql(self):
+        """A nullable session must not turn the locked payment query into an outer join."""
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        # Bypass the model's default-session convenience to reproduce the
+        # legacy payment rows that caused PostgreSQL's FOR UPDATE failure.
+        CoursePayment.objects.filter(pk=payment.pk).update(session=None)
+        payment.refresh_from_db()
+
+        from .views import _finalize_course_payment
+
+        _finalize_course_payment(payment)
+
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, CoursePayment.Status.PAID)
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
         ).exists())
 
     @patch("portal.views.verify_paystack_transaction")

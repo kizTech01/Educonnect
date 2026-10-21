@@ -17,8 +17,9 @@
             <a href="{% url 'portal:home' %}" class="brand-mark">
                 {% if institution.logo %}
                     {% url 'portal:institution-logo' institution.subdomain as institution_logo_url %}
-                    <img src="{{ institution_logo_url }}?v={{ institution.updated_at|date:'U' }}" alt="{{ institution.name }} logo" onerror="this.hidden=true;">
+                    <img src="{{ institution_logo_url }}?v={{ institution.updated_at|date:'U' }}" alt="{{ institution.name }} logo" onerror="this.hidden=true;this.nextElementSibling.hidden=false;">
                 {% endif %}
+                <span class="institution-logo-placeholder" aria-hidden="true"{% if institution.logo %} hidden{% endif %}>{{ institution.name|slice:":1"|upper }}</span>
                 <span>
                     <strong>{{ institution.name }}</strong>
                     <small>Institution portal</small>

@@ -1082,7 +1082,12 @@ def _finalize_course_payment(payment):
     Paystack callback into a 500 or roll back the student's entitlement.
     """
     with transaction.atomic():
-        payment = CoursePayment.objects.select_for_update().select_related("student", "course", "session").get(pk=payment.pk)
+        # ``session`` is nullable. PostgreSQL rejects ``FOR UPDATE`` when a
+        # ``select_related`` query turns that relationship into an outer join
+        # ("FOR UPDATE cannot be applied to the nullable side of an outer
+        # join"). Lock only the payment row; related objects are read after
+        # that lock has been acquired and are not themselves locked.
+        payment = CoursePayment.objects.select_for_update().get(pk=payment.pk)
         if not payment.is_paid:
             payment.status = CoursePayment.Status.PAID
             payment.save(update_fields=["status", "paid_at", "updated_at"])
