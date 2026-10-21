@@ -26,5 +26,5 @@ For the Docker/Caddy deployment, start by copying `.env.production.example` to
 
 - The application uses PostgreSQL through `DATABASE_URL` in production. Do not use SQLite on Render.
 - Class reminders are processed every minute by the `educonnect-course-reminders` cron service. Delivery uses private BCC batching and retries failed SMTP batches until the class begins.
-- Static files are served by WhiteNoise. The Render blueprint mounts a persistent disk at the application's media directory so uploaded course files, passport photos, and documents survive deploys. Back up this disk regularly; use object storage if you need multi-region or multi-instance media access.
+- Static files are served by WhiteNoise. The Render blueprint sets `DJANGO_MEDIA_ROOT` to its persistent disk so uploaded logos, course files, passport photos, and documents survive deploys. Back up this disk regularly; use object storage if you need multi-region or multi-instance media access. If a previously uploaded logo already returns 404 after a deploy, upload it again once: its database filename remains, but an upload lost from the old container filesystem cannot be recovered.
 - Browser alerts require HTTPS, browser permission, and an open EduConnect page. Email remains the reliable notification channel when the browser is closed.

@@ -1307,6 +1307,12 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
 
 
 class ProductionMediaConfigurationTests(TestCase):
+    def test_render_uses_its_persistent_disk_for_django_media(self):
+        render_file = (settings.BASE_DIR / "render.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("DJANGO_MEDIA_ROOT", render_file)
+        self.assertIn("/opt/render/project/src/media", render_file)
+
     def test_direct_media_urls_are_not_served_by_django_or_caddy(self):
         response = self.client.get("/media/private-document.pdf")
         caddyfile = (settings.BASE_DIR / "Caddyfile").read_text(encoding="utf-8")

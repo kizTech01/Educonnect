@@ -20,6 +20,10 @@ services:
         value: educonnect-gmcl.onrender.com
       - key: DJANGO_TIME_ZONE
         value: Africa/Lagos
+      # Docker runs the application from /app; store uploads on Render's
+      # persistent disk rather than the container filesystem.
+      - key: DJANGO_MEDIA_ROOT
+        value: /opt/render/project/src/media
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: BOOTSTRAP_ADMIN_USERNAME
