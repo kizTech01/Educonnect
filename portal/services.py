@@ -129,6 +129,9 @@ def _paystack_request(secret_key, path, payload=None):
     except json.JSONDecodeError as exc:
         raise ValueError("Paystack returned an unreadable response.") from exc
 
+    if not isinstance(parsed, dict):
+        raise ValueError("Paystack returned an unreadable response.")
+
     if not parsed.get("status"):
         raise ValueError(parsed.get("message") or "Paystack could not process the request.")
     return parsed
@@ -153,7 +156,7 @@ def initialize_paystack_transaction(*, secret_key, email, amount, reference, cal
 def verify_paystack_transaction(secret_key, reference):
     response = _paystack_request(secret_key, f"transaction/verify/{quote(reference)}")
     data = response.get("data") or {}
-    if not data:
+    if not isinstance(data, dict) or not data:
         raise ValueError("Paystack did not return transaction details.")
     return data
 

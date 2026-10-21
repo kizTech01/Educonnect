@@ -2255,6 +2255,81 @@ class DashboardAndCourseFlowTests(TestCase):
             student=self.student, course=self.paid_course, session=self.session,
         ).count(), 1)
 
+    @patch("portal.views._finalize_course_payment")
+    def test_course_payment_callback_does_not_500_when_paid_payment_repair_fails(
+        self, finalize_course_payment
+    ):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        finalize_course_payment.side_effect = RuntimeError("temporary setup failure")
+
+        self.client.force_login(self.student)
+        response = self.client.get(
+            reverse("portal:course-payment-callback", args=[payment.id]),
+            {"reference": payment.paystack_reference},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("portal:student-courses"))
+        finalize_course_payment.assert_called_once_with(payment)
+
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_does_not_500_when_finalization_fails(
+        self, verify_paystack_transaction
+    ):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        verify_paystack_transaction.return_value = {
+            "reference": payment.paystack_reference,
+            "status": "success",
+            "amount": 250000,
+            "currency": "NGN",
+        }
+
+        self.client.force_login(self.student)
+        with patch("portal.views._finalize_course_payment", side_effect=RuntimeError("temporary database failure")):
+            response = self.client.get(
+                reverse("portal:course-payment-callback", args=[payment.id]),
+                {"reference": payment.paystack_reference},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("portal:student-courses"))
+
+    @patch("portal.views.verify_paystack_transaction", side_effect=RuntimeError("gateway client failure"))
+    def test_course_payment_callback_does_not_500_when_verification_client_fails(
+        self, verify_paystack_transaction
+    ):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.get(
+            reverse("portal:course-payment-callback", args=[payment.id]),
+            {"reference": payment.paystack_reference},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("portal:student-courses"))
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, CoursePayment.Status.PENDING)
+
     @patch("portal.views.verify_paystack_transaction")
     def test_course_payment_callback_handles_grouping_when_course_lecturer_was_removed(
         self, verify_paystack_transaction

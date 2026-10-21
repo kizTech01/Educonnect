@@ -960,6 +960,8 @@ def _student_identifier(user):
 
 def _verification_matches_payment(verification, *, reference, amount, currency="NGN"):
     return (
+        isinstance(verification, dict)
+        and
         verification.get("reference") == reference
         and verification.get("status") == "success"
         and int(verification.get("amount") or 0) == paystack_amount_in_kobo(amount)
@@ -3808,7 +3810,15 @@ def course_payment_callback(request, payment_id):
     # An authenticated Paystack webhook may complete before the browser
     # returns. This retry is idempotent and repairs registration/access.
     if payment.is_paid:
-        _finalize_course_payment(payment)
+        try:
+            _finalize_course_payment(payment)
+        except Exception:
+            # Payment is already committed. Do not turn an optional repair
+            # attempt into a browser-facing 500; a later callback/webhook can
+            # retry it safely.
+            logger.exception("Could not repair paid course payment %s", payment.pk)
+            messages.warning(request, f"{payment.course.code} payment is confirmed; course registration is still being completed. Please refresh shortly.")
+            return redirect("portal:student-courses")
         messages.success(request, f"{payment.course.code} payment confirmed successfully.")
         return redirect(registered_courses_url)
     try:
@@ -3816,7 +3826,12 @@ def course_payment_callback(request, payment_id):
     except ValueError as exc:
         payment.refresh_from_db(fields=["status", "paid_at"])
         if _is_paystack_transport_error(exc) and payment.is_paid:
-            _finalize_course_payment(payment)
+            try:
+                _finalize_course_payment(payment)
+            except Exception:
+                logger.exception("Could not repair paid course payment %s", payment.pk)
+                messages.warning(request, f"{payment.course.code} payment is confirmed; course registration is still being completed. Please refresh shortly.")
+                return redirect("portal:student-courses")
             messages.success(request, f"{payment.course.code} payment confirmed successfully.")
             return redirect(registered_courses_url)
         elif _is_paystack_transport_error(exc):
@@ -3824,12 +3839,19 @@ def course_payment_callback(request, payment_id):
         else:
             messages.error(request, str(exc))
         return redirect("portal:student-courses")
+    except Exception:
+        # A gateway client failure must not leave the student on a 500 page.
+        # Keep the pending payment untouched so Paystack's webhook or a retry
+        # can still complete it.
+        logger.exception("Unexpected Paystack verification error for course payment %s", payment.pk)
+        messages.warning(request, f"{payment.course.code} payment is still being confirmed. Please refresh shortly.")
+        return redirect("portal:student-courses")
     if _verification_matches_payment(verification, reference=payment.paystack_reference, amount=payment.amount):
         try:
             _finalize_course_payment(payment)
-        except (IntegrityError, ValidationError):
+        except Exception:
             logger.exception("Could not finalize verified course payment %s", payment.pk)
-            messages.error(request, "Your payment was verified, but course registration could not be completed yet. Please contact support.")
+            messages.warning(request, "Your payment was verified, but course registration is still being completed. Please refresh shortly.")
             return redirect("portal:student-courses")
         messages.success(request, f"{payment.course.code} payment confirmed successfully.")
         return redirect(registered_courses_url)
