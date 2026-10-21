@@ -109,6 +109,11 @@ img {
     box-shadow: 0 5px 16px rgba(15, 23, 42, 0.16);
 }
 
+.brand-mark img[hidden],
+.sidebar-brand img[hidden] {
+    display: none;
+}
+
 .institution-logo-placeholder {
     display: grid;
     place-items: center;
