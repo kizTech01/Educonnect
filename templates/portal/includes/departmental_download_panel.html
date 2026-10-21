@@ -45,7 +45,7 @@
                     >
                         <div>
                             <strong>{{ payment.student.full_name }}</strong>
-                            <span>{{ payment.student.id_number }} | {{ payment.department.name }} | Level {{ payment.student.level }}</span>
+                            <span>{{ payment.student.id_number }} | {{ payment.department.name }} | Level {{ payment.student.level }} | Paid: {{ payment.association_display }}</span>
                         </div>
                         <span class="status-pill success">{{ payment.session.name }}</span>
                     </a>
@@ -71,7 +71,7 @@
                         <div class="detail-card">
                             <div>
                                 <strong>{{ payment.session.name }}</strong>
-                                <span>{{ payment.department.name }} | {{ payment.association_summary }} | {{ payment.total_amount }} | {{ payment.paid_at|date:"M d, Y H:i"|default:"-" }}</span>
+                                <span>{{ payment.department.name }} | Paid: {{ payment.association_display }} | {{ payment.total_amount }} | {{ payment.paid_at|date:"M d, Y H:i"|default:"-" }}</span>
                             </div>
                             <div class="message-list">
                                 {% for document in payment.documents.all %}

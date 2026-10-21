@@ -787,7 +787,18 @@ class DashboardAndCourseFlowTests(TestCase):
         lecturer_response = self.client.get(reverse("portal:lecturer-departmental"), {"payment": current_payment.id})
 
         self.assertContains(lecturer_response, past_session.name)
+        self.assertContains(lecturer_response, "Paid: Departmental Fee, MSSN")
         self.assertContains(lecturer_response, reverse("portal:download-departmental-document", args=[past_document.id]))
+        self.assertEqual(
+            self.client.get(reverse("portal:download-departmental-document", args=[past_document.id])).status_code,
+            200,
+        )
+        download_response = self.client.get(
+            reverse("portal:download-departmental-document", args=[current_document.id]),
+            {"download": "1"},
+        )
+        self.assertEqual(download_response.status_code, 200)
+        self.assertIn("attachment", download_response["Content-Disposition"])
 
     def test_paid_student_can_upload_additional_departmental_documents(self):
         from .models import DepartmentalPaymentDocument
@@ -1400,7 +1411,7 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertRedirects(response, reverse("portal:dashboard"), fetch_redirect_response=False)
         page = self.client.get(reverse("portal:hod-api-and-document"))
-        self.assertContains(page, "API and Document")
+        self.assertContains(page, "Payment Link and Document")
         self.assertContains(page, "Set Fee")
 
     def test_student_must_select_a_programme_when_the_department_offers_one(self):
@@ -1475,7 +1486,7 @@ class DashboardAndCourseFlowTests(TestCase):
         departmental_menu = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
         self.assertEqual(
             [item["label"] for item in departmental_menu["children"]],
-            ["API and Document", "Set Fee", "Students", "Lecturers", "Assign Exam Officer"],
+            ["Payment Link and Document", "Set Fee", "Students", "Lecturers", "Assign Exam Officer"],
         )
         self.assertIn("Timetable and Handbook", labels)
 

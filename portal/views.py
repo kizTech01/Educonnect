@@ -742,7 +742,7 @@ def sidebar_links(request):
             {
                 "label": "Departmental",
                 "children": [
-                    {"label": "API and Document", "url_name": "portal:hod-api-and-document"},
+                    {"label": "Payment Link and Document", "url_name": "portal:hod-api-and-document"},
                     {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
                     {"label": "Students", "url_name": "portal:hod-department-students"},
                     {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
@@ -791,7 +791,7 @@ def sidebar_links(request):
         if getattr(request.user, "headed_department", None) or request.user.has_role(User.Role.HOD):
             links.insert(1, {"label": "Programmes", "url_name": "portal:hod-programmes"})
             departmental_links[:] = [
-                {"label": "API and Document", "url_name": "portal:hod-api-and-document"},
+                {"label": "Payment Link and Document", "url_name": "portal:hod-api-and-document"},
                 {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
                 {"label": "Students", "url_name": "portal:hod-department-students"},
                 {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
@@ -1515,6 +1515,11 @@ def departmental_download_context(request, scope="admin", department=None):
     scoped_department = department
     if scoped_department is None and scope == "lecturer":
         scoped_department = request.user.department
+        # A lecturer without an assigned department has no departmental
+        # records to inspect.  Keeping this empty also ensures the student
+        # list and the document endpoint have the same access boundary.
+        if scoped_department is None:
+            payments = payments.none()
     if scoped_department is not None:
         payments = payments.filter(department=scoped_department)
     selected_payment = None
@@ -5172,7 +5177,7 @@ def hod_departmental_apis(request):
 
     return render(request, "portal/hod_departmental_apis.html", dashboard_context(
         request,
-        "API and Document",
+        "Payment Link and Document",
         department=department,
         gateway_form=form,
         course_gateway_form=course_gateway_form,
@@ -6097,9 +6102,13 @@ def departmental_student_ids_pdf(request):
         department = hod_department_for(request) if request.user.has_role(User.Role.HOD) else request.user.department
         if department:
             payments = payments.filter(department=department)
+        else:
+            payments = payments.none()
     department_id = request.GET.get("department")
     level = request.GET.get("level")
     if department_id:
+        # This remains an in-scope filter for lecturers/HODs, not a way to
+        # request another department's student identifiers.
         payments = payments.filter(department_id=department_id)
     if level:
         payments = payments.filter(student__level=level)

@@ -17,7 +17,7 @@
 4. Deploy. The web service applies migrations before deploy.
 5. Set `CORE_DOMAIN` to the bare platform hostname, for example `educonnect.example.edu.ng`, and redeploy. Django derives both the core host and its institution subdomains, plus their HTTPS CSRF origins, from this one value.
 6. Test password-reset, lecturer-message, and class-reminder emails. The blueprint includes the `educonnect-course-reminders` cron service, which runs `python manage.py send_due_course_reminders` every minute.
-7. Before accepting payments, have each department's HOD enter that department's Paystack public and secret keys in **Departmental → API and Document**. Gateways intentionally start unconfigured; no payment key is stored in the repository.
+7. Before accepting payments, have each department's HOD enter that department's Paystack public and secret keys in **Departmental → Payment Link and Document**. Gateways intentionally start unconfigured; no payment key is stored in the repository.
 
 For the Docker/Caddy deployment, start by copying `.env.production.example` to
 `.env.production`, then replace every placeholder before starting the stack.

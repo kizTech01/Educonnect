@@ -2100,6 +2100,17 @@ class DepartmentalPayment(TimeStampedModel):
     paystack_public_key_used = models.CharField(max_length=255, blank=True)
     paystack_secret_key_used = models.CharField(max_length=255, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def association_display(self):
+        """Return the associations paid for, including legacy payments.
+
+        New payments retain one item per association.  Older records only
+        retain the saved summary, so use it as a backwards-compatible
+        fallback instead of presenting a blank payment description to staff.
+        """
+        names = [item.association.name for item in self.items.all()]
+        return ", ".join(names) if names else self.association_summary or "Association details unavailable"
     # Payment confirmation and examination clearance are deliberately
     # independent. A paid student must still be reviewed by the department's
     # assigned Exam Officer before a card can be issued.
