@@ -1,6 +1,7 @@
 from contextvars import ContextVar
 from datetime import timedelta
 from decimal import Decimal
+import mimetypes
 from uuid import uuid4
 
 from django.contrib.auth.models import AbstractUser, UserManager
@@ -92,6 +93,14 @@ class Institution(models.Model):
     timezone = models.CharField(max_length=64, default="Africa/Lagos", blank=True)
     academic_configuration = models.JSONField(default=dict, blank=True)
     logo = models.FileField(upload_to=institution_logo_upload_path, blank=True)
+    # Keep the authoritative copy with the tenant record.  Render's mounted
+    # media disk remains useful for uploaded files, but older files can be
+    # absent after a disk change or an earlier ephemeral deployment.  A logo
+    # is small and essential to the portal identity, so retaining its bytes in
+    # PostgreSQL lets the portal render the correct logo independently of the
+    # filesystem.
+    logo_data = models.BinaryField(blank=True, default=b"", editable=False)
+    logo_content_type = models.CharField(max_length=100, blank=True, editable=False)
     subdomain = models.SlugField(max_length=63, unique=True)
     custom_domain = models.CharField(max_length=253, blank=True, unique=True, null=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
@@ -112,6 +121,40 @@ class Institution(models.Model):
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        """Persist a recoverable copy whenever an institution logo is saved."""
+        previous = None
+        if self.pk:
+            previous = type(self).objects.filter(pk=self.pk).values(
+                "logo", "logo_data"
+            ).first()
+        should_snapshot_logo = bool(self.logo) and (
+            previous is None
+            or previous["logo"] != self.logo.name
+            or not previous["logo_data"]
+        )
+
+        super().save(*args, **kwargs)
+
+        # FileField stores a newly uploaded file during super().save().  Read
+        # it afterwards, then update directly to avoid recursively saving the
+        # model.  A storage failure must not reject a valid institution update;
+        # the logo endpoint can still serve its existing database copy.
+        if should_snapshot_logo:
+            try:
+                with self.logo.storage.open(self.logo.name, "rb") as logo_file:
+                    logo_data = logo_file.read()
+            except OSError:
+                return
+            if logo_data:
+                content_type = mimetypes.guess_type(self.logo.name)[0] or "application/octet-stream"
+                type(self).objects.filter(pk=self.pk).update(
+                    logo_data=logo_data,
+                    logo_content_type=content_type,
+                )
+                self.logo_data = logo_data
+                self.logo_content_type = content_type
 
 
 class GlobalPolicy(models.Model):

@@ -387,7 +387,11 @@ def _exam_card_verification_limited(request):
 
 
 def institution_logo(request, institution_subdomain):
-    """Serve a non-cacheable logo belonging only to the active institution."""
+    """Serve a non-cacheable logo belonging only to the active institution.
+
+    The database copy is preferred so a logo remains visible even when an
+    earlier Render deployment stored its media file on an ephemeral disk.
+    """
     institution = getattr(request, "institution", None)
     if institution is None and request.user.is_authenticated and not request.user.is_superuser:
         institution = request.user.institution
@@ -397,11 +401,17 @@ def institution_logo(request, institution_subdomain):
         or institution.subdomain.casefold() != institution_subdomain.casefold()
     ):
         raise Http404("Institution logo not found.")
-    try:
-        logo_file = institution.logo.open("rb")
-    except OSError as exc:
-        raise Http404("Institution logo file not found.") from exc
-    response = FileResponse(logo_file, as_attachment=False)
+    if institution.logo_data:
+        response = HttpResponse(
+            bytes(institution.logo_data),
+            content_type=institution.logo_content_type or "application/octet-stream",
+        )
+    else:
+        try:
+            logo_file = institution.logo.open("rb")
+        except OSError as exc:
+            raise Http404("Institution logo file not found.") from exc
+        response = FileResponse(logo_file, as_attachment=False)
     # The URL has a tenant segment and a version query string, but do not let
     # a shared intermediary cache substitute any institution's branding.
     response["Cache-Control"] = "private, no-store, max-age=0"
@@ -1097,10 +1107,12 @@ def _finalize_course_payment(payment):
             sync_material_access_for_registration(registration)
         _assign_student_to_existing_course_group(payment.student, payment.course, payment.session)
         _sync_course_material_access_for_paid_course(payment.student, payment.course)
-    except (IntegrityError, ValidationError):
+    except Exception:
         # The payment and registration have already committed. Keep the
-        # exception (without credentials or student details) in server logs so
-        # the optional course setup can be repaired and retried safely.
+        # exception (without credentials or student details) in server logs.
+        # Course groups and material-access records are auxiliary data: an
+        # unexpected legacy-data error there must never delay a student's paid
+        # registration or access to the course file.
         logger.exception("Could not complete auxiliary setup for course payment %s", payment.pk)
 
 

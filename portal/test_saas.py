@@ -160,6 +160,24 @@ class MultiInstitutionSaaSTests(TestCase):
             404,
         )
 
+    def test_logo_endpoint_uses_database_copy_when_the_media_file_is_missing(self):
+        institution = self.make_institution("FIRST", "first")
+        logo_bytes = b"database-logo"
+        institution.logo.save(
+            "first.png", SimpleUploadedFile("first.png", logo_bytes), save=True
+        )
+        institution.refresh_from_db()
+        self.assertEqual(institution.logo_data, logo_bytes)
+        institution.logo.storage.delete(institution.logo.name)
+
+        response = self.client.get(
+            reverse("portal:institution-logo", args=[institution.subdomain]),
+            HTTP_HOST=f"first.{settings.CORE_DOMAIN}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, logo_bytes)
+
     def test_tenant_without_a_logo_does_not_show_a_second_brand_mark(self):
         institution = self.make_institution("FIRST", "first")
 

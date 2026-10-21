@@ -2588,6 +2588,42 @@ class DashboardAndCourseFlowTests(TestCase):
             access = MaterialAccess.objects.get(material=material, student=self.student)
             self.assertEqual(access.status, MaterialAccess.Status.PAID)
 
+    @patch("portal.views._assign_student_to_existing_course_group", side_effect=RuntimeError("legacy group failure"))
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_registers_immediately_when_auxiliary_setup_fails(
+        self, verify_paystack_transaction, assign_student_to_existing_course_group
+    ):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        verify_paystack_transaction.return_value = {
+            "reference": payment.paystack_reference,
+            "status": "success",
+            "amount": 250000,
+            "currency": "NGN",
+        }
+
+        self.client.force_login(self.student)
+        response = self.client.get(
+            reverse("portal:course-payment-callback", args=[payment.id]),
+            {"reference": payment.paystack_reference},
+        )
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, f'{reverse("portal:student-courses")}#registered-courses')
+        self.assertEqual(payment.status, CoursePayment.Status.PAID)
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=self.student,
+            course=self.paid_course,
+            session=self.session,
+            is_active=True,
+        ).exists())
+
     def test_hod_departmental_students_show_only_paid_departmental_records(self):
         self.department.head_of_department = self.lecturer
         self.department.save(update_fields=["head_of_department", "updated_at"])
