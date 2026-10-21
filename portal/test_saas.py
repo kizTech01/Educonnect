@@ -160,16 +160,16 @@ class MultiInstitutionSaaSTests(TestCase):
             404,
         )
 
-    def test_tenant_without_a_logo_gets_a_neutral_placeholder_not_platform_branding(self):
+    def test_tenant_without_a_logo_does_not_show_a_second_brand_mark(self):
         institution = self.make_institution("FIRST", "first")
 
         response = self.client.get("/", HTTP_HOST=f"first.{settings.CORE_DOMAIN}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'class="institution-logo-placeholder"')
+        self.assertNotContains(response, 'class="institution-logo-placeholder"')
         self.assertNotContains(response, "kiz-tech-logo.png")
 
-    def test_editing_an_institution_preserves_its_creation_time_logo(self):
+    def test_editing_an_institution_can_replace_its_single_logo(self):
         institution = self.make_institution("FIRST", "first")
         institution.logo.save("first.png", SimpleUploadedFile("first.png", b"original-logo"), save=True)
         original_logo_name = institution.logo.name
@@ -189,10 +189,11 @@ class MultiInstitutionSaaSTests(TestCase):
         }, files={"logo": SimpleUploadedFile("replacement.png", b"replacement-logo")}, instance=institution)
 
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertNotIn("logo", form.fields)
+        self.assertIn("logo", form.fields)
         form.save()
         institution.refresh_from_db()
-        self.assertEqual(institution.logo.name, original_logo_name)
+        self.assertNotEqual(institution.logo.name, original_logo_name)
+        self.assertTrue(institution.logo.name.startswith("institutions/first/"))
 
     def test_institutions_can_use_the_same_session_and_gateway_names(self):
         first = self.make_institution("FIRST", "first")
@@ -702,6 +703,7 @@ class ScreeningIntegrationTests(TestCase):
 
     def test_super_admin_can_edit_an_institution_and_sync_its_admin_login(self):
         self.client.force_login(self.super_admin)
+        original_logo_name = self.institution.logo.name
 
         response = self.client.post(
             reverse("portal:super-admin-institution-edit", args=[self.institution.id]),
@@ -714,6 +716,9 @@ class ScreeningIntegrationTests(TestCase):
                 "subdomain": "meridian-tech",
                 "custom_domain": "",
                 "status": Institution.Status.ACTIVE,
+                "logo": SimpleUploadedFile(
+                    "replacement-logo.png", b"replacement-logo", content_type="image/png",
+                ),
             },
         )
 
@@ -722,6 +727,8 @@ class ScreeningIntegrationTests(TestCase):
         self.institution_admin.refresh_from_db()
         self.assertEqual(self.institution.name, "Meridian Technical University")
         self.assertEqual(self.institution.subdomain, "meridian-tech")
+        self.assertNotEqual(self.institution.logo.name, original_logo_name)
+        self.assertTrue(self.institution.logo.name.startswith("institutions/meridian-tech/"))
         self.assertEqual(self.institution_admin.email, "office@meridian.example.test")
         self.assertEqual(self.institution_admin.username, "office@meridian.example.test")
 

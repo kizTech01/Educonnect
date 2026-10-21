@@ -41,6 +41,7 @@ from .models import (
     DepartmentalFee,
     DepartmentalPayment,
     DepartmentalPaymentDocument,
+    DepartmentalPaymentItem,
     Handbook,
     InstitutionProfile,
     Institution,
@@ -105,6 +106,13 @@ class InstitutionalRBACTests(TestCase):
             student=student, department=self.department, session=session,
             status=DepartmentalPayment.Status.PAID, total_amount=Decimal("4000.00"),
         )
+        association, _ = DepartmentalAssociation.objects.get_or_create(
+            code="exam_card_fee",
+            defaults={"name": "Examination Card Fee"},
+        )
+        DepartmentalPaymentItem.objects.create(
+            payment=payment, association=association, amount=Decimal("4000.00"),
+        )
         other_department = Department.objects.create(name="Mathematics", code="MTH")
         other_student = User.objects.create_user(
             username="other-exam-card-student", password="pass1234", role=User.Role.STUDENT,
@@ -128,6 +136,8 @@ class InstitutionalRBACTests(TestCase):
         self.assertContains(page, student.full_name)
         self.assertNotContains(page, other_student.full_name)
         self.assertContains(page, reverse("portal:download-departmental-document", args=[document.id]))
+        self.assertContains(page, "Examination Card Fee")
+        self.assertContains(page, "Total: 4000.00")
 
         self.assertEqual(
             self.client.post(
@@ -742,6 +752,8 @@ class DashboardAndCourseFlowTests(TestCase):
             status=DepartmentalPayment.Status.PAID,
             total_amount=Decimal("4000.00"),
             association_summary="Departmental Fee, ACF",
+            exam_card_approval_status=DepartmentalPayment.ExamCardApprovalStatus.REJECTED,
+            exam_card_rejection_reason="Upload your outstanding evidence.",
         )
 
         self.client.force_login(self.student)
@@ -763,6 +775,11 @@ class DashboardAndCourseFlowTests(TestCase):
                 category=DepartmentalPaymentDocument.Category.ADDITIONAL,
             ).count(),
             2,
+        )
+        payment.refresh_from_db()
+        self.assertEqual(
+            payment.exam_card_approval_status,
+            DepartmentalPayment.ExamCardApprovalStatus.PENDING,
         )
 
     def test_admin_cannot_create_a_departmental_association(self):
@@ -874,7 +891,7 @@ class DashboardAndCourseFlowTests(TestCase):
             ).exists()
         )
 
-    def test_student_sees_eligible_paid_courses_without_a_search(self):
+    def test_student_must_filter_before_eligible_paid_courses_are_shown(self):
         eligible_paid_course = Course.objects.create(
             department=self.department,
             lecturer=self.lecturer,
@@ -888,8 +905,15 @@ class DashboardAndCourseFlowTests(TestCase):
         self.client.force_login(self.student)
         response = self.client.get(reverse("portal:student-courses"))
 
-        self.assertContains(response, eligible_paid_course.code)
-        self.assertContains(response, 'name="action" value="pay-course"', html=False)
+        self.assertNotContains(response, eligible_paid_course.code)
+        self.assertFalse(response.context["catalog_is_filtered"])
+
+        filtered_response = self.client.get(
+            reverse("portal:student-courses"), {"search": eligible_paid_course.code},
+        )
+        self.assertContains(filtered_response, eligible_paid_course.code)
+        self.assertTrue(filtered_response.context["catalog_is_filtered"])
+        self.assertContains(filtered_response, 'name="action" value="pay-course"', html=False)
 
     def test_student_profile_and_course_filter_show_only_their_programme(self):
         assigned_programme = Programme.objects.create(
@@ -1266,6 +1290,23 @@ class DashboardAndCourseFlowTests(TestCase):
         programme = Programme.objects.get(code="BSC-CS")
         self.assertEqual(programme.department, self.department)
         self.assertTrue(AuditLog.objects.filter(action="programme_created", user=self.admin).exists())
+
+        imported = self.client.post(
+            reverse("portal:admin-programmes"),
+            {
+                "action": "upload-programmes",
+                "import-faculty": self.department.faculty_id,
+                "import-department": self.department.id,
+                "import-file": SimpleUploadedFile(
+                    "programmes.csv",
+                    b"programme_code,programme_name,award,duration_years,is_active\nBSC-SE,Software Engineering,BSc,4,true\n",
+                    content_type="text/csv",
+                ),
+            },
+        )
+        self.assertRedirects(imported, reverse("portal:admin-programmes"))
+        self.assertTrue(Programme.objects.filter(code="BSC-SE", department=self.department).exists())
+        self.assertTrue(AuditLog.objects.filter(action="programmes_imported", user=self.admin).exists())
 
         institution = Institution.objects.create(
             name="Programme University",
@@ -2255,6 +2296,30 @@ class DashboardAndCourseFlowTests(TestCase):
             student=self.student, course=self.paid_course, session=self.session,
         ).count(), 1)
 
+    def test_paid_course_retry_repairs_missing_registration_and_file_access(self):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PAID,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+
+        self.client.force_login(self.student)
+        response = self.client.post(
+            reverse("portal:student-courses"),
+            {"action": "pay-course", "course_id": self.paid_course.id},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=self.student, course=self.paid_course, session=self.session, is_active=True,
+        ).exists())
+        download = self.client.get(reverse("portal:download-course-file", args=[self.paid_course.id]))
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(b"".join(download.streaming_content), b"paid course file")
+
     @patch("portal.views._finalize_course_payment")
     def test_course_payment_callback_does_not_500_when_paid_payment_repair_fails(
         self, finalize_course_payment
@@ -2863,7 +2928,7 @@ class DashboardAndCourseFlowTests(TestCase):
             ).exists()
         )
 
-    def test_student_course_catalogue_is_available_without_a_search(self):
+    def test_student_course_catalogue_requires_a_filter(self):
         unassigned_course = Course.objects.create(
             department=self.department,
             code="CSC303",
@@ -2873,9 +2938,12 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.client.force_login(self.student)
         student_response = self.client.get(reverse("portal:student-courses"))
-        self.assertGreater(student_response.context["available_courses"].count(), 0)
-        self.assertContains(student_response, self.free_course.code)
+        self.assertEqual(student_response.context["available_courses"].count(), 0)
+        self.assertFalse(student_response.context["catalog_is_filtered"])
+        self.assertContains(student_response, "Use at least one filter above")
+        self.assertNotContains(student_response, self.free_course.code)
         student_filtered_response = self.client.get(reverse("portal:student-courses"), {"search": self.free_course.code})
+        self.assertTrue(student_filtered_response.context["catalog_is_filtered"])
         self.assertContains(student_filtered_response, self.free_course.code)
 
         self.client.force_login(self.lecturer)

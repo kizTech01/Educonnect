@@ -408,6 +408,26 @@ def institution_logo(request, institution_subdomain):
     return response
 
 
+def _download_file_response(uploaded_file, request):
+    """Return an inline or attachment response without exposing storage errors.
+
+    Every document download uses this helper so desktop and mobile browsers get
+    the same filename/disposition behaviour and a missing storage object is a
+    normal 404 rather than a server error.
+    """
+    if not uploaded_file or not uploaded_file.name:
+        raise Http404("Document not found.")
+    try:
+        source = uploaded_file.open("rb")
+    except (OSError, ValueError) as exc:
+        raise Http404("Document file not found.") from exc
+    return FileResponse(
+        source,
+        as_attachment=request.GET.get("download") == "1",
+        filename=uploaded_file.name.rsplit("/", 1)[-1],
+    )
+
+
 def login_form_for_role(role, data=None):
     kwargs = {"initial": {"role": role}}
     if data is not None:
@@ -2129,7 +2149,18 @@ def super_admin_institution_edit(request, institution_id):
         form = InstitutionUpdateForm(request.POST, request.FILES, instance=institution)
         if form.is_valid():
             with transaction.atomic():
+                previous_logo_name = institution.logo.name if institution.logo else ""
+                previous_logo_storage = institution.logo.storage if previous_logo_name else None
                 institution = form.save()
+                if (
+                    previous_logo_name
+                    and previous_logo_name != institution.logo.name
+                ):
+                    # The institution record has exactly one logo. Remove a
+                    # superseded upload only after the replacement commits.
+                    transaction.on_commit(
+                        lambda storage=previous_logo_storage, name=previous_logo_name: storage.delete(name)
+                    )
                 administrator = (
                     User.all_objects.filter(
                         institution=institution,
@@ -3567,30 +3598,28 @@ def student_courses(request):
     current_session = current_departmental_session()
     filter_form = StudentCourseFilterForm(request.GET or None, student=request.user)
 
-    available_courses = _student_course_catalog_queryset(request.user)
-    # A bound but invalid query (such as a different department ID) must not
-    # fall back to the full catalogue. It remains empty and displays the form
-    # error, preserving the student's department and curriculum boundaries.
-    # This queryset is already restricted to the student's curriculum,
-    # department and level. Show it immediately so a student can discover,
-    # pay for, and register an eligible paid course without first guessing a
-    # search term.
-    catalog_is_filtered = True
+    # Do not expose a full course catalogue on first visit. A student must
+    # choose a filter (or enter a search term) before course rows are shown.
+    available_courses = Course.objects.none()
+    catalog_is_filtered = False
     if filter_form.is_bound:
         if filter_form.is_valid():
             department = filter_form.cleaned_data.get("department")
             programme = filter_form.cleaned_data.get("programme")
             level = filter_form.cleaned_data.get("level")
             search = filter_form.cleaned_data.get("search")
-            if department:
-                available_courses = available_courses.filter(department=department)
-            if programme:
-                available_courses = available_courses.filter(
-                    Q(programmes=programme) | Q(programmes__isnull=True)
-                )
-            if level:
-                available_courses = available_courses.filter(curriculum_level=level)
-            available_courses = _search_filter(available_courses, search, "code", "title", "department__name", "lecturer__username")
+            if any((department, programme, level, search)):
+                catalog_is_filtered = True
+                available_courses = _student_course_catalog_queryset(request.user)
+                if department:
+                    available_courses = available_courses.filter(department=department)
+                if programme:
+                    available_courses = available_courses.filter(
+                        Q(programmes=programme) | Q(programmes__isnull=True)
+                    )
+                if level:
+                    available_courses = available_courses.filter(curriculum_level=level)
+                available_courses = _search_filter(available_courses, search, "code", "title", "department__name", "lecturer__username")
         else:
             # A forged programme/department value must never reveal the
             # default catalogue when the form itself is invalid.
@@ -3657,7 +3686,16 @@ def student_courses(request):
                         paystack_secret_key_used=gateway.paystack_secret_key,
                     )
                 if payment.is_paid:
-                    messages.info(request, f"{course.code} has already been paid.")
+                    # A webhook may have recorded the payment while a browser
+                    # callback was interrupted. Repair its registration before
+                    # sending the student back to their registered courses.
+                    try:
+                        _finalize_course_payment(payment)
+                    except Exception:
+                        logger.exception("Could not repair paid course payment %s", payment.pk)
+                        messages.warning(request, f"{course.code} payment is confirmed; registration is still being completed. Please refresh shortly.")
+                        return redirect(_redirect_with_query(request, "portal:student-courses"))
+                    messages.success(request, f"{course.code} payment is confirmed and the course has been registered.")
                     return redirect(_redirect_with_query(request, "portal:student-courses"))
                 payment.amount = course.amount
                 payment.status = CoursePayment.Status.PENDING
@@ -5374,10 +5412,12 @@ def admin_programmes(request):
         raise PermissionDenied("An institution context is required to manage programmes.")
 
     form = ProgrammeForm(prefix="programme", institution=institution)
-    import_form = ProgrammeImportForm(institution=institution)
+    import_form = ProgrammeImportForm(prefix="import", institution=institution)
     if request.method == "POST":
         if request.POST.get("action") == "upload-programmes":
-            import_form = ProgrammeImportForm(request.POST, request.FILES, institution=institution)
+            import_form = ProgrammeImportForm(
+                request.POST, request.FILES, prefix="import", institution=institution
+            )
             if import_form.is_valid():
                 department = import_form.cleaned_data["department"]
                 if department.institution_id != institution.id:
@@ -5750,7 +5790,9 @@ def exam_card_approvals(request):
     payments = DepartmentalPayment.objects.filter(
         department_id__in=department_ids,
         status=DepartmentalPayment.Status.PAID,
-    ).select_related("student", "department", "session", "exam_card_approved_by").prefetch_related("documents")
+    ).select_related("student", "department", "session", "exam_card_approved_by").prefetch_related(
+        "documents", "items__association"
+    )
     selected_status = request.GET.get("status", DepartmentalPayment.ExamCardApprovalStatus.PENDING)
     valid_statuses = set(DepartmentalPayment.ExamCardApprovalStatus.values)
     if selected_status not in valid_statuses:
@@ -5938,7 +5980,7 @@ def download_departmental_document(request, document_id):
             raise PermissionDenied
     elif request.user.department_id != document.payment.department_id:
         raise PermissionDenied
-    return FileResponse(document.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=document.file.name.rsplit("/", 1)[-1])
+    return _download_file_response(document.file, request)
 
 
 @role_required(User.Role.STUDENT, User.Role.ADMIN)
@@ -6085,7 +6127,7 @@ def download_course_file(request, course_id):
             if not payment:
                 messages.error(request, "Payment is required before downloading this course file.")
                 return redirect("portal:student-courses")
-    return FileResponse(course.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=course.file.name.rsplit("/", 1)[-1])
+    return _download_file_response(course.file, request)
 
 
 @role_required(User.Role.LECTURER)
@@ -6122,7 +6164,7 @@ def lecturer_paid_course_students_pdf(request, course_id):
 def download_material(request, material_id):
     material = get_object_or_404(CourseMaterial.objects.select_related("course", "lecturer"), pk=material_id)
     if request.user.is_superuser or request.user.role == User.Role.ADMIN or request.user.has_role(User.Role.LECTURER):
-        return FileResponse(material.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=material.file.name.rsplit("/", 1)[-1])
+        return _download_file_response(material.file, request)
     if request.user.role != User.Role.STUDENT:
         raise PermissionDenied
     registration = StudentCourseRegistration.objects.filter(
@@ -6162,7 +6204,7 @@ def download_material(request, material_id):
             student=request.user,
             defaults={"status": MaterialAccess.Status.AVAILABLE},
         )
-    return FileResponse(material.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=material.file.name.rsplit("/", 1)[-1])
+    return _download_file_response(material.file, request)
 
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
@@ -6178,11 +6220,7 @@ def download_message_attachment(request, notification_id):
             raise PermissionDenied
     elif request.user.has_role(User.Role.LECTURER) and notification.sender_id != request.user.id:
         raise PermissionDenied
-    return FileResponse(
-        notification.attachment.open("rb"),
-        as_attachment=request.GET.get("download") == "1",
-        filename=notification.attachment.name.rsplit("/", 1)[-1],
-    )
+    return _download_file_response(notification.attachment, request)
 
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
@@ -6199,15 +6237,13 @@ def download_notification_attachment(request, attachment_id):
             raise PermissionDenied
     elif request.user.has_role(User.Role.LECTURER) and notification.sender_id != request.user.id:
         raise PermissionDenied
-    return FileResponse(
-        attachment.file.open("rb"),
-        as_attachment=request.GET.get("download") == "1",
-        filename=attachment.file.name.rsplit("/", 1)[-1],
-    )
+    return _download_file_response(attachment.file, request)
 
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
 def download_document(request, kind, document_id):
+    if kind not in {"timetable", "handbook"}:
+        raise Http404("Unknown document type.")
     model = Timetable if kind == "timetable" else Handbook
     document = get_object_or_404(model.objects.select_related("department", "programme"), pk=document_id)
     if request.user.role == User.Role.STUDENT:
@@ -6217,4 +6253,4 @@ def download_document(request, kind, document_id):
             raise PermissionDenied
     if not document.file:
         raise Http404
-    return FileResponse(document.file.open("rb"), as_attachment=request.GET.get("download") == "1", filename=document.file.name.rsplit("/", 1)[-1])
+    return _download_file_response(document.file, request)

@@ -271,17 +271,19 @@ class InstitutionCreateForm(StyledModelForm):
 
 
 class InstitutionUpdateForm(InstitutionCreateForm):
-    """Edit institution details without replacing its creation-time logo."""
+    """Edit institution details, including its one authoritative logo."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # An institution's uploaded logo is its stable portal identity. Keep
-        # replacements out of the edit form so unrelated profile updates can
-        # never replace or clear the file after deployment.
-        self.fields.pop("logo", None)
+        # Creation requires a logo. On an update a Super Admin may replace
+        # the existing institution logo, but does not have to upload it again.
+        self.fields["logo"].required = False
+        self.fields["logo"].widget = forms.FileInput(attrs={
+            "accept": ".jpg,.jpeg,.png,.svg,.webp,image/jpeg,image/png,image/svg+xml,image/webp"
+        })
 
     def clean(self):
-        # Deliberately bypass InstitutionCreateForm.clean(): that validation
+        # Deliberately bypass InstitutionCreateForm.clean(): that form
         # requires a logo only while creating an institution.
         return forms.ModelForm.clean(self)
 

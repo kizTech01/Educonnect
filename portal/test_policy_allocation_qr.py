@@ -287,6 +287,7 @@ class ExamCardVerificationTests(TestCase):
         self.assertNotEqual(token, str(self.payment.pk))
         response = self.client.get(reverse("portal:verify-exam-card", args=[token]))
         self.assertContains(response, "Exam Card Verified")
+        self.assertContains(response, self.payment.exam_card_semester)
         self.assertNotContains(response, "Payment status")
 
         replacement = self.payment.issue_exam_card_token()

@@ -111,6 +111,14 @@
                         <td>
                             <span class="status-pill success">Paid</span><br>
                             <span class="muted-note">{{ payment.paid_at|date:"M d, Y H:i" }}</span>
+                            <div class="message-list">
+                                {% for item in payment.items.all %}
+                                    <div class="muted-note">{{ item.association.name }}: {{ item.amount }}</div>
+                                {% empty %}
+                                    <div class="muted-note">{{ payment.association_summary|default:"Association details unavailable" }}: {{ payment.total_amount }}</div>
+                                {% endfor %}
+                                <div><strong>Total: {{ payment.total_amount }}</strong></div>
+                            </div>
                         </td>
                         <td>
                             {% for document in payment.documents.all %}
@@ -150,6 +158,13 @@
                             {% else %}
                                 <span class="status-pill danger">Rejected</span>
                                 <p class="muted-note">{{ payment.exam_card_rejection_reason }}</p>
+                                <p class="muted-note">The student can upload the requested evidence, which returns this request to Pending Approval. You may also approve it after reviewing the corrected submission.</p>
+                                <form method="post" class="compact-course-actions">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="payment_id" value="{{ payment.id }}">
+                                    <input type="hidden" name="action" value="approve">
+                                    <button class="primary-btn small" type="submit">Approve after review</button>
+                                </form>
                                 <span class="muted-note">{{ payment.exam_card_approved_by.full_name|default:"-" }} · {{ payment.exam_card_approved_at|date:"M d, Y H:i" }}</span>
                             {% endif %}
                         </td>

@@ -96,6 +96,9 @@
     <div class="panel-head">
         <h2>Available Courses</h2>
     </div>
+    {% if not catalog_is_filtered %}
+        <p class="muted-note">Use at least one filter above to display courses available to your programme.</p>
+    {% else %}
     <div class="table-wrap">
         <table>
             <thead>
@@ -169,5 +172,6 @@
             </tbody>
         </table>
     </div>
+    {% endif %}
 </section>
 {% endblock %}

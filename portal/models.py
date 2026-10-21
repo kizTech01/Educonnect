@@ -2084,6 +2084,10 @@ class DepartmentalPayment(TimeStampedModel):
     exam_card_issued_at = models.DateTimeField(null=True, blank=True)
     exam_card_version = models.PositiveIntegerField(default=0)
     exam_card_revoked_at = models.DateTimeField(null=True, blank=True)
+    # Preserve the semester that was current when this particular card was
+    # issued. The QR verification page must show the same clearance period as
+    # the printed card even after the calendar changes.
+    exam_card_semester = models.CharField(max_length=20, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -2108,8 +2112,12 @@ class DepartmentalPayment(TimeStampedModel):
 
     @property
     def semester_label(self):
-        reference_time = self.paid_at or self.created_at or timezone.now()
-        local_time = timezone.localtime(reference_time)
+        return self.exam_card_semester or self.current_semester_label()
+
+    @staticmethod
+    def current_semester_label():
+        """Return the semester in progress when a card is issued."""
+        local_time = timezone.localtime(timezone.now())
         return "First Semester" if local_time.month <= 6 else "Second Semester"
 
     def __str__(self):
@@ -2124,10 +2132,11 @@ class DepartmentalPayment(TimeStampedModel):
         token = secrets.token_urlsafe(32)
         self.exam_card_token_hash = self.exam_card_token_hash_for(token)
         self.exam_card_issued_at = timezone.now()
+        self.exam_card_semester = self.current_semester_label()
         self.exam_card_version += 1
         self.exam_card_revoked_at = None
         self.save(update_fields=[
-            "exam_card_token_hash", "exam_card_issued_at", "exam_card_version",
+            "exam_card_token_hash", "exam_card_issued_at", "exam_card_semester", "exam_card_version",
             "exam_card_revoked_at", "updated_at",
         ])
         return token
