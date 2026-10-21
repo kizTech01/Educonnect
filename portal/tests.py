@@ -914,6 +914,70 @@ class DashboardAndCourseFlowTests(TestCase):
             404,
         )
 
+    def test_file_actions_use_active_roles_and_registration_session(self):
+        """Role assignments and active registrations must authorize their own files."""
+        prior_session = AcademicSession.objects.create(name="2025/2026", is_current=False)
+        StudentCourseRegistration.objects.create(
+            student=self.student,
+            course=self.free_course,
+            session=prior_session,
+            registered_by=self.student,
+            is_active=True,
+        )
+
+        self.client.force_login(self.student)
+        course_url = reverse("portal:download-course-file", args=[self.free_course.id])
+        view_response = self.client.get(course_url)
+        download_response = self.client.get(course_url, {"download": "1"})
+        self.assertEqual(view_response.status_code, 200)
+        self.assertTrue(view_response["Content-Disposition"].startswith("inline"))
+        self.assertEqual(b"".join(view_response.streaming_content), b"free course file")
+        self.assertEqual(download_response.status_code, 200)
+        self.assertTrue(download_response["Content-Disposition"].startswith("attachment"))
+        self.assertEqual(b"".join(download_response.streaming_content), b"free course file")
+
+        another_student = User.objects.create_user(
+            username="departmental-document-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=self.department,
+        )
+        assigned_department = Department.objects.create(name="Physics", code="PHY")
+        payment = DepartmentalPayment.objects.create(
+            student=another_student,
+            department=assigned_department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+        )
+        document = DepartmentalPaymentDocument.objects.create(
+            payment=payment,
+            category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="Lecturer review copy",
+            file=SimpleUploadedFile("lecturer-review.pdf", b"departmental file", content_type="application/pdf"),
+        )
+        RoleAssignment.objects.create(
+            user=self.student,
+            role=User.Role.LECTURER,
+            department=assigned_department,
+            is_active=True,
+        )
+
+        document_url = reverse("portal:download-departmental-document", args=[document.id])
+        lecturer_page = self.client.get(
+            reverse("portal:lecturer-departmental"), {"payment": payment.id}
+        )
+        self.assertEqual(lecturer_page.status_code, 200)
+        self.assertContains(lecturer_page, document_url)
+        view_response = self.client.get(document_url)
+        download_response = self.client.get(document_url, {"download": "1"})
+        self.assertEqual(view_response.status_code, 200)
+        self.assertTrue(view_response["Content-Disposition"].startswith("inline"))
+        self.assertEqual(b"".join(view_response.streaming_content), b"departmental file")
+        self.assertEqual(download_response.status_code, 200)
+        self.assertTrue(download_response["Content-Disposition"].startswith("attachment"))
+        self.assertEqual(b"".join(download_response.streaming_content), b"departmental file")
+
     def test_paid_student_can_upload_additional_departmental_documents(self):
         from .models import DepartmentalPaymentDocument
 

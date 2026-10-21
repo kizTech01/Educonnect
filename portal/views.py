@@ -1516,6 +1516,33 @@ def _assign_student_to_existing_course_group(student, course, session):
     CourseStudentGroupMembership.objects.get_or_create(group=target_group, student=student)
 
 
+def staff_department_ids(user):
+    """Return every department a lecturer or HOD may access.
+
+    Older accounts store one department on ``User`` while newer multi-role
+    accounts store the staff appointment on ``RoleAssignment``. Protected
+    download endpoints and the pages that link to them must use the same
+    source of truth, otherwise a visible View/Download button can lead to a
+    403 response.
+    """
+    department_ids = set(
+        RoleAssignment.objects.filter(
+            user=user,
+            role__in=(User.Role.LECTURER, User.Role.HOD),
+            is_active=True,
+            department__isnull=False,
+        ).values_list("department_id", flat=True)
+    )
+    if user.department_id and user.role in {User.Role.LECTURER, User.Role.HOD}:
+        department_ids.add(user.department_id)
+    # Departments that still use the legacy ``head_of_department`` field are
+    # valid HOD assignments too, even before a RoleAssignment is backfilled.
+    department_ids.update(
+        Department.objects.filter(head_of_department=user).values_list("id", flat=True)
+    )
+    return department_ids
+
+
 def departmental_download_context(request, scope="admin", department=None):
     search_form = DepartmentalSearchForm(request.GET or None)
     current_session = current_departmental_session()
@@ -1526,13 +1553,16 @@ def departmental_download_context(request, scope="admin", department=None):
     # hold the appointment through RoleAssignment, so their department can be
     # supplied explicitly instead of relying on user.department.
     scoped_department = department
+    staff_department_ids_for_request = set()
     if scoped_department is None and scope == "lecturer":
-        scoped_department = request.user.department
+        staff_department_ids_for_request = staff_department_ids(request.user)
         # A lecturer without an assigned department has no departmental
         # records to inspect.  Keeping this empty also ensures the student
         # list and the document endpoint have the same access boundary.
-        if scoped_department is None:
+        if not staff_department_ids_for_request:
             payments = payments.none()
+        else:
+            payments = payments.filter(department_id__in=staff_department_ids_for_request)
     if scoped_department is not None:
         payments = payments.filter(department=scoped_department)
     selected_payment = None
@@ -1559,6 +1589,10 @@ def departmental_download_context(request, scope="admin", department=None):
         selected_student_payments = departmental_payment_queryset().filter(student=selected_student)
         if scoped_department is not None:
             selected_student_payments = selected_student_payments.filter(department=scoped_department)
+        elif staff_department_ids_for_request:
+            selected_student_payments = selected_student_payments.filter(
+                department_id__in=staff_department_ids_for_request
+            )
     department_totals = (
         payments.values("department__id", "department__name")
         .annotate(total=Count("id"))
@@ -4376,8 +4410,11 @@ def lecturer_students(request):
 @role_required(User.Role.LECTURER)
 def lecturer_students_pdf(request):
     payments = departmental_payment_queryset().filter(session=current_departmental_session())
-    if request.user.department_id:
-        payments = payments.filter(department=request.user.department)
+    allowed_department_ids = staff_department_ids(request.user)
+    if allowed_department_ids:
+        payments = payments.filter(department_id__in=allowed_department_ids)
+    else:
+        payments = payments.none()
     search_form = DepartmentalSearchForm(request.GET or None)
     if search_form.is_valid():
         student_id = search_form.cleaned_data.get("student_id")
@@ -5996,10 +6033,11 @@ def download_departmental_document(request, document_id):
         DepartmentalPaymentDocument.objects.select_related("payment", "payment__student", "payment__department"),
         pk=document_id,
     )
-    if request.user.has_role(User.Role.STUDENT):
-        if document.payment.student_id != request.user.id:
-            raise PermissionDenied
-    elif request.user.has_role(User.Role.ADMIN):
+    # Staff roles take precedence over the legacy primary ``role`` field.
+    # A user can legitimately be both a student and an assigned lecturer/HOD;
+    # checking student ownership first used to reject that lecturer's own
+    # departmental workspace links.
+    if request.user.has_role(User.Role.ADMIN):
         pass
     elif request.user.has_role(User.Role.EXAM_OFFICER):
         is_assigned_officer = RoleAssignment.objects.filter(
@@ -6010,10 +6048,13 @@ def download_departmental_document(request, document_id):
         ).exists()
         if not is_assigned_officer:
             raise PermissionDenied
-    elif request.user.has_role(User.Role.HOD):
-        if hod_department_for(request) != document.payment.department:
+    elif request.user.has_role(User.Role.HOD, User.Role.LECTURER):
+        if document.payment.department_id not in staff_department_ids(request.user):
             raise PermissionDenied
-    elif request.user.department_id != document.payment.department_id:
+    elif request.user.has_role(User.Role.STUDENT):
+        if document.payment.student_id != request.user.id:
+            raise PermissionDenied
+    else:
         raise PermissionDenied
     return _download_file_response(document.file, request)
 
@@ -6025,10 +6066,11 @@ def download_exam_card(request, payment_id):
         pk=payment_id,
         status=DepartmentalPayment.Status.PAID,
     )
-    if request.user.role == User.Role.STUDENT and payment.student_id != request.user.id:
-        raise PermissionDenied
-    if request.user.role == User.Role.STUDENT and not payment.exam_card_is_approved:
-        raise PermissionDenied("Your examination card is awaiting Exam Officer approval.")
+    if not request.user.has_role(User.Role.ADMIN):
+        if not request.user.has_role(User.Role.STUDENT) or payment.student_id != request.user.id:
+            raise PermissionDenied
+        if not payment.exam_card_is_approved:
+            raise PermissionDenied("Your examination card is awaiting Exam Officer approval.")
     registered_courses = [
         f"{registration.course.code} - {registration.course.title}"
         for registration in StudentCourseRegistration.objects.filter(
@@ -6112,9 +6154,9 @@ def verify_exam_card(request, token):
 def departmental_student_ids_pdf(request):
     payments = departmental_payment_queryset().filter(session=current_departmental_session())
     if request.user.has_role(User.Role.LECTURER):
-        department = hod_department_for(request) if request.user.has_role(User.Role.HOD) else request.user.department
-        if department:
-            payments = payments.filter(department=department)
+        allowed_department_ids = staff_department_ids(request.user)
+        if allowed_department_ids:
+            payments = payments.filter(department_id__in=allowed_department_ids)
         else:
             payments = payments.none()
     department_id = request.GET.get("department")
@@ -6148,20 +6190,23 @@ def download_course_file(request, course_id):
     course = get_object_or_404(Course.objects.select_related("department", "lecturer"), pk=course_id)
     if not course.file:
         raise Http404
-    if request.user.role == User.Role.STUDENT:
+    if not request.user.has_role(User.Role.ADMIN, User.Role.LECTURER):
+        if not request.user.has_role(User.Role.STUDENT):
+            raise PermissionDenied
         registration = StudentCourseRegistration.objects.filter(
             student=request.user,
             course=course,
-            session=current_departmental_session(),
             is_active=True,
-        ).first()
+        ).select_related("session").order_by("-created_at").first()
         if not registration:
             raise PermissionDenied
         if not course.is_free:
-            payment = current_course_payment_queryset().filter(
+            payment = CoursePayment.objects.filter(
                 student=request.user,
                 course=course,
+                session=registration.session,
                 status=CoursePayment.Status.PAID,
+                is_active_for_registration=True,
             ).first()
             if not payment:
                 messages.error(request, "Payment is required before downloading this course file.")
@@ -6202,16 +6247,15 @@ def lecturer_paid_course_students_pdf(request, course_id):
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
 def download_material(request, material_id):
     material = get_object_or_404(CourseMaterial.objects.select_related("course", "lecturer"), pk=material_id)
-    if request.user.is_superuser or request.user.role == User.Role.ADMIN or request.user.has_role(User.Role.LECTURER):
+    if request.user.has_role(User.Role.ADMIN, User.Role.LECTURER):
         return _download_file_response(material.file, request)
-    if request.user.role != User.Role.STUDENT:
+    if not request.user.has_role(User.Role.STUDENT):
         raise PermissionDenied
     registration = StudentCourseRegistration.objects.filter(
         student=request.user,
         course=material.course,
-        session=current_departmental_session(),
         is_active=True,
-    ).first()
+    ).select_related("session").order_by("-created_at").first()
     if not registration:
         raise PermissionDenied
     access = MaterialAccess.objects.filter(material=material, student=request.user).first()
@@ -6219,10 +6263,12 @@ def download_material(request, material_id):
         messages.error(request, "You do not currently have access to download this material.")
         return redirect("portal:student-materials")
     if not material.course.is_free:
-        payment = current_course_payment_queryset().filter(
+        payment = CoursePayment.objects.filter(
             student=request.user,
             course=material.course,
+            session=registration.session,
             status=CoursePayment.Status.PAID,
+            is_active_for_registration=True,
         ).first()
         if not payment:
             if not access or access.status == MaterialAccess.Status.BLOCKED or not access.can_download:
@@ -6254,10 +6300,15 @@ def download_message_attachment(request, notification_id):
     )
     if not notification.attachment:
         raise Http404
-    if request.user.role == User.Role.STUDENT:
+    if request.user.has_role(User.Role.ADMIN):
+        pass
+    elif request.user.has_role(User.Role.LECTURER):
+        if notification.sender_id != request.user.id:
+            raise PermissionDenied
+    elif request.user.has_role(User.Role.STUDENT):
         if not notification.recipients.filter(student=request.user, is_deleted=False).exists():
             raise PermissionDenied
-    elif request.user.has_role(User.Role.LECTURER) and notification.sender_id != request.user.id:
+    else:
         raise PermissionDenied
     return _download_file_response(notification.attachment, request)
 
@@ -6271,10 +6322,15 @@ def download_notification_attachment(request, attachment_id):
         pk=attachment_id,
     )
     notification = attachment.notification
-    if request.user.role == User.Role.STUDENT:
+    if request.user.has_role(User.Role.ADMIN):
+        pass
+    elif request.user.has_role(User.Role.LECTURER):
+        if notification.sender_id != request.user.id:
+            raise PermissionDenied
+    elif request.user.has_role(User.Role.STUDENT):
         if not notification.recipients.filter(student=request.user, is_deleted=False).exists():
             raise PermissionDenied
-    elif request.user.has_role(User.Role.LECTURER) and notification.sender_id != request.user.id:
+    else:
         raise PermissionDenied
     return _download_file_response(attachment.file, request)
 
@@ -6285,7 +6341,9 @@ def download_document(request, kind, document_id):
         raise Http404("Unknown document type.")
     model = Timetable if kind == "timetable" else Handbook
     document = get_object_or_404(model.objects.select_related("department", "programme"), pk=document_id)
-    if request.user.role == User.Role.STUDENT:
+    if not request.user.has_role(User.Role.ADMIN, User.Role.LECTURER):
+        if not request.user.has_role(User.Role.STUDENT):
+            raise PermissionDenied
         if request.user.department_id != document.department_id:
             raise PermissionDenied
         if kind == "timetable" and document.programme_id and document.programme_id != request.user.programme_id:
