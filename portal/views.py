@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import time
@@ -188,6 +189,7 @@ LOGIN_ROLES = set(User.Role.values)
 SCREENING_SIGNATURE_HEADER = "HTTP_X_EDUCONNECT_SIGNATURE"
 SCREENING_TIMESTAMP_HEADER = "HTTP_X_EDUCONNECT_TIMESTAMP"
 SCREENING_INSTITUTION_HEADER = "HTTP_X_EDUCONNECT_INSTITUTION"
+logger = logging.getLogger(__name__)
 
 POLICY_VERSION = "2026-10-09"
 POLICIES = {
@@ -945,15 +947,23 @@ def _paystack_reference_from_request(request):
     return (request.GET.get("reference") or request.GET.get("trxref") or "").strip()
 
 
+def _paystack_callback_has_conflicting_references(request):
+    """Reject a callback when Paystack's two reference parameters disagree."""
+    reference = (request.GET.get("reference") or "").strip()
+    trxref = (request.GET.get("trxref") or "").strip()
+    return bool(reference and trxref and reference != trxref)
+
+
 def _student_identifier(user):
     return user.id_number or user.username or str(user.pk)
 
 
-def _verification_matches_payment(verification, *, reference, amount):
+def _verification_matches_payment(verification, *, reference, amount, currency="NGN"):
     return (
         verification.get("reference") == reference
         and verification.get("status") == "success"
         and int(verification.get("amount") or 0) == paystack_amount_in_kobo(amount)
+        and (verification.get("currency") or "").upper() == currency
     )
 
 
@@ -1004,8 +1014,13 @@ def _paystack_signature_is_valid(request, secret_keys):
     return bool(_paystack_signing_secret(request, secret_keys))
 
 
-def _mark_payment_paid_from_paystack(reference, amount, *, signing_secret):
+def _mark_payment_paid_from_paystack(reference, amount, currency, *, signing_secret):
     if not reference:
+        return False
+    # The signed webhook is authoritative, but it must still describe the
+    # currency this application charges in.  Do not turn a correctly signed
+    # transaction in another currency into a course entitlement.
+    if (currency or "").upper() != "NGN":
         return False
     course_payment = CoursePayment.objects.filter(paystack_reference=reference).select_related("course").first()
     if (
@@ -1027,6 +1042,13 @@ def _mark_payment_paid_from_paystack(reference, amount, *, signing_secret):
 
 
 def _finalize_course_payment(payment):
+    """Persist a verified course payment and its registration exactly once.
+
+    Registration is the payment entitlement and must commit atomically with
+    the paid status. Group/material setup is derived data, so it runs after
+    that transaction: a bad legacy group or material cannot turn a verified
+    Paystack callback into a 500 or roll back the student's entitlement.
+    """
     with transaction.atomic():
         payment = CoursePayment.objects.select_for_update().select_related("student", "course", "session").get(pk=payment.pk)
         if not payment.is_paid:
@@ -1047,10 +1069,17 @@ def _finalize_course_payment(payment):
             registration.superseded_at = None
             registration.superseded_by_allocation = None
             registration.save(update_fields=["is_active", "superseded_at", "superseded_by_allocation", "updated_at"])
+
+    try:
         if created:
             sync_material_access_for_registration(registration)
         _assign_student_to_existing_course_group(payment.student, payment.course, payment.session)
         _sync_course_material_access_for_paid_course(payment.student, payment.course)
+    except (IntegrityError, ValidationError):
+        # The payment and registration have already committed. Keep the
+        # exception (without credentials or student details) in server logs so
+        # the optional course setup can be repaired and retried safely.
+        logger.exception("Could not complete auxiliary setup for course payment %s", payment.pk)
 
 
 def _finalize_departmental_payment(payment):
@@ -1410,9 +1439,20 @@ def _assign_student_to_existing_course_group(student, course, session):
             group_name = base_name
             if groups.filter(name=group_name).exists():
                 group_name = f"{base_name} ({department.code})" if department else "No department (new)"
+            # A lecturer can be removed after groups were created. Reuse the
+            # existing group's lecturer instead of inserting NULL into this
+            # required field (a PostgreSQL IntegrityError).
+            existing_group = groups.select_related("lecturer").first()
+            group_lecturer = course.lecturer or (existing_group.lecturer if existing_group else None)
+            if group_lecturer is None:
+                logger.warning(
+                    "Skipping group assignment for course %s because no lecturer is available.",
+                    course.pk,
+                )
+                return
             target_group = CourseStudentGroup.objects.create(
                 course=course,
-                lecturer=course.lecturer,
+                lecturer=group_lecturer,
                 session=session,
                 name=group_name,
                 grouping_method=grouping_method,
@@ -1864,6 +1904,7 @@ def paystack_webhook(request):
         processed = _mark_payment_paid_from_paystack(
             data.get("reference"),
             data.get("amount"),
+            data.get("currency"),
             signing_secret=signing_secret,
         )
         subscription_secret = subscription_paystack_secret_key()
@@ -3751,6 +3792,9 @@ def course_payment_callback(request, payment_id):
         pk=payment_id,
         student=request.user,
     )
+    if _paystack_callback_has_conflicting_references(request):
+        messages.error(request, "The course payment callback contained conflicting references.")
+        return redirect("portal:student-courses")
     reference = _paystack_reference_from_request(request)
     if reference and reference != payment.paystack_reference:
         messages.error(request, "The course payment reference did not match this record.")
@@ -3761,6 +3805,12 @@ def course_payment_callback(request, payment_id):
     registered_courses_url = _redirect_with_anchor(
         "portal:student-courses", "registered-courses"
     )
+    # An authenticated Paystack webhook may complete before the browser
+    # returns. This retry is idempotent and repairs registration/access.
+    if payment.is_paid:
+        _finalize_course_payment(payment)
+        messages.success(request, f"{payment.course.code} payment confirmed successfully.")
+        return redirect(registered_courses_url)
     try:
         verification = verify_paystack_transaction(payment.paystack_secret_key_used, reference)
     except ValueError as exc:
@@ -3775,7 +3825,12 @@ def course_payment_callback(request, payment_id):
             messages.error(request, str(exc))
         return redirect("portal:student-courses")
     if _verification_matches_payment(verification, reference=payment.paystack_reference, amount=payment.amount):
-        _finalize_course_payment(payment)
+        try:
+            _finalize_course_payment(payment)
+        except (IntegrityError, ValidationError):
+            logger.exception("Could not finalize verified course payment %s", payment.pk)
+            messages.error(request, "Your payment was verified, but course registration could not be completed yet. Please contact support.")
+            return redirect("portal:student-courses")
         messages.success(request, f"{payment.course.code} payment confirmed successfully.")
         return redirect(registered_courses_url)
     else:

@@ -117,7 +117,11 @@ def _paystack_request(secret_key, path, payload=None):
             raise ValueError(f"Paystack rejected the request (HTTP {exc.code}): {raw_body[:200]}") from exc
         message = "Paystack rejected the request."
         raise ValueError(message) from exc
-    except URLError as exc:
+    # ``urlopen`` raises ``URLError`` for DNS and connection failures, but a
+    # read timeout can be raised directly as ``TimeoutError``/``OSError``.
+    # Treat both as a recoverable gateway failure so a browser callback never
+    # becomes an unhandled 500 merely because Paystack is temporarily slow.
+    except (URLError, OSError) as exc:
         raise ValueError("Unable to reach Paystack right now. Please try again shortly.") from exc
 
     try:

@@ -11,6 +11,7 @@ from django.conf import settings
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.test import Client
 from django.test import RequestFactory
 from django.test import TestCase
@@ -2205,6 +2206,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "reference": payment.paystack_reference,
             "status": "success",
             "amount": 250000,
+            "currency": "NGN",
         }
 
         self.client.force_login(self.student)
@@ -2226,6 +2228,178 @@ class DashboardAndCourseFlowTests(TestCase):
             session=self.session,
             is_active=True,
         ).exists())
+
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_accepts_trxref_and_is_idempotent(self, verify_paystack_transaction):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        verify_paystack_transaction.return_value = {
+            "reference": payment.paystack_reference,
+            "status": "success",
+            "amount": 250000,
+            "currency": "NGN",
+        }
+
+        self.client.force_login(self.student)
+        callback_url = reverse("portal:course-payment-callback", args=[payment.id])
+        self.client.get(callback_url, {"trxref": payment.paystack_reference})
+        self.client.get(callback_url, {"reference": payment.paystack_reference})
+
+        self.assertEqual(verify_paystack_transaction.call_count, 1)
+        self.assertEqual(StudentCourseRegistration.objects.filter(
+            student=self.student, course=self.paid_course, session=self.session,
+        ).count(), 1)
+
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_handles_grouping_when_course_lecturer_was_removed(
+        self, verify_paystack_transaction
+    ):
+        """A stale course allocation must not break a verified payment."""
+        other_department = Department.objects.create(name="Mathematics", code="MTH")
+        other_student = User.objects.create_user(
+            username="mathematics-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=other_department,
+            id_number="STU-MTH-001",
+            email="mathematics-student@example.com",
+        )
+        # Existing departmental grouping makes the callback create a group for
+        # the new department.  Course.lecturer is nullable but the group
+        # lecturer column is not, matching the production PostgreSQL failure.
+        CourseStudentGroup.objects.create(
+            course=self.paid_course,
+            lecturer=self.lecturer,
+            session=self.session,
+            name=self.department.name,
+            grouping_method=CourseStudentGroup.GroupingMethod.DEPARTMENT,
+            department=self.department,
+        )
+        self.paid_course.lecturer = None
+        self.paid_course.save(update_fields=["lecturer", "updated_at"])
+        payment = CoursePayment.objects.create(
+            student=other_student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        verify_paystack_transaction.return_value = {
+            "reference": payment.paystack_reference,
+            "status": "success",
+            "amount": 250000,
+            "currency": "NGN",
+        }
+
+        self.client.force_login(other_student)
+        response = self.client.get(
+            reverse("portal:course-payment-callback", args=[payment.id]),
+            {"reference": payment.paystack_reference},
+        )
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(payment.status, CoursePayment.Status.PAID)
+        self.assertTrue(StudentCourseRegistration.objects.filter(
+            student=other_student, course=self.paid_course, session=self.session,
+        ).exists())
+        new_group = CourseStudentGroup.objects.get(
+            course=self.paid_course, session=self.session, department=other_department,
+        )
+        self.assertEqual(new_group.lecturer, self.lecturer)
+        self.assertTrue(CourseStudentGroupMembership.objects.filter(
+            group=new_group, student=other_student,
+        ).exists())
+
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_rejects_missing_or_invalid_reference(self, verify_paystack_transaction):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        self.client.force_login(self.student)
+        callback_url = reverse("portal:course-payment-callback", args=[payment.id])
+
+        self.client.get(callback_url)
+        self.client.get(callback_url, {"reference": "other-reference"})
+        self.client.get(callback_url, {
+            "reference": payment.paystack_reference,
+            "trxref": "other-reference",
+        })
+
+        verify_paystack_transaction.assert_not_called()
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, CoursePayment.Status.PENDING)
+        self.assertFalse(StudentCourseRegistration.objects.filter(course=self.paid_course).exists())
+
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_rejects_wrong_amount_or_currency(self, verify_paystack_transaction):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        self.client.force_login(self.student)
+        callback_url = reverse("portal:course-payment-callback", args=[payment.id])
+        verify_paystack_transaction.return_value = {
+            "reference": payment.paystack_reference,
+            "status": "success",
+            "amount": 1,
+            "currency": "NGN",
+        }
+        self.client.get(callback_url, {"reference": payment.paystack_reference})
+        verify_paystack_transaction.return_value = {
+            "reference": payment.paystack_reference,
+            "status": "success",
+            "amount": 250000,
+            "currency": "GHS",
+        }
+        self.client.get(callback_url, {"reference": payment.paystack_reference})
+
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, CoursePayment.Status.PENDING)
+        self.assertFalse(StudentCourseRegistration.objects.filter(course=self.paid_course).exists())
+
+    @patch("portal.views.StudentCourseRegistration.objects.get_or_create")
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_payment_callback_rolls_back_when_registration_cannot_be_created(
+        self, verify_paystack_transaction, get_or_create
+    ):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        verify_paystack_transaction.return_value = {
+            "reference": payment.paystack_reference,
+            "status": "success",
+            "amount": 250000,
+            "currency": "NGN",
+        }
+        get_or_create.side_effect = IntegrityError("simulated registration constraint")
+
+        self.client.force_login(self.student)
+        response = self.client.get(
+            reverse("portal:course-payment-callback", args=[payment.id]),
+            {"reference": payment.paystack_reference},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, CoursePayment.Status.PENDING)
+        self.assertFalse(StudentCourseRegistration.objects.filter(course=self.paid_course).exists())
 
     @patch("portal.views.verify_paystack_transaction")
     def test_course_payment_callback_unlocks_course_material_access(self, verify_paystack_transaction):
@@ -2260,6 +2434,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "reference": payment.paystack_reference,
             "status": "success",
             "amount": 250000,
+            "currency": "NGN",
         }
 
         self.client.force_login(self.student)
@@ -2512,6 +2687,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "reference": payment.paystack_reference,
             "status": "success",
             "amount": 400000,
+            "currency": "NGN",
         }
 
         self.client.force_login(self.student)
@@ -2950,6 +3126,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "data": {
                 "reference": payment.paystack_reference,
                 "amount": 250000,
+                "currency": "NGN",
             },
         }
         body = json.dumps(payload).encode("utf-8")
@@ -2966,6 +3143,41 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payment.status, CoursePayment.Status.PAID)
 
+    def test_paystack_webhook_rejects_course_payment_with_wrong_currency(self):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PENDING,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+        payload = {
+            "event": "charge.success",
+            "data": {
+                "reference": payment.paystack_reference,
+                "amount": 250000,
+                "currency": "GHS",
+            },
+        }
+        body = json.dumps(payload).encode("utf-8")
+        signature = hmac.new(b"sk_test_course", body, hashlib.sha512).hexdigest()
+
+        response = self.client.post(
+            reverse("portal:paystack-webhook"),
+            data=body,
+            content_type="application/json",
+            HTTP_X_PAYSTACK_SIGNATURE=signature,
+        )
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["processed"])
+        self.assertEqual(payment.status, CoursePayment.Status.PENDING)
+        self.assertFalse(StudentCourseRegistration.objects.filter(
+            student=self.student, course=self.paid_course,
+        ).exists())
+
     def test_paystack_webhook_marks_course_payment_paid_with_course_api_secret(self):
         gateway = CoursePaymentGateway.objects.get(slug="courses")
         payment = CoursePayment.objects.create(
@@ -2981,6 +3193,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "data": {
                 "reference": payment.paystack_reference,
                 "amount": 250000,
+                "currency": "NGN",
             },
         }
         body = json.dumps(payload).encode("utf-8")
@@ -3043,6 +3256,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "data": {
                 "reference": payment.paystack_reference,
                 "amount": 250000,
+                "currency": "NGN",
             },
         }
         body = json.dumps(payload).encode("utf-8")
