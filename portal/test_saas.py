@@ -799,6 +799,26 @@ class ScreeningIntegrationTests(TestCase):
         self.assertEqual(administrator.role, User.Role.ADMIN)
         self.assertTrue(administrator.check_password(TEMPORARY_ACCOUNT_PASSWORD))
         self.assertEqual(Path(institution.logo.name).suffix, ".png")
+        self.assertTrue(institution.logo.name.startswith("institutions/coastal/"))
+        self.assertEqual(institution.logo_data, b"coastal-logo")
+
+        # The super-admin upload must become the logo served by that
+        # institution's own portal, rather than a platform-wide media URL.
+        self.client.logout()
+        logo_url = reverse("portal:institution-logo", args=[institution.subdomain])
+        logo_response = self.client.get(
+            logo_url,
+            HTTP_HOST=f"coastal.{settings.CORE_DOMAIN}",
+        )
+        self.assertEqual(logo_response.status_code, 200)
+        self.assertEqual(logo_response.content, b"coastal-logo")
+        self.assertEqual(logo_response["Content-Type"], "image/png")
+
+        portal_response = self.client.get(
+            reverse("portal:home"),
+            HTTP_HOST=f"coastal.{settings.CORE_DOMAIN}",
+        )
+        self.assertContains(portal_response, f"{logo_url}?v=")
         trial = institution.current_subscription
         self.assertEqual(trial.status, Subscription.Status.TRIAL)
         self.assertEqual(trial.amount, Decimal("0.00"))
@@ -941,6 +961,14 @@ class ScreeningIntegrationTests(TestCase):
         self.assertEqual(self.institution.subdomain, "meridian-tech")
         self.assertNotEqual(self.institution.logo.name, original_logo_name)
         self.assertTrue(self.institution.logo.name.startswith("institutions/meridian-tech/"))
+        self.assertEqual(self.institution.logo_data, b"replacement-logo")
+        self.client.logout()
+        logo_response = self.client.get(
+            reverse("portal:institution-logo", args=[self.institution.subdomain]),
+            HTTP_HOST=f"meridian-tech.{settings.CORE_DOMAIN}",
+        )
+        self.assertEqual(logo_response.status_code, 200)
+        self.assertEqual(logo_response.content, b"replacement-logo")
         self.assertEqual(self.institution_admin.email, "office@meridian.example.test")
         self.assertEqual(self.institution_admin.username, "office@meridian.example.test")
 
