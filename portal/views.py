@@ -18,6 +18,7 @@ from django.contrib import messages
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.core.cache import cache
+from django.core.files.storage import FileSystemStorage
 from django.core.mail import EmailMessage
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, models, transaction
@@ -449,6 +450,12 @@ def _download_file_response(uploaded_file, request):
             final_404_reason="invalid_file_name",
         )
         raise Http404("Document not found.")
+    log_departmental_document_diagnostic(
+        request,
+        "storage_status_checked",
+        file_name=str(uploaded_file.name),
+        **_departmental_storage_diagnostic_details(uploaded_file),
+    )
     try:
         source = uploaded_file.open("rb")
     except (OSError, ValueError) as exc:
@@ -1607,14 +1614,36 @@ def staff_department_ids(user):
 
 def _storage_file_is_available(uploaded_file):
     """Return whether a FileField's configured storage can read its object."""
+    return _departmental_storage_status(uploaded_file) == "available"
+
+
+def _departmental_storage_status(uploaded_file):
+    """Classify a departmental file without opening or exposing its contents."""
+    if not uploaded_file or not uploaded_file.name:
+        return "missing_reference"
+    storage = uploaded_file.storage
     try:
-        return bool(
-            uploaded_file
-            and uploaded_file.name
-            and uploaded_file.storage.exists(uploaded_file.name)
-        )
+        # A missing mounted directory is a deployment/storage problem, not a
+        # missing individual document.  This distinction keeps administrators
+        # from replacing records when the configured disk is unavailable.
+        if isinstance(storage, FileSystemStorage) and not Path(storage.location).is_dir():
+            return "storage_unavailable"
+        return "available" if storage.exists(uploaded_file.name) else "missing"
     except (OSError, ValueError):
-        return False
+        return "storage_error"
+
+
+def _departmental_storage_diagnostic_details(uploaded_file):
+    """Return incident-safe storage metadata for the protected file route."""
+    storage = uploaded_file.storage
+    details = {
+        "storage_backend": f"{storage.__class__.__module__}.{storage.__class__.__name__}",
+        "storage_status": _departmental_storage_status(uploaded_file),
+    }
+    if isinstance(storage, FileSystemStorage):
+        details["storage_location"] = str(storage.location)
+        details["storage_root_exists"] = Path(storage.location).is_dir()
+    return details
 
 
 def departmental_download_context(request, scope="admin", department=None):
@@ -1674,9 +1703,11 @@ def departmental_download_context(request, scope="admin", department=None):
         if scope == "admin":
             for payment in selected_student_payments:
                 for document in payment.documents.all():
-                    document.storage_file_missing = not _storage_file_is_available(document.file)
+                    document.storage_file_status = _departmental_storage_status(document.file)
+                    document.storage_file_missing = document.storage_file_status == "missing"
 
     missing_documents = []
+    storage_problem_documents = []
     if scope == "admin":
         institution = getattr(request, "institution", None) or request.user.institution
         if institution:
@@ -1686,9 +1717,12 @@ def departmental_download_context(request, scope="admin", department=None):
                 payment__institution=institution
             ).select_related("payment__student", "payment__department", "payment__session")
             for document in documents:
-                if not _storage_file_is_available(document.file):
+                document.storage_file_status = _departmental_storage_status(document.file)
+                if document.storage_file_status == "missing":
                     document.storage_file_missing = True
                     missing_documents.append(document)
+                elif document.storage_file_status != "available":
+                    storage_problem_documents.append(document)
     department_totals = (
         payments.values("department__id", "department__name")
         .annotate(total=Count("id"))
@@ -1710,6 +1744,7 @@ def departmental_download_context(request, scope="admin", department=None):
         "departmental_download_scope": scope,
         "departmental_current_session": current_session,
         "departmental_missing_documents": missing_documents,
+        "departmental_storage_problem_documents": storage_problem_documents,
     }
 
 
@@ -5472,8 +5507,12 @@ def admin_replace_departmental_document(request, document_id):
         pk=document_id,
         payment__institution=institution,
     )
-    if _storage_file_is_available(document.file):
+    storage_status = _departmental_storage_status(document.file)
+    if storage_status == "available":
         messages.error(request, "This document is available and does not need recovery.")
+        return redirect(f"{reverse('portal:admin-departmental-download')}?payment={document.payment_id}")
+    if storage_status != "missing":
+        messages.error(request, "Document storage is unavailable. Confirm the configured media disk before replacing files.")
         return redirect(f"{reverse('portal:admin-departmental-download')}?payment={document.payment_id}")
 
     form = DepartmentalDocumentReplacementForm(request.POST, request.FILES)

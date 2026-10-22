@@ -60,6 +60,18 @@
         </section>
     {% endif %}
 
+    {% if departmental_download_scope == 'admin' and departmental_storage_problem_documents %}
+        <section class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <h3>Storage needs attention</h3>
+                    <p class="muted-note">{{ departmental_storage_problem_documents|length }} record(s) could not be checked because the configured storage is unavailable or the file reference is incomplete. Confirm the media disk before attempting replacements.</p>
+                </div>
+                <span class="status-pill danger">Storage unavailable</span>
+            </div>
+        </section>
+    {% endif %}
+
     <div class="split-layout departmental-summary">
         <div class="panel-card">
             <div class="panel-head">

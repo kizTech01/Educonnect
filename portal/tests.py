@@ -7,10 +7,12 @@ from decimal import Decimal
 from unittest import skipUnless
 from unittest.mock import patch
 from urllib.error import HTTPError
+from types import SimpleNamespace
 
 from django.conf import settings
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.files.storage import FileSystemStorage
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection
 from django.http import Http404
@@ -66,7 +68,13 @@ from .models import (
 )
 from .services import dispatch_due_course_reminders, ensure_default_admin_user
 from .forms import CourseForm
-from .views import AI_ROLE_EXAMPLES, _ai_answer, download_departmental_document, sidebar_links
+from .views import (
+    AI_ROLE_EXAMPLES,
+    _ai_answer,
+    _departmental_storage_status,
+    download_departmental_document,
+    sidebar_links,
+)
 from .automation import import_course_allocations, import_department_lecturers, import_programmes
 from .departmental_document_diagnostics import LOGGER_NAME
 
@@ -827,6 +835,63 @@ class DashboardAndCourseFlowTests(TestCase):
         other_document.refresh_from_db()
         self.assertEqual(other_document.file.name, "departmental/missing-other-white-form.pdf")
 
+    def test_storage_status_distinguishes_missing_files_from_an_unavailable_root(self):
+        missing_file = SimpleNamespace(
+            name="departmental/not-present.pdf",
+            storage=FileSystemStorage(location=settings.MEDIA_ROOT),
+        )
+        unavailable_storage = SimpleNamespace(
+            name="departmental/unavailable.pdf",
+            storage=FileSystemStorage(location=settings.BASE_DIR / "missing-media-root"),
+        )
+
+        self.assertEqual(_departmental_storage_status(missing_file), "missing")
+        self.assertEqual(_departmental_storage_status(unavailable_storage), "storage_unavailable")
+
+    def test_authorized_departmental_roles_share_the_protected_document_endpoint(self):
+        payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+        )
+        document = DepartmentalPaymentDocument.objects.create(
+            payment=payment,
+            category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="White Form",
+            file=SimpleUploadedFile("white-form.pdf", b"shared document", content_type="application/pdf"),
+        )
+        hod = User.objects.create_user(
+            username="departmental-hod",
+            password="pass1234",
+            role=User.Role.HOD,
+            department=self.department,
+            is_approved=True,
+        )
+        exam_officer = User.objects.create_user(
+            username="departmental-exam-officer",
+            password="pass1234",
+            role=User.Role.LECTURER,
+            department=self.department,
+            is_approved=True,
+        )
+        RoleAssignment.objects.create(
+            user=exam_officer,
+            role=User.Role.EXAM_OFFICER,
+            department=self.department,
+            is_active=True,
+        )
+        document_url = reverse("portal:download-departmental-document", args=[document.id])
+
+        for user in (self.student, self.lecturer, hod, exam_officer, self.admin):
+            with self.subTest(role=user.role):
+                self.client.force_login(user)
+                response = self.client.get(document_url)
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response["Content-Disposition"].startswith("inline"))
+                self.assertEqual(b"".join(response.streaming_content), b"shared document")
+
     def test_staff_student_view_includes_all_paid_departmental_sessions_and_documents(self):
         from .models import DepartmentalPaymentDocument
 
@@ -1001,6 +1066,8 @@ class DashboardAndCourseFlowTests(TestCase):
         with self.assertLogs(LOGGER_NAME, level="WARNING") as diagnostic_logs:
             response = self.client.get(reverse("portal:download-departmental-document", args=[missing_document.id]))
         self.assertEqual(response.status_code, 404)
+        self.assertTrue(any("event='storage_status_checked'" in message for message in diagnostic_logs.output))
+        self.assertTrue(any("storage_status='missing'" in message for message in diagnostic_logs.output))
         self.assertTrue(any("event='file_open_failed_404'" in message for message in diagnostic_logs.output))
         self.assertTrue(any("final_404_reason='storage_open_failed'" in message for message in diagnostic_logs.output))
 
