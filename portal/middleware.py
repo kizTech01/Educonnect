@@ -4,6 +4,7 @@ from django.contrib.auth import logout
 from django.http import HttpResponse, HttpResponseForbidden
 from django.shortcuts import redirect
 
+from .departmental_document_diagnostics import log_departmental_document_diagnostic
 from .models import Institution, reset_current_institution, set_current_institution
 
 
@@ -71,6 +72,13 @@ class TenantResolutionMiddleware:
         # in DJANGO_ALLOWED_HOSTS, so Django rejects an unknown custom host
         # before it gets this far.
         if tenant_subdomain and institution is None:
+            log_departmental_document_diagnostic(
+                request,
+                "tenant_resolution_not_found_404",
+                host=host,
+                tenant_resolved_from_host=False,
+                final_404_reason="unrecognised_tenant_subdomain",
+            )
             return HttpResponse(
                 """
                 <!DOCTYPE html>
@@ -124,6 +132,14 @@ class TenantResolutionMiddleware:
             )
 
         request.institution = institution
+        log_departmental_document_diagnostic(
+            request,
+            "tenant_resolution_succeeded",
+            host=host,
+            tenant_resolved_from_host=request.tenant_resolved_from_host,
+            resolved_tenant_id=getattr(institution, "pk", None),
+            resolved_tenant_name=getattr(institution, "name", None),
+        )
         request.tenant_token = set_current_institution(institution)
 
         try:
@@ -148,9 +164,22 @@ class TenantAccessMiddleware:
                 # Super administrators belong to the central platform, never a tenant.
                 if institution:
                     logout(request)
+                    log_departmental_document_diagnostic(
+                        request,
+                        "tenant_access_rejected",
+                        authorization_branch="superuser_on_tenant_host",
+                        response_status=403,
+                    )
                     return HttpResponseForbidden("Super administrators must use the central Educonnect portal.")
             elif institution and user.institution_id != institution.id:
                 logout(request)
+                log_departmental_document_diagnostic(
+                    request,
+                    "tenant_access_rejected",
+                    authorization_branch="user_institution_mismatch",
+                    response_status=403,
+                    user_institution_id=user.institution_id,
+                )
                 return HttpResponseForbidden("This account does not belong to this institution portal.")
             elif institution:
                 subscription = institution.current_subscription
@@ -179,6 +208,12 @@ class TenantAccessMiddleware:
                     messages.warning(
                         request,
                         "Your Educonnect subscription is unavailable. Please renew your subscription.",
+                    )
+                    log_departmental_document_diagnostic(
+                        request,
+                        "tenant_access_restricted",
+                        authorization_branch="subscription_restricted",
+                        response_status=302,
                     )
                     return redirect("portal:billing-overview")
         return self.get_response(request)

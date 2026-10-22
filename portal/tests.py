@@ -68,6 +68,7 @@ from .services import dispatch_due_course_reminders, ensure_default_admin_user
 from .forms import CourseForm
 from .views import AI_ROLE_EXAMPLES, _ai_answer, download_departmental_document, sidebar_links
 from .automation import import_course_allocations, import_department_lecturers, import_programmes
+from .departmental_document_diagnostics import LOGGER_NAME
 
 
 class InstitutionalRBACTests(TestCase):
@@ -890,10 +891,13 @@ class DashboardAndCourseFlowTests(TestCase):
             department=self.department,
         )
         self.client.force_login(other_student)
-        self.assertEqual(
-            self.client.get(reverse("portal:download-departmental-document", args=[departmental_document.id])).status_code,
-            403,
-        )
+        with self.assertLogs(LOGGER_NAME, level="WARNING") as diagnostic_logs:
+            response = self.client.get(
+                reverse("portal:download-departmental-document", args=[departmental_document.id])
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(any("event='document_authorization_rejected'" in message for message in diagnostic_logs.output))
+        self.assertTrue(any("authorization_branch='student_not_payment_owner'" in message for message in diagnostic_logs.output))
         self.assertEqual(
             self.client.get(reverse("portal:download-message-attachment", args=[message.id])).status_code,
             403,
@@ -910,10 +914,11 @@ class DashboardAndCourseFlowTests(TestCase):
         # streaming responses on Windows.
         missing_document.file.name = "departmental/missing-file.pdf"
         missing_document.save(update_fields=["file", "updated_at"])
-        self.assertEqual(
-            self.client.get(reverse("portal:download-departmental-document", args=[missing_document.id])).status_code,
-            404,
-        )
+        with self.assertLogs(LOGGER_NAME, level="WARNING") as diagnostic_logs:
+            response = self.client.get(reverse("portal:download-departmental-document", args=[missing_document.id]))
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(any("event='file_open_failed_404'" in message for message in diagnostic_logs.output))
+        self.assertTrue(any("final_404_reason='storage_open_failed'" in message for message in diagnostic_logs.output))
 
     def test_file_actions_use_active_roles_and_registration_session(self):
         """Role assignments and active registrations must authorize their own files."""
@@ -1012,22 +1017,28 @@ class DashboardAndCourseFlowTests(TestCase):
         request.institution = payment.institution
         token = set_current_institution(payment.institution)
         try:
-            response = download_departmental_document(request, document.id)
+            with self.assertLogs(LOGGER_NAME, level="WARNING") as diagnostic_logs:
+                response = download_departmental_document(request, document.id)
         finally:
             reset_current_institution(token)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response["Content-Disposition"].startswith("inline"))
         self.assertEqual(b"".join(response.streaming_content), b"tenant document")
+        self.assertTrue(any("event='document_lookup_succeeded'" in message for message in diagnostic_logs.output))
+        self.assertTrue(any("event='file_response_created'" in message for message in diagnostic_logs.output))
 
         request = self.factory.get(document_url)
         request.user = self.student
         request.institution = other_institution
         token = set_current_institution(other_institution)
         try:
-            with self.assertRaises(Http404):
-                download_departmental_document(request, document.id)
+            with self.assertLogs(LOGGER_NAME, level="WARNING") as diagnostic_logs:
+                with self.assertRaises(Http404):
+                    download_departmental_document(request, document.id)
         finally:
             reset_current_institution(token)
+        self.assertTrue(any("event='document_lookup_not_found_404'" in message for message in diagnostic_logs.output))
+        self.assertTrue(any("final_404_reason='document_missing_from_payment_tenant_scope'" in message for message in diagnostic_logs.output))
 
     def test_paid_student_can_upload_additional_departmental_documents(self):
         from .models import DepartmentalPaymentDocument

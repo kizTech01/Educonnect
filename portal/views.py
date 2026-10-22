@@ -35,6 +35,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.csrf import ensure_csrf_cookie
 from pypdf import PdfReader
 
+from .departmental_document_diagnostics import log_departmental_document_diagnostic
 from .forms import (
     CourseForm,
     CourseResultForm,
@@ -429,14 +430,44 @@ def _download_file_response(uploaded_file, request):
     database reference never exposes a server error or an empty response.
     """
     if not uploaded_file or not uploaded_file.name:
+        log_departmental_document_diagnostic(
+            request,
+            "file_field_missing_404",
+            file_name=None,
+            file_name_empty=True,
+            final_404_reason="empty_file_field",
+        )
         raise Http404("Document not found.")
     filename = PurePosixPath(str(uploaded_file.name).replace("\\", "/")).name
     if not filename or filename in {".", "/"}:
+        log_departmental_document_diagnostic(
+            request,
+            "file_name_invalid_404",
+            file_name=str(uploaded_file.name),
+            file_name_empty=False,
+            final_404_reason="invalid_file_name",
+        )
         raise Http404("Document not found.")
     try:
         source = uploaded_file.open("rb")
     except (OSError, ValueError) as exc:
+        log_departmental_document_diagnostic(
+            request,
+            "file_open_failed_404",
+            file_name=str(uploaded_file.name),
+            file_name_empty=False,
+            file_opened=False,
+            exception_class=exc.__class__.__name__,
+            final_404_reason="storage_open_failed",
+        )
         raise Http404("Document file not found.") from exc
+    log_departmental_document_diagnostic(
+        request,
+        "file_open_succeeded",
+        file_name=str(uploaded_file.name),
+        file_name_empty=False,
+        file_opened=True,
+    )
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     response = FileResponse(
         source,
@@ -448,6 +479,12 @@ def _download_file_response(uploaded_file, request):
     # browser or proxy cache make one user's document available to another.
     response["Cache-Control"] = "private, no-store, max-age=0"
     response["X-Content-Type-Options"] = "nosniff"
+    log_departmental_document_diagnostic(
+        request,
+        "file_response_created",
+        disposition="attachment" if request.GET.get("download") == "1" else "inline",
+        response_status=200,
+    )
     return response
 
 
@@ -532,15 +569,39 @@ def role_required(*roles):
         @wraps(view_func)
         def _wrapped(request, *args, **kwargs):
             if not request.user.is_authenticated:
+                log_departmental_document_diagnostic(
+                    request,
+                    "role_required_rejected",
+                    authorization_branch="unauthenticated",
+                    response_status=302,
+                )
                 return redirect("portal:home")
             if request.user.role == User.Role.LECTURER and not request.user.is_approved:
                 logout(request)
+                log_departmental_document_diagnostic(
+                    request,
+                    "role_required_rejected",
+                    authorization_branch="unapproved_lecturer",
+                    response_status=302,
+                )
                 messages.warning(request, "Your lecturer account is awaiting admin approval.")
                 return redirect("portal:home")
             if request.user.is_superuser:
+                log_departmental_document_diagnostic(
+                    request,
+                    "role_required_rejected",
+                    authorization_branch="superuser_redirect",
+                    response_status=302,
+                )
                 return redirect("portal:super-admin-dashboard")
             if request.user.has_role(*roles):
                 return view_func(request, *args, **kwargs)
+            log_departmental_document_diagnostic(
+                request,
+                "role_required_rejected",
+                authorization_branch="required_role_missing",
+                response_status=403,
+            )
             raise PermissionDenied
 
         return never_cache(_wrapped)
@@ -6033,21 +6094,37 @@ def download_departmental_document(request, document_id):
     # relationship for tenant scoping rather than relying on the document's
     # denormalised institution value alone: older records can predate tenant
     # assignment or have been repaired independently of their payment.
+    log_departmental_document_diagnostic(request, "view_entered")
     documents = DepartmentalPaymentDocument.all_objects.select_related(
         "payment", "payment__student", "payment__department"
     )
     if request.institution:
         documents = documents.filter(payment__institution=request.institution)
-    document = get_object_or_404(
-        documents,
-        pk=document_id,
+    document = documents.filter(pk=document_id).first()
+    if document is None:
+        log_departmental_document_diagnostic(
+            request,
+            "document_lookup_not_found_404",
+            lookup_succeeded=False,
+            lookup_scope="payment_institution",
+            final_404_reason="document_missing_from_payment_tenant_scope",
+        )
+        raise Http404("Document not found.")
+    log_departmental_document_diagnostic(
+        request,
+        "document_lookup_succeeded",
+        lookup_succeeded=True,
+        payment_institution_id=document.payment.institution_id,
+        document_institution_id=document.institution_id,
+        file_name=str(document.file.name or ""),
+        file_name_empty=not bool(document.file and document.file.name),
     )
     # Staff roles take precedence over the legacy primary ``role`` field.
     # A user can legitimately be both a student and an assigned lecturer/HOD;
     # checking student ownership first used to reject that lecturer's own
     # departmental workspace links.
     if request.user.has_role(User.Role.ADMIN):
-        pass
+        authorization_branch = "institution_admin"
     elif request.user.has_role(User.Role.EXAM_OFFICER):
         is_assigned_officer = RoleAssignment.objects.filter(
             user=request.user,
@@ -6056,15 +6133,47 @@ def download_departmental_document(request, document_id):
             is_active=True,
         ).exists()
         if not is_assigned_officer:
+            log_departmental_document_diagnostic(
+                request,
+                "document_authorization_rejected",
+                authorization_branch="exam_officer_not_assigned_to_payment_department",
+                response_status=403,
+            )
             raise PermissionDenied
+        authorization_branch = "assigned_exam_officer"
     elif request.user.has_role(User.Role.HOD, User.Role.LECTURER):
         if document.payment.department_id not in staff_department_ids(request.user):
+            log_departmental_document_diagnostic(
+                request,
+                "document_authorization_rejected",
+                authorization_branch="staff_not_assigned_to_payment_department",
+                response_status=403,
+            )
             raise PermissionDenied
+        authorization_branch = "assigned_staff"
     elif request.user.has_role(User.Role.STUDENT):
         if document.payment.student_id != request.user.id:
+            log_departmental_document_diagnostic(
+                request,
+                "document_authorization_rejected",
+                authorization_branch="student_not_payment_owner",
+                response_status=403,
+            )
             raise PermissionDenied
+        authorization_branch = "payment_owner_student"
     else:
+        log_departmental_document_diagnostic(
+            request,
+            "document_authorization_rejected",
+            authorization_branch="no_supported_document_role",
+            response_status=403,
+        )
         raise PermissionDenied
+    log_departmental_document_diagnostic(
+        request,
+        "document_authorization_succeeded",
+        authorization_branch=authorization_branch,
+    )
     return _download_file_response(document.file, request)
 
 
