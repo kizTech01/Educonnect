@@ -20,10 +20,24 @@ services:
         value: educonnect.devs.surf
       - key: DJANGO_TIME_ZONE
         value: Africa/Lagos
-      # Docker runs the application from /app; store uploads on Render's
-      # persistent disk rather than the container filesystem.
+      # Filesystem media remains available only for non-R2 fallback deployments.
       - key: DJANGO_MEDIA_ROOT
         value: /opt/render/project/src/media
+      # Keep R2 private. Values are configured in Render, never committed.
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_STORAGE_BUCKET_NAME
+        sync: false
+      - key: AWS_S3_ENDPOINT_URL
+        sync: false
+      - key: AWS_S3_REGION_NAME
+        sync: false
+      - key: AWS_DEFAULT_ACL
+        sync: false
+      - key: AWS_QUERYSTRING_AUTH
+        sync: false
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: BOOTSTRAP_ADMIN_USERNAME
@@ -60,6 +74,41 @@ services:
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
+      - key: AWS_ACCESS_KEY_ID
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_ACCESS_KEY_ID
+      - key: AWS_SECRET_ACCESS_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_SECRET_ACCESS_KEY
+      - key: AWS_STORAGE_BUCKET_NAME
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_STORAGE_BUCKET_NAME
+      - key: AWS_S3_ENDPOINT_URL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_S3_ENDPOINT_URL
+      - key: AWS_S3_REGION_NAME
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_S3_REGION_NAME
+      - key: AWS_DEFAULT_ACL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_DEFAULT_ACL
+      - key: AWS_QUERYSTRING_AUTH
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_QUERYSTRING_AUTH
       - key: DJANGO_TIME_ZONE
         value: Africa/Lagos
       - key: DJANGO_SECRET_KEY
@@ -95,6 +144,41 @@ services:
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
+      - key: AWS_ACCESS_KEY_ID
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_ACCESS_KEY_ID
+      - key: AWS_SECRET_ACCESS_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_SECRET_ACCESS_KEY
+      - key: AWS_STORAGE_BUCKET_NAME
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_STORAGE_BUCKET_NAME
+      - key: AWS_S3_ENDPOINT_URL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_S3_ENDPOINT_URL
+      - key: AWS_S3_REGION_NAME
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_S3_REGION_NAME
+      - key: AWS_DEFAULT_ACL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_DEFAULT_ACL
+      - key: AWS_QUERYSTRING_AUTH
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: AWS_QUERYSTRING_AUTH
       - key: DJANGO_TIME_ZONE
         value: Africa/Lagos
       - key: DJANGO_SECRET_KEY

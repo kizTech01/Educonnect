@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from config.domain import core_domain_settings, parse_csv, unique
+from config.storage import default_media_storage
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -254,9 +255,7 @@ MEDIA_ROOT = Path(os.getenv("DJANGO_MEDIA_ROOT", "").strip() or BASE_DIR / "medi
 
 # Storage
 STORAGES = {
-    "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
-    },
+    "default": default_media_storage(os.environ, debug=DEBUG),
 
 
     "staticfiles": {
