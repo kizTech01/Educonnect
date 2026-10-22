@@ -11,6 +11,7 @@ from django.apps import apps
 from django.conf import settings
 from django.core import mail
 from django.core.exceptions import ValidationError
+from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import models, transaction
 from django.http.request import validate_host
@@ -1338,6 +1339,13 @@ class ProductionMediaConfigurationTests(TestCase):
 
         self.assertIn("DJANGO_MEDIA_ROOT", render_file)
         self.assertIn("/opt/render/project/src/media", render_file)
+
+    def test_default_storage_uses_the_configured_media_root(self):
+        self.assertEqual(
+            settings.STORAGES["default"]["BACKEND"],
+            "django.core.files.storage.FileSystemStorage",
+        )
+        self.assertEqual(Path(default_storage.location), Path(settings.MEDIA_ROOT))
 
     def test_direct_media_urls_are_not_served_by_django_or_caddy(self):
         response = self.client.get("/media/private-document.pdf")

@@ -69,6 +69,7 @@ from .forms import (
     DepartmentPaymentGatewayForm,
     DepartmentCoursePaymentGatewayForm,
     DepartmentalAdditionalDocumentForm,
+    DepartmentalDocumentReplacementForm,
     ExamCardAIConfigurationForm,
     ExamCardAIReferenceDocumentForm,
     DepartmentalAssociationForm,
@@ -1604,6 +1605,18 @@ def staff_department_ids(user):
     return department_ids
 
 
+def _storage_file_is_available(uploaded_file):
+    """Return whether a FileField's configured storage can read its object."""
+    try:
+        return bool(
+            uploaded_file
+            and uploaded_file.name
+            and uploaded_file.storage.exists(uploaded_file.name)
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def departmental_download_context(request, scope="admin", department=None):
     search_form = DepartmentalSearchForm(request.GET or None)
     current_session = current_departmental_session()
@@ -1654,6 +1667,28 @@ def departmental_download_context(request, scope="admin", department=None):
             selected_student_payments = selected_student_payments.filter(
                 department_id__in=staff_department_ids_for_request
             )
+        # The protected download route remains the authority for access.  This
+        # flag only lets an institution administrator see which records need
+        # recovery; it never exposes a storage path or file contents.
+        selected_student_payments = selected_student_payments.prefetch_related("documents")
+        if scope == "admin":
+            for payment in selected_student_payments:
+                for document in payment.documents.all():
+                    document.storage_file_missing = not _storage_file_is_available(document.file)
+
+    missing_documents = []
+    if scope == "admin":
+        institution = getattr(request, "institution", None) or request.user.institution
+        if institution:
+            # This tenant-filtered inventory finds unavailable records even
+            # when a student has no current-session payment to select above.
+            documents = DepartmentalPaymentDocument.all_objects.filter(
+                payment__institution=institution
+            ).select_related("payment__student", "payment__department", "payment__session")
+            for document in documents:
+                if not _storage_file_is_available(document.file):
+                    document.storage_file_missing = True
+                    missing_documents.append(document)
     department_totals = (
         payments.values("department__id", "department__name")
         .annotate(total=Count("id"))
@@ -1674,6 +1709,7 @@ def departmental_download_context(request, scope="admin", department=None):
         "departmental_level_totals": level_totals,
         "departmental_download_scope": scope,
         "departmental_current_session": current_session,
+        "departmental_missing_documents": missing_documents,
     }
 
 
@@ -5414,6 +5450,61 @@ def admin_departmental_download(request):
         **departmental_download_context(request, scope="admin"),
     )
     return render(request, "portal/admin_departmental_download.html", context)
+
+
+@role_required(User.Role.ADMIN)
+@require_http_methods(["POST"])
+def admin_replace_departmental_document(request, document_id):
+    """Replace an unavailable departmental upload within the current tenant.
+
+    Save the replacement through the FileField's configured storage before
+    changing the database reference.  This preserves the payment/document
+    relationship and avoids replacing a reference when the upload fails.
+    """
+    # Tenant middleware supplies the host-resolved institution in production.
+    # The authenticated administrator's tenant is the same safe fallback used
+    # by the portal's central-host legacy flow.
+    institution = getattr(request, "institution", None) or request.user.institution
+    if institution is None:
+        raise PermissionDenied("An institution context is required to recover documents.")
+    document = get_object_or_404(
+        DepartmentalPaymentDocument.all_objects.select_related("payment"),
+        pk=document_id,
+        payment__institution=institution,
+    )
+    if _storage_file_is_available(document.file):
+        messages.error(request, "This document is available and does not need recovery.")
+        return redirect(f"{reverse('portal:admin-departmental-download')}?payment={document.payment_id}")
+
+    form = DepartmentalDocumentReplacementForm(request.POST, request.FILES)
+    if not form.is_valid():
+        messages.error(request, "Upload a valid replacement document of 10 MB or smaller.")
+        return redirect(f"{reverse('portal:admin-departmental-download')}?payment={document.payment_id}")
+    try:
+        # FieldFile.save delegates to the configured default storage backend.
+        # save=False leaves the current database reference intact until the
+        # replacement object has been written successfully.
+        document.file.save(
+            form.cleaned_data["replacement_file"].name,
+            form.cleaned_data["replacement_file"],
+            save=False,
+        )
+        document.save(update_fields=["file", "updated_at"])
+    except (OSError, ValueError):
+        messages.error(request, "The replacement could not be stored. Please try again later.")
+        return redirect(f"{reverse('portal:admin-departmental-download')}?payment={document.payment_id}")
+
+    AuditLog.objects.create(
+        institution=institution,
+        user=request.user,
+        action="departmental_document_replaced",
+        object_type="DepartmentalPaymentDocument",
+        object_id=str(document.pk),
+        description="Institution administrator replaced an unavailable departmental document.",
+        ip_address=_client_ip(request),
+    )
+    messages.success(request, "Departmental document replacement uploaded.")
+    return redirect(f"{reverse('portal:admin-departmental-download')}?payment={document.payment_id}")
 
 
 @role_required(User.Role.ADMIN)

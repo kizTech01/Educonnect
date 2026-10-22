@@ -1627,6 +1627,24 @@ class DepartmentalAdditionalDocumentForm(forms.Form):
     )
 
 
+class DepartmentalDocumentReplacementForm(forms.Form):
+    """A bounded, administrator-only replacement for an unavailable upload."""
+
+    replacement_file = forms.FileField(
+        label="Replacement document",
+        validators=[FileExtensionValidator(allowed_extensions=["pdf", "jpg", "jpeg", "png", "doc", "docx"])],
+        widget=forms.ClearableFileInput(
+            attrs={"class": "input-field", "accept": ".pdf,.jpg,.jpeg,.png,.doc,.docx"}
+        ),
+    )
+
+    def clean_replacement_file(self):
+        uploaded_file = self.cleaned_data["replacement_file"]
+        if uploaded_file.size > 10 * 1024 * 1024:
+            raise forms.ValidationError("Replacement documents must be 10 MB or smaller.")
+        return uploaded_file
+
+
 class ExamCardAIConfigurationForm(StyledModelForm):
     class Meta:
         model = ExamCardAIConfiguration

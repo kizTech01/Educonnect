@@ -117,6 +117,7 @@ urlpatterns = [
     path("admin-portal/departmental/apis/", views.admin_departmental_apis, name="admin-departmental-apis"),
     path("admin-portal/departmental/fees/", views.admin_departmental_fees, name="admin-departmental-fees"),
     path("admin-portal/departmental/download/", views.admin_departmental_download, name="admin-departmental-download"),
+    path("admin-portal/departmental/documents/<int:document_id>/replace/", views.admin_replace_departmental_document, name="admin-replace-departmental-document"),
     path("admin-portal/departmental/users/", views.admin_departmental_users, name="admin-departmental-users"),
     path("admin-portal/course-api/", views.admin_course_api, name="admin-course-api"),
     path("admin-portal/departments/", views.admin_departments, name="admin-departments"),

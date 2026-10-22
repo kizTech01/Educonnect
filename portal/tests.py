@@ -743,6 +743,90 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "White Form")
         self.assertContains(response, reverse("portal:download-departmental-document", args=[payment.documents.first().id]))
 
+    def test_institution_admin_can_replace_only_a_missing_departmental_document(self):
+        payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+        )
+        document = DepartmentalPaymentDocument.objects.create(
+            payment=payment,
+            category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="White Form",
+        )
+        document.file.name = "departmental/missing-white-form.pdf"
+        document.save(update_fields=["file", "updated_at"])
+
+        self.client.force_login(self.admin)
+        page = self.client.get(reverse("portal:admin-departmental-download"), {"payment": payment.id})
+        self.assertContains(page, "File unavailable")
+        response = self.client.post(
+            reverse("portal:admin-replace-departmental-document", args=[document.id]),
+            {"replacement_file": SimpleUploadedFile("replacement.pdf", b"replacement", content_type="application/pdf")},
+        )
+
+        self.assertRedirects(response, f"{reverse('portal:admin-departmental-download')}?payment={payment.id}")
+        document.refresh_from_db()
+        self.assertEqual(document.payment_id, payment.id)
+        self.assertTrue(document.file.storage.exists(document.file.name))
+        with document.file.open("rb") as replacement:
+            self.assertEqual(replacement.read(), b"replacement")
+        self.assertTrue(AuditLog.objects.filter(
+            action="departmental_document_replaced", object_id=str(document.id), user=self.admin,
+        ).exists())
+
+    def test_departmental_document_recovery_is_tenant_and_role_scoped(self):
+        other_institution = Institution.objects.create(
+            name="Other University",
+            institution_code="OTHER-RECOVERY",
+            email="other-recovery@example.com",
+            subdomain="other-recovery",
+            status=Institution.Status.ACTIVE,
+        )
+        other_department = Department.all_objects.create(
+            institution=other_institution, name="Other Computing", code="OCS",
+        )
+        other_student = User.all_objects.create_user(
+            institution=other_institution,
+            username="other-recovery-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=other_department,
+        )
+        other_payment = DepartmentalPayment.all_objects.create(
+            institution=other_institution,
+            student=other_student,
+            department=other_department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+        )
+        other_document = DepartmentalPaymentDocument.all_objects.create(
+            institution=other_institution,
+            payment=other_payment,
+            category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="Other White Form",
+        )
+        other_document.file.name = "departmental/missing-other-white-form.pdf"
+        other_document.save(update_fields=["file", "updated_at"])
+        replacement_url = reverse("portal:admin-replace-departmental-document", args=[other_document.id])
+
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.post(
+            replacement_url,
+            {"replacement_file": SimpleUploadedFile("replacement.pdf", b"replacement")},
+        ).status_code, 404)
+
+        self.client.force_login(self.lecturer)
+        self.assertEqual(self.client.post(
+            replacement_url,
+            {"replacement_file": SimpleUploadedFile("replacement.pdf", b"replacement")},
+        ).status_code, 403)
+        other_document.refresh_from_db()
+        self.assertEqual(other_document.file.name, "departmental/missing-other-white-form.pdf")
+
     def test_staff_student_view_includes_all_paid_departmental_sessions_and_documents(self):
         from .models import DepartmentalPaymentDocument
 

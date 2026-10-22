@@ -31,6 +31,35 @@
         </div>
     </form>
 
+    {% if departmental_download_scope == 'admin' and departmental_missing_documents %}
+        <section class="panel-card">
+            <div class="panel-head">
+                <div>
+                    <h3>Unavailable departmental documents</h3>
+                    <p class="muted-note">These tenant-scoped records have no readable storage object. Uploading a replacement preserves each existing document and payment relationship.</p>
+                </div>
+                <span class="status-pill warning">{{ departmental_missing_documents|length }} to recover</span>
+            </div>
+            <div class="message-list">
+                {% for document in departmental_missing_documents %}
+                    <div class="message-item shell">
+                        <div>
+                            <strong>{{ document.get_category_display }}: {{ document.title }}</strong>
+                            <span>{{ document.payment.student.full_name }} | {{ document.payment.department.name }} | {{ document.payment.session.name }}</span>
+                        </div>
+                        <form method="post" action="{% url 'portal:admin-replace-departmental-document' document.id %}" enctype="multipart/form-data" class="stack-form">
+                            {% csrf_token %}
+                            <label>Replacement
+                                <input type="file" name="replacement_file" class="input-field" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" required>
+                            </label>
+                            <button type="submit" class="ghost-btn small">Upload replacement</button>
+                        </form>
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+    {% endif %}
+
     <div class="split-layout departmental-summary">
         <div class="panel-card">
             <div class="panel-head">
@@ -82,6 +111,16 @@
                                         </div>
                                         <a href="{% url 'portal:download-departmental-document' document.id %}" class="ghost-btn small file-action-btn" target="_blank" rel="noopener">View</a>
                                         <a href="{% url 'portal:download-departmental-document' document.id %}?download=1" class="ghost-btn small file-action-btn">Download</a>
+                                        {% if departmental_download_scope == 'admin' and document.storage_file_missing %}
+                                            <form method="post" action="{% url 'portal:admin-replace-departmental-document' document.id %}" enctype="multipart/form-data" class="stack-form">
+                                                {% csrf_token %}
+                                                <span class="status-pill warning">File unavailable</span>
+                                                <label>Replacement {{ document.get_category_display }}
+                                                    <input type="file" name="replacement_file" class="input-field" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" required>
+                                                </label>
+                                                <button type="submit" class="ghost-btn small">Upload replacement</button>
+                                            </form>
+                                        {% endif %}
                                     </div>
                                 {% empty %}
                                     <p class="empty-text">No documents uploaded for this session.</p>
