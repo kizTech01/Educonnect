@@ -1,14 +1,44 @@
 {% extends 'portal/dashboard_base.html' %}
 
 {% block dashboard_content %}
-<section class="panel-card">
-  <p class="muted-note">You are using the <strong>{{ ai_role_label }}</strong> AI scope for {{ request.institution.name }}. It can access only information authorised for this active role and institution. It does not perform administrative actions; approved bulk operations use the separate review workflow.</p>
-  <form method="post">{% csrf_token %}
-    <label for="ai-question">Ask a question</label>
-    <textarea class="input-field" id="ai-question" name="question" rows="4" required>{{ question }}</textarea>
-    <button class="button" type="submit">Ask EduConnect AI</button>
-  </form>
-  {% if ai_examples %}<p class="muted-note">Try: {% for example in ai_examples %}{% if not forloop.first %} · {% endif %}&ldquo;{{ example }}&rdquo;{% endfor %}</p>{% endif %}
-  {% if answer %}<div class="resource-card" style="margin-top: 1rem"><strong>Response</strong><p>{{ answer }}</p></div>{% endif %}
+<section class="split-layout ai-assistant-layout">
+  <aside class="panel-card">
+    <div class="panel-head"><h2>Conversations</h2></div>
+    <p class="muted-note">Your chats are saved privately for this role and institution.</p>
+    <p><a class="ghost-btn small" href="{% url 'portal:ai-assistant' %}">New conversation</a></p>
+    <div class="message-list">
+      {% for item in conversations %}
+        <a class="message-item shell{% if conversation and item.id == conversation.id %} selected{% endif %}" href="{% url 'portal:ai-assistant' %}?conversation={{ item.id }}">
+          <div><strong>{{ item.title|default:"New conversation"|truncatechars:64 }}</strong><span>{{ item.updated_at|date:"d M Y, H:i" }}</span></div>
+        </a>
+      {% empty %}
+        <p class="empty-text">Your saved conversations will appear here.</p>
+      {% endfor %}
+    </div>
+  </aside>
+  <section class="panel-card">
+    <div class="panel-head"><h2>EduConnect AI</h2></div>
+    <p class="muted-note">You are using the <strong>{{ ai_role_label }}</strong> AI scope for {{ request.institution.name }}. It remembers this conversation, can use only information authorised for this active role and institution, and cannot make administrative changes.</p>
+    <div class="message-list ai-conversation-history" aria-live="polite">
+      {% for message in conversation_messages %}
+        <article class="message-item shell{% if message.author == 'user' %} sent-message{% endif %}">
+          <div>
+            <strong>{{ message.get_author_display }}</strong>
+            <p>{{ message.content|linebreaksbr }}</p>
+            <span>{{ message.created_at|date:"d M Y, H:i" }}</span>
+          </div>
+        </article>
+      {% empty %}
+        <p class="empty-text">Start a conversation. EduConnect AI will retain it here for your next visit.</p>
+      {% endfor %}
+    </div>
+    <form method="post" class="stack-form">{% csrf_token %}
+      {% if conversation %}<input type="hidden" name="conversation_id" value="{{ conversation.id }}">{% endif %}
+      <label for="ai-question">Ask a question</label>
+      <textarea class="input-field" id="ai-question" name="question" rows="4" maxlength="4000" required autofocus></textarea>
+      <button class="button" type="submit">Send message</button>
+    </form>
+    {% if ai_examples %}<p class="muted-note">Try: {% for example in ai_examples %}{% if not forloop.first %} · {% endif %}&ldquo;{{ example }}&rdquo;{% endfor %}</p>{% endif %}
+  </section>
 </section>
 {% endblock %}

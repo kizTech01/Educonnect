@@ -28,6 +28,8 @@ from .models import (
     AcademicSession,
     AuditLog,
     AIAutomationJob,
+    AIConversation,
+    AIConversationMessage,
     Course,
     CourseAllocationUpload,
     CoursePayment,
@@ -282,6 +284,81 @@ class InstitutionalRBACTests(TestCase):
         self.assertEqual(job.status, AIAutomationJob.Status.EXECUTED)
         self.assertTrue(User.objects.filter(username="LEC-001", role=User.Role.LECTURER).exists())
         self.assertTrue(AuditLog.objects.filter(action="ai_automation_executed", object_id=str(job.id)).exists())
+
+
+class AIConversationTests(TestCase):
+    def setUp(self):
+        self.institution = get_default_institution()
+        self.department = Department.objects.create(name="AI Studies", code="AI")
+        self.user = User.objects.create_user(
+            username="ai-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=self.department,
+        )
+        self.other_user = User.objects.create_user(
+            username="other-ai-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            department=self.department,
+        )
+
+    def test_assistant_saves_a_role_scoped_conversation_and_reuses_its_history(self):
+        self.client.force_login(self.user)
+        with patch("portal.views._openai_assistant_answer", return_value="Your department is AI Studies.") as assistant:
+            first_response = self.client.post(
+                reverse("portal:ai-assistant"),
+                {"question": "What is my department?"},
+            )
+            self.assertEqual(first_response.status_code, 200)
+            conversation = AIConversation.objects.get(user=self.user)
+            self.assertEqual(conversation.active_role, User.Role.STUDENT)
+            self.assertEqual(conversation.title, "What is my department?")
+            self.assertEqual(
+                list(conversation.messages.values_list("author", "content")),
+                [
+                    (AIConversationMessage.Author.USER, "What is my department?"),
+                    (AIConversationMessage.Author.ASSISTANT, "Your department is AI Studies."),
+                ],
+            )
+
+            second_response = self.client.post(
+                reverse("portal:ai-assistant"),
+                {"conversation_id": conversation.id, "question": "What did I ask first?"},
+            )
+
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(conversation.messages.count(), 4)
+        second_history = assistant.call_args_list[1].args[2]
+        self.assertEqual(
+            [(message.author, message.content) for message in second_history],
+            [
+                (AIConversationMessage.Author.USER, "What is my department?"),
+                (AIConversationMessage.Author.ASSISTANT, "Your department is AI Studies."),
+                (AIConversationMessage.Author.USER, "What did I ask first?"),
+            ],
+        )
+        self.assertContains(second_response, "What is my department?")
+        self.assertTrue(AuditLog.objects.filter(
+            action="ai_assistant_query", object_id=str(conversation.id),
+        ).exists())
+
+    def test_a_user_cannot_open_another_users_conversation(self):
+        conversation = AIConversation.objects.create(
+            institution=self.institution,
+            user=self.user,
+            active_role=User.Role.STUDENT,
+            title="Private chat",
+        )
+        self.client.force_login(self.other_user)
+
+        response = self.client.get(
+            reverse("portal:ai-assistant"),
+            {"conversation": conversation.id},
+        )
+
+        self.assertEqual(response.status_code, 404)
+
 
 class DepartmentAutomationTests(TestCase):
     def setUp(self):

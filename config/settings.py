@@ -307,6 +307,9 @@ SERVER_EMAIL = DEFAULT_FROM_EMAIL
 # import files. The portal keeps a local parser as a fallback when this is blank.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_AUTOMATION_MODEL = os.getenv("OPENAI_AUTOMATION_MODEL", "gpt-4.1-mini").strip()
+OPENAI_ASSISTANT_MODEL = os.getenv("OPENAI_ASSISTANT_MODEL", "gpt-4.1-mini").strip()
+AI_ASSISTANT_HISTORY_MESSAGES = max(2, int(os.getenv("AI_ASSISTANT_HISTORY_MESSAGES", "16")))
+AI_ASSISTANT_MAX_OUTPUT_TOKENS = max(128, int(os.getenv("AI_ASSISTANT_MAX_OUTPUT_TOKENS", "900")))
 OPENAI_LOGO_LOOKUP_MODEL = os.getenv("OPENAI_LOGO_LOOKUP_MODEL", "gpt-5").strip()
 OPENAI_LOGO_PROCESSING_MODEL = os.getenv("OPENAI_LOGO_PROCESSING_MODEL", "gpt-image-2").strip()
 

@@ -649,6 +649,58 @@ class AIAutomationJob(TimeStampedModel):
         indexes = [models.Index(fields=["institution", "status", "created_at"])]
 
 
+class AIConversation(TimeStampedModel):
+    """A user's saved, tenant-scoped EduConnect AI conversation."""
+
+    user = models.ForeignKey("User", on_delete=models.CASCADE, related_name="ai_conversations")
+    active_role = models.CharField(max_length=32, choices=User.Role.choices)
+    title = models.CharField(max_length=160, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        indexes = [models.Index(fields=["institution", "user", "active_role", "updated_at"])]
+
+    def clean(self):
+        if self.user_id and self.institution_id and self.user.institution_id != self.institution_id:
+            raise ValidationError("AI conversations must belong to the user's institution.")
+
+    def save(self, *args, **kwargs):
+        if self.user_id and not self.institution_id:
+            self.institution = self.user.institution
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class AIConversationMessage(TimeStampedModel):
+    """One durable user or assistant message in an AI conversation."""
+
+    class Author(models.TextChoices):
+        USER = "user", "You"
+        ASSISTANT = "assistant", "EduConnect AI"
+
+    conversation = models.ForeignKey(
+        AIConversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    author = models.CharField(max_length=12, choices=Author.choices)
+    content = models.TextField()
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [models.Index(fields=["conversation", "created_at"])]
+
+    def clean(self):
+        if self.conversation_id and self.institution_id and self.conversation.institution_id != self.institution_id:
+            raise ValidationError("AI conversation messages must match their conversation's institution.")
+
+    def save(self, *args, **kwargs):
+        if self.conversation_id and not self.institution_id:
+            self.institution = self.conversation.institution
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
 class SubscriptionPlan(models.Model):
     """Database-managed commercial plans; no prices belong in views or templates."""
 
