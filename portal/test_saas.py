@@ -142,6 +142,32 @@ class ProtectedStorageFailureTests(SimpleTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response["Cache-Control"], "private, no-store, max-age=0")
 
+    def test_view_is_inline_while_download_forces_an_attachment(self):
+        with tempfile.TemporaryDirectory() as media_root:
+            storage = FileSystemStorage(location=media_root)
+            name = storage.save(
+                "courses/viewable.pdf",
+                SimpleUploadedFile("viewable.pdf", b"%PDF-1.4 test"),
+            )
+            uploaded_file = SimpleNamespace(
+                name=name,
+                storage=storage,
+                open=lambda mode: storage.open(name, mode),
+            )
+
+            view_response = _download_file_response(
+                uploaded_file,
+                RequestFactory().get("/courses/1/download/"),
+            )
+            download_response = _download_file_response(
+                uploaded_file,
+                RequestFactory().get("/courses/1/download/?download=1"),
+            )
+            self.assertTrue(view_response["Content-Disposition"].startswith("inline;"))
+            self.assertTrue(download_response["Content-Disposition"].startswith("attachment;"))
+            view_response.close()
+            download_response.close()
+
 
 class CoreDomainConfigurationTests(SimpleTestCase):
     def test_core_domain_generates_hosts_and_https_csrf_origins(self):
