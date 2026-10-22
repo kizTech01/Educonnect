@@ -6029,8 +6029,17 @@ def exam_card_approvals(request):
 
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN, User.Role.HOD, User.Role.EXAM_OFFICER)
 def download_departmental_document(request, document_id):
+    # A departmental document is owned by its payment.  Use that authoritative
+    # relationship for tenant scoping rather than relying on the document's
+    # denormalised institution value alone: older records can predate tenant
+    # assignment or have been repaired independently of their payment.
+    documents = DepartmentalPaymentDocument.all_objects.select_related(
+        "payment", "payment__student", "payment__department"
+    )
+    if request.institution:
+        documents = documents.filter(payment__institution=request.institution)
     document = get_object_or_404(
-        DepartmentalPaymentDocument.objects.select_related("payment", "payment__student", "payment__department"),
+        documents,
         pk=document_id,
     )
     # Staff roles take precedence over the legacy primary ``role`` field.

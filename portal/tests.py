@@ -13,6 +13,7 @@ from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection
+from django.http import Http404
 from django.test import Client
 from django.test import RequestFactory
 from django.test import TestCase
@@ -65,7 +66,7 @@ from .models import (
 )
 from .services import dispatch_due_course_reminders, ensure_default_admin_user
 from .forms import CourseForm
-from .views import AI_ROLE_EXAMPLES, _ai_answer, sidebar_links
+from .views import AI_ROLE_EXAMPLES, _ai_answer, download_departmental_document, sidebar_links
 from .automation import import_course_allocations, import_department_lecturers, import_programmes
 
 
@@ -977,6 +978,56 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(download_response.status_code, 200)
         self.assertTrue(download_response["Content-Disposition"].startswith("attachment"))
         self.assertEqual(b"".join(download_response.streaming_content), b"departmental file")
+
+    def test_departmental_document_uses_payment_tenant_when_legacy_child_tenant_is_stale(self):
+        """A valid payment-owned document must not be hidden by stale child data."""
+        payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=self.session,
+            status=DepartmentalPayment.Status.PAID,
+            total_amount=Decimal("4000.00"),
+        )
+        document = DepartmentalPaymentDocument.objects.create(
+            payment=payment,
+            category=DepartmentalPaymentDocument.Category.WHITE_FORM,
+            title="Legacy tenant document",
+            file=SimpleUploadedFile("legacy.pdf", b"tenant document", content_type="application/pdf"),
+        )
+        other_institution = Institution.objects.create(
+            name="Other Institution",
+            institution_code="OTHER-INSTITUTION",
+            email="other@example.com",
+            subdomain="other-institution",
+            status=Institution.Status.ACTIVE,
+        )
+        # Simulate data written before a child record's tenant was reconciled.
+        DepartmentalPaymentDocument.all_objects.filter(pk=document.pk).update(
+            institution=other_institution
+        )
+
+        document_url = reverse("portal:download-departmental-document", args=[document.id])
+        request = self.factory.get(document_url)
+        request.user = self.student
+        request.institution = payment.institution
+        token = set_current_institution(payment.institution)
+        try:
+            response = download_departmental_document(request, document.id)
+        finally:
+            reset_current_institution(token)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Disposition"].startswith("inline"))
+        self.assertEqual(b"".join(response.streaming_content), b"tenant document")
+
+        request = self.factory.get(document_url)
+        request.user = self.student
+        request.institution = other_institution
+        token = set_current_institution(other_institution)
+        try:
+            with self.assertRaises(Http404):
+                download_departmental_document(request, document.id)
+        finally:
+            reset_current_institution(token)
 
     def test_paid_student_can_upload_additional_departmental_documents(self):
         from .models import DepartmentalPaymentDocument
