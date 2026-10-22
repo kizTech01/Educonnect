@@ -4,7 +4,6 @@ import struct
 import zlib
 from io import BytesIO
 from math import ceil
-from pathlib import Path
 
 
 PAGE_WIDTH = 612
@@ -216,17 +215,18 @@ def _load_png_bytes(data: bytes):
     return width, height, zlib.compress(bytes(pixels)), "FlateDecode"
 
 
-def _load_png_image(image_path: Path):
-    if not image_path.exists():
+def _load_png_image(image_bytes: bytes | None):
+    if not image_bytes:
         return None
-    return _load_png_bytes(image_path.read_bytes())
-
-
-def _load_jpeg_image(image_path: Path):
-    if not image_path.exists():
+    try:
+        return _load_png_bytes(image_bytes)
+    except (ValueError, struct.error, zlib.error):
         return None
 
-    data = image_path.read_bytes()
+
+def _load_jpeg_image(data: bytes | None):
+    if not data:
+        return None
     if not data.startswith(b"\xff\xd8"):
         return None
 
@@ -259,21 +259,13 @@ def _load_jpeg_image(image_path: Path):
     return None
 
 
-def _load_passport_photo(passport_photo_path: str | None):
-    if not passport_photo_path:
-        return None
-    image_path = Path(passport_photo_path)
-    return _load_png_image(image_path) or _load_jpeg_image(image_path)
+def _load_passport_photo(passport_photo_bytes: bytes | None):
+    return _load_png_image(passport_photo_bytes) or _load_jpeg_image(passport_photo_bytes)
 
 
-def _load_logo(logo_path: str | None):
+def _load_logo(logo_bytes: bytes | None):
     """Load only the logo supplied for the institution issuing this document."""
-    if logo_path:
-        image_path = Path(logo_path)
-        logo = _load_png_image(image_path) or _load_jpeg_image(image_path)
-        if logo:
-            return logo
-    return None
+    return _load_png_image(logo_bytes) or _load_jpeg_image(logo_bytes)
 
 
 def _make_qr_code(verification_url: str | None):
@@ -311,8 +303,8 @@ def build_exam_card_pdf(
     fields: list[tuple[str, str]],
     registered_courses: list[str] | None = None,
     portrait_text: str | None = None,
-    passport_photo_path: str | None = None,
-    school_logo_path: str | None = None,
+    passport_photo_bytes: bytes | None = None,
+    school_logo_bytes: bytes | None = None,
     verification_url: str | None = None,
 ) -> bytes:
     student_rows = [(label, value) for label, value in fields if label not in {"Department", "Clearance"}][:6] or [("Details", "")]
@@ -331,8 +323,8 @@ def build_exam_card_pdf(
     context_y = student_y + student_height + section_gap
     card_height = context_y + context_height + 128
 
-    logo = _load_logo(school_logo_path)
-    passport_photo = _load_passport_photo(passport_photo_path)
+    logo = _load_logo(school_logo_bytes)
+    passport_photo = _load_passport_photo(passport_photo_bytes)
     qr_code = _make_qr_code(verification_url)
 
     commands: list[str] = ["q"]

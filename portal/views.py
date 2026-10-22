@@ -411,15 +411,52 @@ def institution_logo(request, institution_subdomain):
             content_type=institution.logo_content_type or "application/octet-stream",
         )
     else:
+        storage_status = _departmental_storage_status(institution.logo)
+        if storage_status == "missing":
+            raise Http404("Institution logo file not found.")
+        if storage_status != "available":
+            return _storage_unavailable_response()
         try:
             logo_file = institution.logo.open("rb")
-        except OSError as exc:
-            raise Http404("Institution logo file not found.") from exc
+        except Exception as exc:
+            if _storage_exception_status(exc) == "missing":
+                raise Http404("Institution logo file not found.") from exc
+            return _storage_unavailable_response()
         response = FileResponse(logo_file, as_attachment=False)
     # The URL has a tenant segment and a version query string, but do not let
     # a shared intermediary cache substitute any institution's branding.
     response["Cache-Control"] = "private, no-store, max-age=0"
     return response
+
+
+def _storage_exception_status(exc):
+    """Classify a storage exception without exposing provider details."""
+    if isinstance(exc, FileNotFoundError):
+        return "missing"
+    response = getattr(exc, "response", None)
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    code = str(error.get("Code", "")).lower()
+    if code in {"404", "nosuchkey", "notfound"}:
+        return "missing"
+    return "storage_unavailable"
+
+
+def _storage_unavailable_response():
+    response = HttpResponse("Document storage is temporarily unavailable.", status=503)
+    response["Cache-Control"] = "private, no-store, max-age=0"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _read_stored_file(uploaded_file):
+    """Read a private storage object for a library that needs bytes, not a path."""
+    if not uploaded_file or not uploaded_file.name:
+        return None
+    try:
+        with uploaded_file.open("rb") as source:
+            return source.read()
+    except Exception:
+        return None
 
 
 def _download_file_response(uploaded_file, request):
@@ -456,9 +493,12 @@ def _download_file_response(uploaded_file, request):
         file_name=str(uploaded_file.name),
         **_departmental_storage_diagnostic_details(uploaded_file),
     )
+    storage_status = _departmental_storage_status(uploaded_file)
+    if storage_status not in {"available", "missing"}:
+        return _storage_unavailable_response()
     try:
         source = uploaded_file.open("rb")
-    except (OSError, ValueError) as exc:
+    except Exception as exc:
         log_departmental_document_diagnostic(
             request,
             "file_open_failed_404",
@@ -466,9 +506,15 @@ def _download_file_response(uploaded_file, request):
             file_name_empty=False,
             file_opened=False,
             exception_class=exc.__class__.__name__,
-            final_404_reason="storage_open_failed",
+            final_404_reason=(
+                "storage_open_failed"
+                if _storage_exception_status(exc) == "missing"
+                else "storage_unavailable"
+            ),
         )
-        raise Http404("Document file not found.") from exc
+        if _storage_exception_status(exc) == "missing":
+            raise Http404("Document file not found.") from exc
+        return _storage_unavailable_response()
     log_departmental_document_diagnostic(
         request,
         "file_open_succeeded",
@@ -1232,7 +1278,7 @@ def _document_text(document):
     try:
         with document.file.open("rb") as source:
             content = source.read()
-    except (OSError, ValueError):
+    except Exception:
         return ""
     name = document.file.name.lower()
     try:
@@ -1629,8 +1675,8 @@ def _departmental_storage_status(uploaded_file):
         if isinstance(storage, FileSystemStorage) and not Path(storage.location).is_dir():
             return "storage_unavailable"
         return "available" if storage.exists(uploaded_file.name) else "missing"
-    except (OSError, ValueError):
-        return "storage_error"
+    except Exception as exc:
+        return _storage_exception_status(exc)
 
 
 def _departmental_storage_diagnostic_details(uploaded_file):
@@ -5529,7 +5575,7 @@ def admin_replace_departmental_document(request, document_id):
             save=False,
         )
         document.save(update_fields=["file", "updated_at"])
-    except (OSError, ValueError):
+    except Exception:
         messages.error(request, "The replacement could not be stored. Please try again later.")
         return redirect(f"{reverse('portal:admin-departmental-download')}?payment={document.payment_id}")
 
@@ -6338,14 +6384,12 @@ def download_exam_card(request, payment_id):
     # authority. In particular, never substitute a legacy profile or a shared
     # application logo on a student document.
     card_brand = institution
-    try:
-        logo_path = card_brand.logo.path if card_brand and card_brand.logo else None
-    except (NotImplementedError, OSError, ValueError):
-        logo_path = None
-    try:
-        passport_photo_path = payment.student.passport_photo.path if payment.student.passport_photo else None
-    except (NotImplementedError, OSError, ValueError):
-        passport_photo_path = None
+    logo_bytes = (
+        bytes(card_brand.logo_data)
+        if card_brand and card_brand.logo_data
+        else _read_stored_file(card_brand.logo if card_brand else None)
+    )
+    passport_photo_bytes = _read_stored_file(payment.student.passport_photo)
     pdf_bytes = build_exam_card_pdf(
         school_name=card_brand.name if card_brand else "Educonnect",
         card_title="Departmental Examination Clearance Card",
@@ -6359,8 +6403,8 @@ def download_exam_card(request, payment_id):
         ],
         registered_courses=registered_courses,
         portrait_text=payment.student.full_name,
-        passport_photo_path=passport_photo_path,
-        school_logo_path=logo_path,
+        passport_photo_bytes=passport_photo_bytes,
+        school_logo_bytes=logo_bytes,
         verification_url=verification_url,
     )
     session_slug = payment.session.name.replace("/", "-")

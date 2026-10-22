@@ -2,7 +2,8 @@ import hashlib
 import hmac
 import json
 import tempfile
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import patch, PropertyMock
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -10,10 +11,12 @@ from pathlib import Path
 from django.apps import apps
 from django.conf import settings
 from django.core import mail
-from django.core.exceptions import ValidationError
-from django.core.files.storage import default_storage
+from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.files.storage import FileSystemStorage, default_storage, storages
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import models, transaction
+from django.http import Http404
+from django.test import RequestFactory
 from django.http.request import validate_host
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
@@ -49,8 +52,95 @@ from .services import (
     paystack_amount_in_kobo,
     send_subscription_expiry_notifications,
 )
-from .views import delete_institution_data
+from .views import _download_file_response, delete_institution_data
+from .pdf import build_exam_card_pdf
 from config.domain import core_domain_settings
+from config.storage import default_media_storage
+
+
+class CloudflareR2StorageConfigurationTests(SimpleTestCase):
+    r2_environment = {
+        "AWS_ACCESS_KEY_ID": "test-access-key",
+        "AWS_SECRET_ACCESS_KEY": "test-secret-key",
+        "AWS_STORAGE_BUCKET_NAME": "educonnect-private-test",
+        "AWS_S3_ENDPOINT_URL": "https://account-id.r2.cloudflarestorage.com",
+        "AWS_S3_REGION_NAME": "auto",
+        "AWS_DEFAULT_ACL": "private",
+        "AWS_QUERYSTRING_AUTH": "True",
+    }
+
+    def test_r2_storage_activates_only_when_configuration_is_complete(self):
+        storage = default_media_storage(self.r2_environment, debug=False)
+
+        self.assertEqual(storage["BACKEND"], "storages.backends.s3.S3Storage")
+        self.assertEqual(storage["OPTIONS"]["region_name"], "auto")
+        self.assertEqual(storage["OPTIONS"]["addressing_style"], "path")
+        self.assertIsNone(storage["OPTIONS"]["default_acl"])
+        self.assertTrue(storage["OPTIONS"]["querystring_auth"])
+        self.assertFalse(storage["OPTIONS"]["file_overwrite"])
+
+        from storages.backends.s3 import S3Storage
+
+        with self.settings(STORAGES={
+            "default": storage,
+            "staticfiles": settings.STORAGES["staticfiles"],
+        }):
+            storages._storages.clear()
+            configured_storage = storages["default"]
+            self.assertIsInstance(configured_storage, S3Storage)
+            self.assertEqual(configured_storage.bucket_name, "educonnect-private-test")
+            self.assertFalse(configured_storage.file_overwrite)
+        storages._storages.clear()
+
+    def test_r2_storage_allows_a_blank_acl_setting_without_sending_an_acl(self):
+        environment = {**self.r2_environment, "AWS_DEFAULT_ACL": ""}
+
+        storage = default_media_storage(environment, debug=False)
+
+        self.assertIsNone(storage["OPTIONS"]["default_acl"])
+
+    def test_local_development_uses_filesystem_storage_without_r2(self):
+        storage = default_media_storage({}, debug=True)
+
+        self.assertEqual(storage["BACKEND"], "django.core.files.storage.FileSystemStorage")
+
+    def test_production_rejects_incomplete_r2_configuration(self):
+        incomplete = {"AWS_ACCESS_KEY_ID": "test-access-key"}
+
+        with self.assertRaises(ImproperlyConfigured):
+            default_media_storage(incomplete, debug=False)
+
+
+class ProtectedStorageFailureTests(SimpleTestCase):
+    def setUp(self):
+        self.request = RequestFactory().get("/courses/1/download/")
+
+    def test_missing_object_stays_a_not_found_response(self):
+        class MissingStorage:
+            def exists(self, name):
+                return False
+
+        uploaded_file = SimpleNamespace(
+            name="courses/missing.pdf",
+            storage=MissingStorage(),
+            open=lambda mode: (_ for _ in ()).throw(FileNotFoundError()),
+        )
+
+        with self.assertRaises(Http404):
+            _download_file_response(uploaded_file, self.request)
+
+    def test_unavailable_storage_returns_a_safe_503(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            unavailable_root = Path(temporary_directory) / "missing-media-root"
+            uploaded_file = SimpleNamespace(
+                name="courses/unavailable.pdf",
+                storage=FileSystemStorage(location=unavailable_root),
+            )
+
+            response = _download_file_response(uploaded_file, self.request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response["Cache-Control"], "private, no-store, max-age=0")
 
 
 class CoreDomainConfigurationTests(SimpleTestCase):
@@ -178,6 +268,82 @@ class MultiInstitutionSaaSTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, logo_bytes)
+
+    def test_logo_replacement_never_serves_a_stale_database_snapshot(self):
+        institution = self.make_institution("FIRST", "first")
+        institution.logo.save(
+            "first.png", SimpleUploadedFile("first.png", b"original-logo"), save=True
+        )
+        institution.refresh_from_db()
+        self.assertEqual(institution.logo_data, b"original-logo")
+
+        # A new object can be saved even if a short-lived storage read fails
+        # while creating the optional database recovery copy. The older bytes
+        # must be discarded rather than shown as the newly uploaded logo.
+        with patch.object(institution.logo.storage, "open", side_effect=OSError):
+            institution.logo.save(
+                "replacement.png",
+                SimpleUploadedFile("replacement.png", b"replacement-logo"),
+                save=True,
+            )
+        institution.refresh_from_db()
+        self.assertEqual(institution.logo_data, b"")
+
+        response = self.client.get(
+            reverse("portal:institution-logo", args=[institution.subdomain]),
+            HTTP_HOST=f"first.{settings.CORE_DOMAIN}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.streaming_content), b"replacement-logo")
+
+    def test_every_institution_role_renders_its_own_logo(self):
+        institution = self.make_institution("FIRST", "first")
+        institution.logo.save(
+            "first.png", SimpleUploadedFile("first.png", b"first-logo"), save=True
+        )
+        plan = SubscriptionPlan.objects.create(
+            name="Branding test plan",
+            price=Decimal("0.00"),
+            billing_period=SubscriptionPlan.BillingPeriod.YEARLY,
+        )
+        Subscription.objects.create(
+            institution=institution,
+            plan=plan,
+            start_date=timezone.localdate(),
+            end_date=timezone.localdate() + timedelta(days=365),
+            status=Subscription.Status.ACTIVE,
+        )
+        logo_url = reverse("portal:institution-logo", args=[institution.subdomain])
+        role_routes = {
+            User.Role.ADMIN: reverse("portal:admin-dashboard"),
+            User.Role.STUDENT: reverse("portal:student-dashboard"),
+            User.Role.LECTURER: reverse("portal:lecturer-dashboard"),
+            User.Role.HOD: reverse("portal:lecturer-dashboard"),
+            User.Role.MIS: reverse("portal:role-workspace"),
+            User.Role.BURSARY: reverse("portal:role-workspace"),
+            User.Role.ADMISSION_OFFICER: reverse("portal:role-workspace"),
+            User.Role.ACADEMIC_PLANNING: reverse("portal:role-workspace"),
+            User.Role.EXAM_OFFICER: reverse("portal:role-workspace"),
+            User.Role.SENATE_MEMBER: reverse("portal:role-workspace"),
+            User.Role.PARENT_GUARDIAN: reverse("portal:role-workspace"),
+        }
+
+        for role, route in role_routes.items():
+            user = User.all_objects.create_user(
+                username=f"{role}-user",
+                password="safe-password-123",
+                role=role,
+                institution=institution,
+            )
+            self.client.force_login(user)
+            response = self.client.get(
+                route, HTTP_HOST=f"first.{settings.CORE_DOMAIN}"
+            )
+
+            self.assertEqual(response.status_code, 200, role)
+            self.assertContains(response, f"{logo_url}?v=")
+            self.client.logout()
 
     def test_tenant_without_a_logo_shows_a_clean_tenant_initial_fallback(self):
         institution = self.make_institution("FIRST", "first")
@@ -1334,11 +1500,12 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
 
 
 class ProductionMediaConfigurationTests(TestCase):
-    def test_render_uses_its_persistent_disk_for_django_media(self):
+    def test_render_does_not_configure_a_persistent_disk_for_django_media(self):
         render_file = (settings.BASE_DIR / "render.yaml").read_text(encoding="utf-8")
 
-        self.assertIn("DJANGO_MEDIA_ROOT", render_file)
-        self.assertIn("/opt/render/project/src/media", render_file)
+        self.assertNotIn("DJANGO_MEDIA_ROOT", render_file)
+        self.assertNotIn("mountPath:", render_file)
+        self.assertNotIn("sizeGB:", render_file)
 
     def test_default_storage_uses_the_configured_media_root(self):
         self.assertEqual(
@@ -1346,6 +1513,40 @@ class ProductionMediaConfigurationTests(TestCase):
             "django.core.files.storage.FileSystemStorage",
         )
         self.assertEqual(Path(default_storage.location), Path(settings.MEDIA_ROOT))
+
+    def test_local_storage_abstraction_can_save_read_and_delete_an_upload(self):
+        with tempfile.TemporaryDirectory() as media_root:
+            with self.settings(STORAGES={
+                "default": {
+                    "BACKEND": "django.core.files.storage.FileSystemStorage",
+                    "OPTIONS": {"location": media_root},
+                },
+                "staticfiles": settings.STORAGES["staticfiles"],
+            }):
+                storages._storages.clear()
+                storage = storages["default"]
+                name = storage.save("documents/test.txt", SimpleUploadedFile("test.txt", b"storage test"))
+                with storage.open(name, "rb") as uploaded_file:
+                    self.assertEqual(uploaded_file.read(), b"storage test")
+                storage.delete(name)
+                self.assertFalse(storage.exists(name))
+            storages._storages.clear()
+
+    def test_exam_card_pdf_accepts_storage_backed_image_bytes(self):
+        # This behaves like an unreadable image object. Passing storage bytes
+        # keeps PDF rendering independent from FieldFile.path, which remote
+        # storage backends do not provide, and safely omits bad image data.
+        image = b"not-an-image"
+
+        pdf = build_exam_card_pdf(
+            school_name="R2 University",
+            card_title="Exam Card",
+            fields=[("Student Name", "Storage Student")],
+            passport_photo_bytes=image,
+            school_logo_bytes=image,
+        )
+
+        self.assertTrue(pdf.startswith(b"%PDF"))
 
     def test_direct_media_urls_are_not_served_by_django_or_caddy(self):
         response = self.client.get("/media/private-document.pdf")

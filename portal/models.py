@@ -129,23 +129,35 @@ class Institution(models.Model):
             previous = type(self).objects.filter(pk=self.pk).values(
                 "logo", "logo_data"
             ).first()
+        logo_changed = previous is not None and previous["logo"] != self.logo.name
         should_snapshot_logo = bool(self.logo) and (
             previous is None
-            or previous["logo"] != self.logo.name
+            or logo_changed
             or not previous["logo_data"]
         )
 
         super().save(*args, **kwargs)
 
+        # A previous snapshot belongs to the previous file.  Never retain it
+        # after a replacement: if the new storage object is temporarily
+        # unreadable, serving the old bytes would show the wrong institution
+        # branding even though the FileField points at the new logo.
+        if logo_changed or (previous is not None and not self.logo):
+            type(self).objects.filter(pk=self.pk).update(
+                logo_data=b"", logo_content_type=""
+            )
+            self.logo_data = b""
+            self.logo_content_type = ""
+
         # FileField stores a newly uploaded file during super().save().  Read
         # it afterwards, then update directly to avoid recursively saving the
-        # model.  A storage failure must not reject a valid institution update;
-        # the logo endpoint can still serve its existing database copy.
+        # model. A storage failure must not reject a valid institution update;
+        # the endpoint will use the current FileField when it is available.
         if should_snapshot_logo:
             try:
                 with self.logo.storage.open(self.logo.name, "rb") as logo_file:
                     logo_data = logo_file.read()
-            except OSError:
+            except Exception:
                 return
             if logo_data:
                 content_type = mimetypes.guess_type(self.logo.name)[0] or "application/octet-stream"
