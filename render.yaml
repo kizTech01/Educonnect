@@ -9,10 +9,6 @@ services:
     # captured and the production schema has been reconciled.
     preDeployCommand: python manage.py diagnose_production_schema && python manage.py migrate --noinput
     startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --timeout 60
-    disk:
-      name: educonnect-media
-      mountPath: /opt/render/project/src/media
-      sizeGB: 1
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
@@ -20,24 +16,8 @@ services:
         value: educonnect.devs.surf
       - key: DJANGO_TIME_ZONE
         value: Africa/Lagos
-      # Filesystem media remains available only for non-R2 fallback deployments.
-      - key: DJANGO_MEDIA_ROOT
-        value: /opt/render/project/src/media
-      # Keep R2 private. Values are configured in Render, never committed.
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-      - key: AWS_STORAGE_BUCKET_NAME
-        sync: false
-      - key: AWS_S3_ENDPOINT_URL
-        sync: false
-      - key: AWS_S3_REGION_NAME
-        sync: false
-      - key: AWS_DEFAULT_ACL
-        sync: false
-      - key: AWS_QUERYSTRING_AUTH
-        sync: false
+      # Private R2 credentials are managed directly in Render for this
+      # production service; do not store or synchronize them in this Blueprint.
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: BOOTSTRAP_ADMIN_USERNAME
@@ -74,6 +54,9 @@ services:
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
+      # These R2 values are sourced from the declared web service.  The cron
+      # process imports Django settings with DEBUG=False, so it must receive
+      # the same private storage configuration.
       - key: AWS_ACCESS_KEY_ID
         fromService:
           type: web
@@ -144,6 +127,9 @@ services:
     envVars:
       - key: DJANGO_DEBUG
         value: "False"
+      # These R2 values are sourced from the declared web service.  The cron
+      # process imports Django settings with DEBUG=False, so it must receive
+      # the same private storage configuration.
       - key: AWS_ACCESS_KEY_ID
         fromService:
           type: web

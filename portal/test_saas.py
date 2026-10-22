@@ -92,6 +92,13 @@ class CloudflareR2StorageConfigurationTests(SimpleTestCase):
             self.assertFalse(configured_storage.file_overwrite)
         storages._storages.clear()
 
+    def test_r2_storage_allows_a_blank_acl_setting_without_sending_an_acl(self):
+        environment = {**self.r2_environment, "AWS_DEFAULT_ACL": ""}
+
+        storage = default_media_storage(environment, debug=False)
+
+        self.assertIsNone(storage["OPTIONS"]["default_acl"])
+
     def test_local_development_uses_filesystem_storage_without_r2(self):
         storage = default_media_storage({}, debug=True)
 
@@ -1493,11 +1500,12 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
 
 
 class ProductionMediaConfigurationTests(TestCase):
-    def test_render_uses_its_persistent_disk_for_django_media(self):
+    def test_render_does_not_configure_a_persistent_disk_for_django_media(self):
         render_file = (settings.BASE_DIR / "render.yaml").read_text(encoding="utf-8")
 
-        self.assertIn("DJANGO_MEDIA_ROOT", render_file)
-        self.assertIn("/opt/render/project/src/media", render_file)
+        self.assertNotIn("DJANGO_MEDIA_ROOT", render_file)
+        self.assertNotIn("mountPath:", render_file)
+        self.assertNotIn("sizeGB:", render_file)
 
     def test_default_storage_uses_the_configured_media_root(self):
         self.assertEqual(

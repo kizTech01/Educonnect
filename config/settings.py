@@ -247,9 +247,8 @@ STATICFILES_DIRS = (
 
 # Uploaded media
 MEDIA_URL = "/media/"
-# Docker deployments run from /app while Render's persistent disk may be
-# mounted elsewhere.  Keep the local default, but allow the deployment to
-# direct uploads to the mounted volume explicitly.
+# Keep the local default, while allowing a local development environment to
+# override the media directory explicitly.
 MEDIA_ROOT = Path(os.getenv("DJANGO_MEDIA_ROOT", "").strip() or BASE_DIR / "media")
 
 

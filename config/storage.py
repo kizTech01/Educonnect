@@ -14,7 +14,6 @@ R2_REQUIRED_ENVIRONMENT_VARIABLES = (
     "AWS_STORAGE_BUCKET_NAME",
     "AWS_S3_ENDPOINT_URL",
     "AWS_S3_REGION_NAME",
-    "AWS_DEFAULT_ACL",
     "AWS_QUERYSTRING_AUTH",
 )
 
@@ -54,7 +53,10 @@ def default_media_storage(environment, *, debug: bool):
         return {"BACKEND": "django.core.files.storage.FileSystemStorage"}
 
     if complete:
-        acl = values["AWS_DEFAULT_ACL"].lower()
+        # R2 does not need S3 object ACLs.  Keep this variable optional for
+        # compatibility with existing deployments, but never pass it through
+        # to django-storages.
+        acl = str(environment.get("AWS_DEFAULT_ACL", "") or "").strip().lower()
         if acl not in {"", "private"}:
             raise ImproperlyConfigured(
                 "AWS_DEFAULT_ACL must be blank or private for EduConnect media."
