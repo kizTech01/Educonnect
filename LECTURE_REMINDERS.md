@@ -51,6 +51,14 @@ processor:
   every minute.
 - An external caller can POST to the authenticated endpoint described below.
 
+Choose exactly one active production scheduler. `render.yaml` declares the
+Render command cron, so first check the Render dashboard to determine whether
+that service is actually deployed. If it is live, cron-job.org is unnecessary
+and must not be enabled alongside it. If the operational decision is to use
+cron-job.org instead, disable/remove the live Render reminder cron as part of
+the approved deployment change, then retain only one external HTTP caller
+after the staged GitHub Actions cutover below.
+
 The endpoint processes due recipients synchronously. It is appropriate only
 when the number of recipients due in one run can reliably complete within the
 caller's request timeout. In particular, it opens an SMTP connection and sends
@@ -135,8 +143,10 @@ minute runs, Render logs are clean, and a controlled due lecture confirms the
 lecturer and a registered student each receive exactly one reminder. Only then
 disable the `schedule:` section in
 `.github/workflows/lecture-reminders.yml`; retain `workflow_dispatch` for a
-manual diagnostic run. This repository intentionally leaves that workflow
-unchanged until that operator-verified cutover happens.
+manual diagnostic run. Also confirm that a live Render/Docker reminder service
+has been disabled if cron-job.org is to be the selected scheduler. This
+repository intentionally leaves the GitHub workflow unchanged until that
+operator-verified cutover happens.
 
 If cron-job.org stops running, pause or disable its job first, then re-enable
 the GitHub Actions `schedule:` section (or rely on the already configured
