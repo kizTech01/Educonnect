@@ -25,6 +25,7 @@ from .models import (
     StudentCourseRegistration,
     User,
     UserAlert,
+    PushSubscription,
     AuditLog,
     Payment,
     Subscription,
@@ -526,6 +527,7 @@ def deliver_notification(notification):
     if alert_rows:
         UserAlert.objects.bulk_create(alert_rows, ignore_conflicts=True)
 
+    transaction.on_commit(lambda: send_notification_browser_pushes(notification))
     if notification.sender.has_role(User.Role.LECTURER):
         transaction.on_commit(lambda: send_lecturer_message_emails(notification))
 
@@ -559,7 +561,9 @@ def send_lecturer_message_emails(notification):
         f"{notification.body}\n\n"
         "Sign in to EduConnect to view the message in your inbox."
     )
-    connection = get_connection(fail_silently=True)
+    # A swallowed SMTP exception makes a lecturer-facing success banner look
+    # trustworthy while no recipient ever receives the message.
+    connection = get_connection(fail_silently=False)
     email_messages = [
         EmailMessage(
             subject=f"EduConnect: {notification.subject}",
@@ -570,22 +574,97 @@ def send_lecturer_message_emails(notification):
         )
         for start in range(0, len(emails), NOTIFICATION_EMAIL_BATCH_SIZE)
     ]
-    connection.send_messages(email_messages)
+    try:
+        sent_messages = connection.send_messages(email_messages)
+        if sent_messages != len(email_messages):
+            raise RuntimeError("The email provider did not accept every lecturer message batch.")
+    except Exception:
+        logger.exception("Unable to send lecturer message email for notification %s", notification.pk)
+    finally:
+        connection.close()
+
+
+def send_browser_push_alert(alert):
+    """Send one durable alert to the recipient's registered devices.
+
+    The UserAlert record is retained when push is unavailable or rejected, so
+    recipients still see the notification from the in-app alert feed.
+    """
+    if not alert.recipient.browser_alerts_enabled or not all(
+        (settings.VAPID_PUBLIC_KEY, settings.VAPID_PRIVATE_KEY, settings.VAPID_CLAIMS_EMAIL)
+    ):
+        return 0
+    try:
+        from pywebpush import WebPushException, webpush
+    except ImportError:
+        logger.error("Browser push is configured but pywebpush is not installed.")
+        return 0
+
+    payload = json.dumps({
+        "title": alert.title,
+        "body": alert.body,
+        "target_url": alert.target_url,
+        "tag": f"educonnect-{alert.id}",
+    })
+    delivered = 0
+    for subscription in PushSubscription.objects.filter(recipient=alert.recipient).iterator():
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": subscription.endpoint,
+                    "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth},
+                },
+                data=payload,
+                vapid_private_key=settings.VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": f"mailto:{settings.VAPID_CLAIMS_EMAIL}"},
+                content_encoding="aes128gcm",
+            )
+            delivered += 1
+        except WebPushException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {404, 410}:
+                subscription.delete()
+            else:
+                logger.warning("Unable to send browser push for alert %s: %s", alert.pk, exc)
+        except Exception:
+            logger.exception("Unable to send browser push for alert %s", alert.pk)
+    if delivered:
+        UserAlert.objects.filter(pk=alert.pk, browser_delivered_at__isnull=True).update(
+            browser_delivered_at=timezone.now(),
+            updated_at=timezone.now(),
+        )
+    return delivered
+
+
+def send_notification_browser_pushes(notification):
+    """Push lecturer messages after their transaction has committed."""
+    dedupe_prefix = f"message:{notification.id}:"
+    alerts = UserAlert.all_objects.filter(
+        institution_id=notification.institution_id,
+        dedupe_key__startswith=dedupe_prefix,
+        browser_delivered_at__isnull=True,
+    ).select_related("recipient")
+    for alert in alerts.iterator():
+        send_browser_push_alert(alert)
 
 
 def create_alert(recipient, alert_type, title, body, target_url, dedupe_key):
     if not recipient or not recipient.has_role(User.Role.STUDENT, User.Role.LECTURER):
         return None
-    UserAlert.objects.get_or_create(
+    alert, created = UserAlert.objects.get_or_create(
         recipient=recipient,
         dedupe_key=dedupe_key,
         defaults={
+            "institution": recipient.institution,
             "alert_type": alert_type,
             "title": title,
             "body": body,
             "target_url": target_url,
         },
     )
+    if created:
+        send_browser_push_alert(alert)
+    return alert
 
 
 def _course_timezone(course):

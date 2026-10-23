@@ -42,7 +42,17 @@ services:
         sync: false
       - key: EMAIL_USE_TLS
         value: "True"
+      - key: EMAIL_USE_SSL
+        value: "False"
+      - key: EMAIL_TIMEOUT
+        value: "30"
       - key: DEFAULT_FROM_EMAIL
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_CLAIMS_EMAIL
         sync: false
 
   - type: cron
@@ -106,17 +116,57 @@ services:
       - key: EMAIL_BACKEND
         value: django.core.mail.backends.smtp.EmailBackend
       - key: EMAIL_HOST
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST
       - key: EMAIL_PORT
         value: "587"
       - key: EMAIL_HOST_USER
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_USER
       - key: EMAIL_HOST_PASSWORD
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_PASSWORD
       - key: EMAIL_USE_TLS
-        value: "True"
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_TLS
+      - key: EMAIL_USE_SSL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_SSL
+      - key: EMAIL_TIMEOUT
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_TIMEOUT
       - key: DEFAULT_FROM_EMAIL
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: DEFAULT_FROM_EMAIL
+      - key: VAPID_PUBLIC_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PUBLIC_KEY
+      - key: VAPID_PRIVATE_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PRIVATE_KEY
+      - key: VAPID_CLAIMS_EMAIL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_CLAIMS_EMAIL
 
   - type: cron
     name: educonnect-course-reminders
@@ -179,17 +229,57 @@ services:
       - key: EMAIL_BACKEND
         value: django.core.mail.backends.smtp.EmailBackend
       - key: EMAIL_HOST
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST
       - key: EMAIL_PORT
         value: "587"
       - key: EMAIL_HOST_USER
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_USER
       - key: EMAIL_HOST_PASSWORD
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_PASSWORD
       - key: EMAIL_USE_TLS
-        value: "True"
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_TLS
+      - key: EMAIL_USE_SSL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_SSL
+      - key: EMAIL_TIMEOUT
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_TIMEOUT
       - key: DEFAULT_FROM_EMAIL
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: DEFAULT_FROM_EMAIL
+      - key: VAPID_PUBLIC_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PUBLIC_KEY
+      - key: VAPID_PRIVATE_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PRIVATE_KEY
+      - key: VAPID_CLAIMS_EMAIL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_CLAIMS_EMAIL
 
 databases:
   - name: educonnect-db

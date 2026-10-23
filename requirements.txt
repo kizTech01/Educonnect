@@ -8,3 +8,4 @@ pypdf==5.1.0
 qrcode[pil]==8.2
 django-storages[s3]==1.14.6
 boto3==1.43.117
+pywebpush==2.1.1
