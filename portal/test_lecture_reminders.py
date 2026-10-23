@@ -156,12 +156,39 @@ class LectureReminderTests(TestCase):
     def test_cron_endpoint_requires_secret_and_returns_only_summary(self, dispatch):
         url = reverse("portal:internal-lecture-reminders")
 
+        missing = self.client.post(url)
         rejected = self.client.post(url, HTTP_X_EDUCONNECT_CRON_SECRET="wrong")
         accepted = self.client.post(url, HTTP_X_EDUCONNECT_CRON_SECRET="test-cron-secret")
 
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(missing.json(), {"detail": "Unauthorized."})
         self.assertEqual(rejected.status_code, 401)
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(accepted.json(), {"status": "ok", "courses_due": 1, "email_delivered": 2, "email_failed": 0, "alerts_delivered": 0})
+        dispatch.assert_called_once_with()
+
+    @override_settings(EDUCONNECT_CRON_SECRET="test-cron-secret")
+    @patch("portal.views.dispatch_due_course_reminders")
+    def test_cron_endpoint_rejects_unsupported_method_without_processing(self, dispatch):
+        response = self.client.get(
+            reverse("portal:internal-lecture-reminders"),
+            HTTP_X_EDUCONNECT_CRON_SECRET="test-cron-secret",
+        )
+
+        self.assertEqual(response.status_code, 405)
+        dispatch.assert_not_called()
+
+    @override_settings(EDUCONNECT_CRON_SECRET="test-cron-secret")
+    @patch("portal.views.dispatch_due_course_reminders", side_effect=RuntimeError("smtp credentials leaked"))
+    def test_cron_endpoint_masks_processing_errors(self, dispatch):
+        response = self.client.post(
+            reverse("portal:internal-lecture-reminders"),
+            HTTP_X_EDUCONNECT_CRON_SECRET="test-cron-secret",
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json(), {"detail": "Reminder processing failed."})
+        self.assertNotIn("smtp credentials leaked", response.content.decode())
         dispatch.assert_called_once_with()
 
     @override_settings(EDUCONNECT_CRON_SECRET="")
@@ -170,3 +197,20 @@ class LectureReminderTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {"detail": "Service unavailable."})
+
+    def test_institution_timezone_controls_the_reminder_window(self):
+        institution, course, lecturer, student = self.make_tenant_course("FIRST", "first")
+        institution.timezone = "America/New_York"
+        institution.save(update_fields=["timezone"])
+
+        # Monday 09:30 in New York, despite being 14:30 UTC. The same instant
+        # is not in the 25–35 minute window in the server's Lagos timezone.
+        now = timezone.make_aware(datetime(2030, 1, 7, 14, 30), ZoneInfo("UTC"))
+        summary = dispatch_due_course_reminders(now=now)
+
+        self.assertEqual(summary["courses_due"], 1)
+        self.assertEqual(summary["email_delivered"], 2)
+        self.assertEqual(
+            set(CourseReminderDispatch.all_objects.filter(course=course).values_list("recipient_id", flat=True)),
+            {lecturer.id, student.id},
+        )
