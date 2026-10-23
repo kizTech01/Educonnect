@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, time
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from .models import (
     Faculty,
     Institution,
     LecturerCourseRegistration,
+    PushSubscription,
     StudentCourseRegistration,
     User,
     reset_current_institution,
@@ -214,3 +216,28 @@ class LectureReminderTests(TestCase):
             set(CourseReminderDispatch.all_objects.filter(course=course).values_list("recipient_id", flat=True)),
             {lecturer.id, student.id},
         )
+
+    @override_settings(
+        VAPID_PUBLIC_KEY="test-public-key",
+        VAPID_PRIVATE_KEY="test-private-key",
+        VAPID_CLAIMS_EMAIL="alerts@example.test",
+    )
+    def test_signed_in_user_can_register_a_browser_push_subscription(self):
+        institution, _, _, student = self.make_tenant_course("FIRST", "first")
+        self.client.force_login(student)
+
+        configuration = self.client.get(reverse("portal:push-configuration"))
+        response = self.client.post(
+            reverse("portal:push-subscription"),
+            data=json.dumps({
+                "endpoint": "https://push.example.test/subscriptions/123",
+                "keys": {"p256dh": "browser-public-key", "auth": "browser-auth-key"},
+            }),
+            content_type="application/json",
+        )
+
+        self.assertEqual(configuration.json(), {"enabled": True, "public_key": "test-public-key"})
+        self.assertEqual(response.status_code, 200)
+        subscription = PushSubscription.all_objects.get()
+        self.assertEqual(subscription.recipient, student)
+        self.assertEqual(subscription.institution, institution)

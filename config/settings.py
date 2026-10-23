@@ -303,6 +303,12 @@ DEFAULT_FROM_EMAIL = os.getenv(
 
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
+# Web Push is optional. Without VAPID keys the in-page browser-alert fallback
+# remains available, but a closed browser cannot receive a notification.
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "").strip()
+
 # Used exclusively by the authenticated machine-to-machine lecture reminder
 # trigger.  Leave blank outside the service that receives cron requests; the
 # endpoint fails closed when it is not configured.

@@ -145,6 +145,7 @@ from .models import (
     Timetable,
     User,
     UserAlert,
+    PushSubscription,
     AuditLog,
     AIAutomationJob,
     RoleAssignment,
@@ -4314,6 +4315,59 @@ def alerts_feed(request):
             ]
         }
     )
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER)
+def push_configuration(request):
+    """Expose only the public key required by the browser subscription API."""
+    return JsonResponse({
+        "enabled": bool(settings.VAPID_PUBLIC_KEY and settings.VAPID_PRIVATE_KEY and settings.VAPID_CLAIMS_EMAIL),
+        "public_key": settings.VAPID_PUBLIC_KEY,
+    })
+
+
+@role_required(User.Role.STUDENT, User.Role.LECTURER)
+@require_http_methods(["POST"])
+def register_push_subscription(request):
+    if not (settings.VAPID_PUBLIC_KEY and settings.VAPID_PRIVATE_KEY and settings.VAPID_CLAIMS_EMAIL):
+        return JsonResponse({"detail": "Browser push is not configured."}, status=503)
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+        endpoint = str(payload["endpoint"]).strip()
+        keys = payload["keys"]
+        p256dh = str(keys["p256dh"]).strip()
+        auth = str(keys["auth"]).strip()
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return JsonResponse({"detail": "Invalid browser push subscription."}, status=400)
+    if not endpoint.startswith("https://") or len(endpoint) > 2048 or not p256dh or not auth:
+        return JsonResponse({"detail": "Invalid browser push subscription."}, status=400)
+    PushSubscription.objects.update_or_create(
+        endpoint=endpoint,
+        defaults={
+            "institution": request.user.institution,
+            "recipient": request.user,
+            "p256dh": p256dh[:255],
+            "auth": auth[:255],
+        },
+    )
+    return JsonResponse({"ok": True})
+
+
+def service_worker(request):
+    """Serve at the root so the worker controls all dashboard URLs."""
+    script = """self.addEventListener('push', event => {
+  const payload = event.data ? event.data.json() : {};
+  event.waitUntil(self.registration.showNotification(payload.title || 'EduConnect', {
+    body: payload.body || '', tag: payload.tag || 'educonnect-alert',
+    data: { targetUrl: payload.target_url || '/dashboard/' }
+  }));
+});
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil(clients.openWindow(event.notification.data.targetUrl));
+});
+"""
+    return HttpResponse(script, content_type="application/javascript")
 
 
 @role_required(User.Role.STUDENT)

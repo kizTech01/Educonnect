@@ -250,11 +250,61 @@ const alertRuntime = document.querySelector(".alert-runtime");
 if (alertRuntime && "Notification" in window) {
     const feedUrl = alertRuntime.dataset.alertFeedUrl;
     const preferenceUrl = alertRuntime.dataset.alertPreferencesUrl;
+    const pushConfigurationUrl = alertRuntime.dataset.pushConfigurationUrl;
+    const pushSubscriptionUrl = alertRuntime.dataset.pushSubscriptionUrl;
+    const serviceWorkerUrl = alertRuntime.dataset.serviceWorkerUrl;
     const browserAlertsEnabled = alertRuntime.dataset.browserAlertsEnabled === "true";
     const classAlertsEnabled = alertRuntime.dataset.classAlertsEnabled === "true";
     const userRole = alertRuntime.dataset.userRole;
     const enableButton = document.querySelector("[data-enable-browser-alerts]");
     const alertPromptSubject = userRole === "student" ? "lecturer messages and class reminders" : "class reminders";
+
+    const urlBase64ToUint8Array = (value) => {
+        const paddedValue = `${value}${"=".repeat((4 - (value.length % 4)) % 4)}`
+            .replace(/-/g, "+")
+            .replace(/_/g, "/");
+        const rawData = window.atob(paddedValue);
+        return Uint8Array.from(rawData, (character) => character.charCodeAt(0));
+    };
+
+    // The legacy feed below covers an open dashboard. A service-worker
+    // subscription is what lets an enrolled device receive alerts after the
+    // page has been closed.
+    const registerForBackgroundPush = async () => {
+        if (!("serviceWorker" in navigator) || !("PushManager" in window) || !pushConfigurationUrl) {
+            return false;
+        }
+        try {
+            const configurationResponse = await fetch(pushConfigurationUrl, { credentials: "same-origin" });
+            if (!configurationResponse.ok) {
+                return false;
+            }
+            const configuration = await configurationResponse.json();
+            if (!configuration.enabled || !configuration.public_key) {
+                return false;
+            }
+            const registration = await navigator.serviceWorker.register(serviceWorkerUrl);
+            const existingSubscription = await registration.pushManager.getSubscription();
+            const subscription = existingSubscription || await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(configuration.public_key),
+            });
+            const response = await fetch(pushSubscriptionUrl, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": getCsrfToken(),
+                },
+                body: JSON.stringify(subscription),
+            });
+            return response.ok;
+        } catch (error) {
+            // Browser push is optional. The in-page alert feed remains active
+            // and the user can still receive email reminders.
+            return false;
+        }
+    };
 
     const syncAlertPreferences = async (browserEnabled, classEnabled) => {
         await fetch(preferenceUrl, {
@@ -298,6 +348,7 @@ if (alertRuntime && "Notification" in window) {
     if (browserAlertsEnabled && Notification.permission === "granted") {
         window.setInterval(pollAlerts, 30000);
         pollAlerts();
+        registerForBackgroundPush();
     }
 
     if (enableButton) {
@@ -311,6 +362,7 @@ if (alertRuntime && "Notification" in window) {
             const wantsClassAlerts = window.confirm("Do you want class reminders to appear as browser alerts 30 minutes before class?");
             await syncAlertPreferences(true, wantsClassAlerts);
             enableButton.textContent = "Browser alerts enabled";
+            await registerForBackgroundPush();
             pollAlerts();
             window.setInterval(pollAlerts, 30000);
         });
@@ -326,6 +378,7 @@ if (alertRuntime && "Notification" in window) {
             }
             const wantsClassAlerts = window.confirm("Do you want class reminders to appear as browser alerts 30 minutes before class?");
             await syncAlertPreferences(true, wantsClassAlerts);
+            await registerForBackgroundPush();
             pollAlerts();
             window.setInterval(pollAlerts, 30000);
         }, 1200);

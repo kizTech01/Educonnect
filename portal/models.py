@@ -2358,6 +2358,21 @@ class UserAlert(TimeStampedModel):
         return f"{self.recipient.full_name} - {self.title}"
 
 
+class PushSubscription(TimeStampedModel):
+    """A browser/device endpoint registered by a signed-in user."""
+
+    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="push_subscriptions")
+    endpoint = models.CharField(max_length=2048, unique=True)
+    p256dh = models.CharField(max_length=255)
+    auth = models.CharField(max_length=255)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"Push subscription for {self.recipient.full_name}"
+
+
 class CourseReminderDispatch(TimeStampedModel):
     class Channel(models.TextChoices):
         EMAIL = "email", "Email"
