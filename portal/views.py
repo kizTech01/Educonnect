@@ -175,6 +175,7 @@ from .services import (
     sync_material_access_for_registration,
     verify_paystack_transaction,
     create_subscription_payment,
+    dispatch_due_course_reminders,
     subscription_paystack_secret_key,
     verify_and_finalize_subscription_payment,
 )
@@ -267,6 +268,26 @@ POLICIES = {
         ],
     },
 }
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def internal_lecture_reminders(request):
+    """Authenticated, non-interactive trigger for the external scheduler."""
+    configured_secret = settings.EDUCONNECT_CRON_SECRET
+    provided_secret = request.headers.get("X-EduConnect-Cron-Secret", "")
+    if not configured_secret:
+        logger.error("Lecture reminder cron secret is not configured.")
+        return JsonResponse({"detail": "Service unavailable."}, status=503)
+    if not provided_secret or not constant_time_compare(provided_secret, configured_secret):
+        return JsonResponse({"detail": "Unauthorized."}, status=401)
+
+    try:
+        summary = dispatch_due_course_reminders()
+    except Exception:
+        logger.exception("Lecture reminder cron execution failed.")
+        return JsonResponse({"detail": "Reminder processing failed."}, status=500)
+    return JsonResponse({"status": "ok", **summary})
 
 
 def institution_overview_queryset():

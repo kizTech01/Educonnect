@@ -43,6 +43,12 @@ PAYSTACK_USER_AGENT = (
 )
 NOTIFICATION_RECIPIENT_BATCH_SIZE = 500
 NOTIFICATION_EMAIL_BATCH_SIZE = 100
+LECTURE_REMINDER_LEAD_MINUTES = 30
+# GitHub Actions and other external schedulers can start a little early or
+# late.  A symmetric five-minute window keeps the reminder close to its
+# promised time without ever notifying after the class starts.
+LECTURE_REMINDER_TOLERANCE_MINUTES = 5
+REMINDER_DELIVERY_CLAIM_MINUTES = 5
 # Imported lecturers and institution administrators receive this same
 # temporary credential. They can replace it through the email verification
 # password-reset flow.
@@ -378,75 +384,71 @@ def sync_material_access_for_registration(registration: StudentCourseRegistratio
         )
 
 
-def send_course_reminder_email(course: Course, recipients=None):
-    recipients_by_email = {}
-    if recipients is None:
-        recipients = []
-        if course.lecturer_id:
-            recipients.append(course.lecturer)
-        recipients.extend(
-            User.objects.filter(
-                role=User.Role.STUDENT,
-                student_registrations__course=course,
-                student_registrations__is_active=True,
-            ).distinct()
+def _lecture_reminder_content(course, scheduled_for, recipient_kind):
+    """Build the approved formal message from a complete course schedule."""
+    start_time = timezone.localtime(scheduled_for, _course_timezone(course)).strftime("%I:%M %p")
+    day_and_date = timezone.localtime(scheduled_for, _course_timezone(course)).strftime("%A, %d %B %Y")
+    if recipient_kind == "lecturer":
+        return (
+            f"Lecture Reminder — {course.code}: {course.title}",
+            "Dear Lecturer,\n\n"
+            f"This is a reminder that your lecture for {course.title} ({course.code}) is "
+            f"scheduled to commence at {start_time} on {day_and_date}, at {course.venue}.\n\n"
+            "Please make the necessary preparations for the scheduled lecture.\n\n"
+            "Thank you.\n\nEduConnect Academic Notifications",
         )
-
-    for user in recipients:
-        # An HOD is still a lecturer.  RoleAssignment is the authoritative
-        # source for that additional responsibility, rather than the legacy
-        # primary role field alone.
-        if not user or not user.has_role(User.Role.STUDENT, User.Role.LECTURER) or not user.email:
-            continue
-        email = user.email.strip()
-        if email:
-            recipients_by_email.setdefault(email.lower(), {"email": email, "recipient_ids": set()})["recipient_ids"].add(user.id)
-
-    if not recipients_by_email:
-        return set(), set(), ""
-
-    schedule_day = course.schedule_day or "the scheduled day to be announced"
-    schedule_time = course.schedule_time.strftime("%I:%M %p") if course.schedule_time else "the scheduled time to be announced"
-    venue = course.venue or "the announced venue"
-    message = (
-        f"This is a class reminder for {course.title} ({course.code}). "
-        f"Please note that the class holds on {schedule_day} at {schedule_time} in {venue}."
+    return (
+        f"Upcoming Lecture Reminder — {course.code}: {course.title}",
+        "Dear Student,\n\n"
+        f"This is a reminder that your lecture for {course.title} ({course.code}) is "
+        f"scheduled to commence at {start_time} on {day_and_date}, at {course.venue}.\n\n"
+        "Please prepare accordingly and arrive at the venue on time.\n\n"
+        "Thank you.\n\nEduConnect Academic Notifications",
     )
-    recipient_groups = list(recipients_by_email.values())
-    delivered_recipient_ids = set()
-    failed_recipient_ids = set()
-    error_message = ""
+
+
+def send_course_reminder_email(course: Course, recipients, scheduled_for, recipient_kinds):
+    """Send one private, role-specific email per recipient.
+
+    A provider can accept one message and reject another, so the result is
+    reported per recipient for safe retries by ``CourseReminderDispatch``.
+    """
+    delivered_recipient_ids, failed_recipient_ids = set(), set()
+    errors = []
+    connection = get_connection(fail_silently=False)
     try:
-        connection = get_connection(fail_silently=False)
         connection.open()
-        for start in range(0, len(recipient_groups), NOTIFICATION_EMAIL_BATCH_SIZE):
-            batch = recipient_groups[start : start + NOTIFICATION_EMAIL_BATCH_SIZE]
-            sent_messages = connection.send_messages(
-                [
+        for recipient in recipients:
+            if not recipient.email:
+                continue
+            subject, body = _lecture_reminder_content(
+                course, scheduled_for, recipient_kinds[recipient.id]
+            )
+            try:
+                sent_messages = connection.send_messages([
                     EmailMessage(
-                        subject=f"Class Reminder: {course.code}",
-                        body=message,
+                        subject=subject,
+                        body=body,
                         from_email=settings.DEFAULT_FROM_EMAIL,
-                        bcc=[item["email"] for item in batch],
+                        to=[recipient.email.strip()],
                         connection=connection,
                     )
-                ]
-            )
-            if sent_messages != 1:
-                raise RuntimeError("The email provider did not accept the class reminder batch.")
-            for item in batch:
-                delivered_recipient_ids.update(item["recipient_ids"])
+                ])
+                if sent_messages != 1:
+                    raise RuntimeError("The email provider did not accept the lecture reminder.")
+                delivered_recipient_ids.add(recipient.id)
+            except Exception as exc:
+                failed_recipient_ids.add(recipient.id)
+                errors.append(str(exc) or exc.__class__.__name__)
+                logger.exception("Unable to send lecture reminder email for course %s", course.pk)
     except Exception as exc:
-        error_message = str(exc) or exc.__class__.__name__
-        logger.exception("Unable to send class reminder email for course %s", course.code)
-        for item in recipient_groups:
-            failed_recipient_ids.update(item["recipient_ids"])
-        failed_recipient_ids.difference_update(delivered_recipient_ids)
+        error = str(exc) or exc.__class__.__name__
+        failed_recipient_ids.update(recipient.id for recipient in recipients)
+        errors.append(error)
+        logger.exception("Unable to open lecture reminder email connection for course %s", course.pk)
     finally:
-        if "connection" in locals():
-            connection.close()
-
-    return delivered_recipient_ids, failed_recipient_ids, error_message
+        connection.close()
+    return delivered_recipient_ids, failed_recipient_ids, "; ".join(errors)[:255]
 
 
 def deliver_notification(notification):
@@ -617,16 +619,74 @@ def _course_occurrence_datetime(course, now, course_timezone=None):
     return timezone.make_aware(naive, course_timezone or timezone.get_current_timezone())
 
 
+def _claim_reminder_delivery(course, recipient, scheduled_for, channel, claimed_at):
+    """Claim one recipient/channel delivery without holding a DB lock for SMTP.
+
+    A stale claim is recoverable after a worker crash.  SMTP acceptance followed
+    by a process crash cannot be made exactly-once, so that rare case remains a
+    provider-level duplicate risk and is intentionally documented.
+    """
+    stale_before = claimed_at - timedelta(minutes=REMINDER_DELIVERY_CLAIM_MINUTES)
+    with transaction.atomic():
+        dispatch, _ = CourseReminderDispatch.all_objects.select_for_update().get_or_create(
+            course=course,
+            recipient=recipient,
+            scheduled_for=scheduled_for,
+            channel=channel,
+            defaults={"institution": course.institution},
+        )
+        if dispatch.institution_id != course.institution_id:
+            logger.error("Skipping reminder dispatch %s with an invalid tenant binding.", dispatch.pk)
+            return None
+        if dispatch.delivered_at is not None:
+            return None
+        if dispatch.delivery_claimed_at and dispatch.delivery_claimed_at > stale_before:
+            return None
+        dispatch.delivery_claimed_at = claimed_at
+        dispatch.last_attempt_at = claimed_at
+        dispatch.attempt_count = F("attempt_count") + 1
+        dispatch.save(update_fields=["delivery_claimed_at", "last_attempt_at", "attempt_count", "updated_at"])
+        return dispatch.pk
+
+
+def _finish_reminder_delivery(dispatch_ids, delivered_ids, failed_ids, attempted_at, error_message=""):
+    if delivered_ids:
+        CourseReminderDispatch.all_objects.filter(
+            pk__in=[dispatch_ids[recipient_id] for recipient_id in delivered_ids]
+        ).update(
+            delivered_at=attempted_at,
+            delivery_claimed_at=None,
+            last_attempt_at=attempted_at,
+            last_error="",
+            updated_at=attempted_at,
+        )
+    if failed_ids:
+        CourseReminderDispatch.all_objects.filter(
+            pk__in=[dispatch_ids[recipient_id] for recipient_id in failed_ids]
+        ).update(
+            delivery_claimed_at=None,
+            last_attempt_at=attempted_at,
+            last_error=error_message[:255],
+            updated_at=attempted_at,
+        )
+
+
 def dispatch_due_course_reminders(now=None):
     now = now or timezone.now()
     if timezone.is_naive(now):
         now = timezone.make_aware(now, timezone.get_current_timezone())
+    summary = {"courses_due": 0, "email_delivered": 0, "email_failed": 0, "alerts_delivered": 0}
     # Institutions may use different timezones.  Filter by their local day
     # inside the loop rather than the server's day, so a midnight boundary
     # never skips an otherwise due reminder.
-    candidate_courses = Course.objects.select_related("lecturer", "department__institution").filter(
+    candidate_courses = Course.all_objects.select_related("lecturer", "institution").filter(
+        institution__isnull=False,
+        institution__status="active",
         schedule_time__isnull=False,
-    ).filter(Q(academic_session__is_current=True) | Q(academic_session__isnull=True))
+        is_available=True,
+    ).filter(academic_session__is_current=True).exclude(
+        schedule_day="",
+    ).exclude(code="").exclude(title="").exclude(venue="")
     for course in candidate_courses:
         local_now = now.astimezone(_course_timezone(course))
         if course.schedule_day != local_now.strftime("%A"):
@@ -634,89 +694,77 @@ def dispatch_due_course_reminders(now=None):
         class_starts_at = _course_occurrence_datetime(course, local_now, local_now.tzinfo)
         if not class_starts_at:
             continue
-        reminder_at = class_starts_at - timedelta(minutes=30)
-        if not (reminder_at <= local_now < class_starts_at):
+        minutes_until_start = (class_starts_at - local_now).total_seconds() / 60
+        if not (
+            LECTURE_REMINDER_LEAD_MINUTES - LECTURE_REMINDER_TOLERANCE_MINUTES
+            <= minutes_until_start
+            <= LECTURE_REMINDER_LEAD_MINUTES + LECTURE_REMINDER_TOLERANCE_MINUTES
+        ):
             continue
+        summary["courses_due"] += 1
 
-        recipients_by_id = {}
-        if course.lecturer_id:
-            recipients_by_id[course.lecturer_id] = course.lecturer
-        for allocation in course.lecturer_registrations.filter(
+        recipients = {}
+        if course.lecturer_id and course.lecturer.institution_id == course.institution_id and course.lecturer.is_active and course.lecturer.is_approved:
+            recipients[course.lecturer_id] = (course.lecturer, "lecturer")
+        for allocation in course.lecturer_registrations.select_related("lecturer").filter(
+            institution_id=course.institution_id, is_active=True,
+            lecturer__institution_id=course.institution_id, lecturer__is_active=True,
+            lecturer__is_approved=True,
+        ):
+            recipients[allocation.lecturer_id] = (allocation.lecturer, "lecturer")
+        students = User.all_objects.filter(
+            institution_id=course.institution_id,
+            role=User.Role.STUDENT,
             is_active=True,
-        ).select_related("lecturer"):
-            recipients_by_id[allocation.lecturer_id] = allocation.lecturer
-        students = (
-            User.objects.filter(
-                role=User.Role.STUDENT,
-                student_registrations__course=course,
-                student_registrations__session__is_current=True,
-                student_registrations__is_active=True,
-            ).distinct()
-        )
-        recipients_by_id.update({student.id: student for student in students})
-        recipients = list(recipients_by_id.values())
+            student_registrations__institution_id=course.institution_id,
+            student_registrations__course=course,
+            student_registrations__session=course.academic_session,
+            student_registrations__session__is_current=True,
+            student_registrations__is_active=True,
+        ).distinct()
+        for student in students:
+            recipients.setdefault(student.id, (student, "student"))
 
-        email_targets = []
-        email_dispatches = {}
-        for recipient in recipients:
-            if not recipient or not recipient.has_role(User.Role.STUDENT, User.Role.LECTURER):
-                continue
+        email_targets, email_dispatches, recipient_kinds = [], {}, {}
+        for recipient, recipient_kind in recipients.values():
             if recipient.email_class_reminders and recipient.email:
-                reminder_dispatch, _ = CourseReminderDispatch.objects.get_or_create(
-                    course=course,
-                    recipient=recipient,
-                    scheduled_for=class_starts_at,
-                    channel=CourseReminderDispatch.Channel.EMAIL,
+                dispatch_id = _claim_reminder_delivery(
+                    course, recipient, class_starts_at, CourseReminderDispatch.Channel.EMAIL, timezone.now()
                 )
-                if reminder_dispatch.delivered_at is None:
+                if dispatch_id:
                     email_targets.append(recipient)
-                    email_dispatches[recipient.id] = reminder_dispatch.id
+                    email_dispatches[recipient.id] = dispatch_id
+                    recipient_kinds[recipient.id] = recipient_kind
             if recipient.browser_alerts_enabled and recipient.class_reminder_alerts_enabled:
-                alert_dispatch, created = CourseReminderDispatch.objects.get_or_create(
-                    course=course,
-                    recipient=recipient,
-                    scheduled_for=class_starts_at,
-                    channel=CourseReminderDispatch.Channel.ALERT,
+                dispatch_id = _claim_reminder_delivery(
+                    course, recipient, class_starts_at, CourseReminderDispatch.Channel.ALERT, timezone.now()
                 )
-                if created:
-                    create_alert(
-                        recipient=recipient,
-                        alert_type=UserAlert.AlertType.CLASS_REMINDER,
-                        title=f"Class starts in 30 minutes: {course.code}",
-                        body=(
-                            f"{course.title} starts at {course.schedule_time.strftime('%I:%M %p')} "
-                            f"in {course.venue or 'the announced venue'}."
-                        ),
-                        target_url=reverse("portal:dashboard"),
-                        dedupe_key=f"class-reminder:{course.id}:{recipient.id}:{class_starts_at.isoformat()}",
-                    )
-                    alert_dispatch.delivered_at = timezone.now()
-                    alert_dispatch.last_attempt_at = alert_dispatch.delivered_at
-                    alert_dispatch.attempt_count = 1
-                    alert_dispatch.save(update_fields=["delivered_at", "last_attempt_at", "attempt_count", "updated_at"])
+                if dispatch_id:
+                    try:
+                        title, body = _lecture_reminder_content(course, class_starts_at, recipient_kind)
+                        create_alert(
+                            recipient=recipient,
+                            alert_type=UserAlert.AlertType.CLASS_REMINDER,
+                            title=title,
+                            body=body,
+                            target_url=reverse("portal:dashboard"),
+                            dedupe_key=f"class-reminder:{course.id}:{recipient.id}:{class_starts_at.isoformat()}",
+                        )
+                    except Exception as exc:
+                        _finish_reminder_delivery({recipient.id: dispatch_id}, set(), {recipient.id}, timezone.now(), str(exc))
+                        logger.exception("Unable to create lecture reminder alert for course %s", course.pk)
+                    else:
+                        _finish_reminder_delivery({recipient.id: dispatch_id}, {recipient.id}, set(), timezone.now())
+                        summary["alerts_delivered"] += 1
 
         if email_targets:
-            delivered_ids, failed_ids, error_message = send_course_reminder_email(course, recipients=email_targets)
-            attempted_at = timezone.now()
-            if delivered_ids:
-                CourseReminderDispatch.objects.filter(
-                    pk__in=[email_dispatches[recipient_id] for recipient_id in delivered_ids]
-                ).update(
-                    delivered_at=attempted_at,
-                    last_attempt_at=attempted_at,
-                    attempt_count=F("attempt_count") + 1,
-                    last_error="",
-                    updated_at=attempted_at,
-                )
-            if failed_ids:
-                CourseReminderDispatch.objects.filter(
-                    pk__in=[email_dispatches[recipient_id] for recipient_id in failed_ids]
-                ).update(
-                    last_attempt_at=attempted_at,
-                    attempt_count=F("attempt_count") + 1,
-                    last_error=error_message[:255],
-                    updated_at=attempted_at,
-                )
+            delivered_ids, failed_ids, error_message = send_course_reminder_email(
+                course, email_targets, class_starts_at, recipient_kinds
+            )
+            _finish_reminder_delivery(email_dispatches, delivered_ids, failed_ids, timezone.now(), error_message)
+            summary["email_delivered"] += len(delivered_ids)
+            summary["email_failed"] += len(failed_ids)
+    return summary
 
 
 def process_due_course_reminders():

@@ -303,6 +303,11 @@ DEFAULT_FROM_EMAIL = os.getenv(
 
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
+# Used exclusively by the authenticated machine-to-machine lecture reminder
+# trigger.  Leave blank outside the service that receives cron requests; the
+# endpoint fails closed when it is not configured.
+EDUCONNECT_CRON_SECRET = os.getenv("EDUCONNECT_CRON_SECRET", "").strip()
+
 # Optional OpenAI-powered structured extraction for handbook and departmental
 # import files. The portal keeps a local parser as a fallback when this is blank.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()

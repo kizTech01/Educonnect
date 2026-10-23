@@ -2369,6 +2369,7 @@ class CourseReminderDispatch(TimeStampedModel):
     channel = models.CharField(max_length=20, choices=Channel.choices)
     delivered_at = models.DateTimeField(null=True, blank=True)
     last_attempt_at = models.DateTimeField(null=True, blank=True)
+    delivery_claimed_at = models.DateTimeField(null=True, blank=True)
     attempt_count = models.PositiveIntegerField(default=0)
     last_error = models.CharField(max_length=255, blank=True)
 

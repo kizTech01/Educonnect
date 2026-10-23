@@ -6,6 +6,7 @@ from . import views
 app_name = "portal"
 
 urlpatterns = [
+    path("internal/cron/lecture-reminders/", views.internal_lecture_reminders, name="internal-lecture-reminders"),
     path("", views.index, name="home"),
     path("policies/", views.policy_landing, name="policy-landing"),
     path("policies/<slug:slug>/", views.policy_detail, name="policy-detail"),

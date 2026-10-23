@@ -3365,10 +3365,15 @@ class DashboardAndCourseFlowTests(TestCase):
 
         dispatch_due_course_reminders(now=now)
 
-        self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(set(mail.outbox[0].bcc), {"student@example.com", "lecturer@example.com"})
-        self.assertEqual(mail.outbox[0].to, [])
-        self.assertIn(self.paid_course.title, mail.outbox[0].body)
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertEqual(
+            {tuple(message.to) for message in mail.outbox},
+            {("student@example.com",), ("lecturer@example.com",)},
+        )
+        self.assertTrue(all(not message.bcc for message in mail.outbox))
+        self.assertTrue(all(self.paid_course.title in message.body for message in mail.outbox))
+        self.assertTrue(any("Dear Student" in message.body for message in mail.outbox))
+        self.assertTrue(any("Dear Lecturer" in message.body for message in mail.outbox))
         self.assertEqual(
             CourseReminderDispatch.objects.filter(channel=CourseReminderDispatch.Channel.EMAIL).count(),
             2,

@@ -1,0 +1,30 @@
+name: Lecture reminders
+
+on:
+  schedule:
+    # GitHub Actions evaluates schedules in UTC. Starts can be delayed by GitHub.
+    # GitHub Actions supports scheduled workflows no more frequently than
+    # every five minutes. The service's 25–35 minute delivery window absorbs
+    # that cadence and small runner delays.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Trigger lecture reminder processing
+        env:
+          EDUCONNECT_CRON_SECRET: ${{ secrets.EDUCONNECT_CRON_SECRET }}
+        run: |
+          set +x
+          curl --fail --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --request POST \
+            --header "X-EduConnect-Cron-Secret: ${EDUCONNECT_CRON_SECRET}" \
+            https://educonnect.devs.surf/internal/cron/lecture-reminders/
