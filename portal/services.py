@@ -1,5 +1,6 @@
 import json
 import logging
+import secrets
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.error import HTTPError, URLError
@@ -34,6 +35,7 @@ from .models import (
     SubscriptionPaymentGateway,
     SubscriptionEvent,
     SubscriptionNotification,
+    AccountActivation,
 )
 
 PAYSTACK_API_BASE = "https://api.paystack.co"
@@ -50,13 +52,50 @@ LECTURE_REMINDER_LEAD_MINUTES = 30
 # promised time without ever notifying after the class starts.
 LECTURE_REMINDER_TOLERANCE_MINUTES = 5
 REMINDER_DELIVERY_CLAIM_MINUTES = 5
-# Imported lecturers and institution administrators receive this same
-# temporary credential. They can replace it through the email verification
-# password-reset flow.
-TEMPORARY_ACCOUNT_PASSWORD = "educonnect"
+ACCOUNT_ACTIVATION_TTL = timedelta(hours=24)
 FREE_TRIAL_PLAN_NAME = "Six-month free trial"
 FREE_TRIAL_DURATION_DAYS = 183
 logger = logging.getLogger(__name__)
+
+
+def issue_account_activation(user):
+    """Disable password sign-in until the account owner sets a password."""
+    if not user or not user.pk:
+        raise ValueError("A saved user is required before issuing activation.")
+    user.set_unusable_password()
+    user.save(update_fields=["password"])
+    token = secrets.token_urlsafe(32)
+    AccountActivation.objects.update_or_create(
+        user=user,
+        defaults={
+            "token_hash": AccountActivation.token_hash_for(token),
+            "expires_at": timezone.now() + ACCOUNT_ACTIVATION_TTL,
+            "consumed_at": None,
+        },
+    )
+    return token
+
+
+def send_account_activation_email(user, activation_url):
+    """Send an activation link without logging or returning the secret token."""
+    if not user or not user.is_active or not user.email:
+        return False
+    portal_name = getattr(user.institution, "name", "") or "EduConnect"
+    message = (
+        f"Hello {user.full_name},\n\n"
+        f"Set your {portal_name} password using this one-time link:\n{activation_url}\n\n"
+        "The link expires in 24 hours. If you did not expect this account, contact your institution."
+    )
+    try:
+        return EmailMessage(
+            subject=f"Activate your {portal_name} account",
+            body=message,
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@educonnect.local"),
+            to=[user.email],
+        ).send(fail_silently=False) == 1
+    except Exception:
+        logger.warning("Unable to send account activation email for user_id=%s", user.pk)
+        return False
 
 
 def grant_free_trial_subscription(institution):
@@ -169,12 +208,12 @@ def verify_paystack_transaction(secret_key, reference):
 
 
 def subscription_paystack_secret_key():
-    """Use the super-admin gateway, with environment configuration as fallback."""
+    """Use only the Paystack secret saved by the Super Admin in Settings."""
     gateway = SubscriptionPaymentGateway.objects.filter(
         slug="subscription",
         is_active=True,
     ).first()
-    return (gateway.paystack_secret_key if gateway and gateway.is_configured else settings.PAYSTACK_SECRET_KEY)
+    return gateway.paystack_secret_key if gateway and gateway.is_configured else ""
 
 
 def create_subscription_payment(*, institution, plan_duration, email, callback_url):
@@ -242,6 +281,7 @@ def finalize_subscription_payment(*, reference, verification):
             verification.get("status") != "success"
             or verification.get("reference") != payment.reference
             or verified_amount != expected_kobo
+            or (verification.get("currency") or "").upper() != payment.currency.upper()
         ):
             payment.status = Payment.Status.FAILED
             payment.gateway_response = verification
@@ -408,19 +448,38 @@ def _lecture_reminder_content(course, scheduled_for, recipient_kind):
     )
 
 
+def _increment_reason(summary, reason):
+    summary["skipped"] += 1
+    summary["skipped_reasons"][reason] = summary["skipped_reasons"].get(reason, 0) + 1
+
+
+def _vapid_subject():
+    """Return a valid VAPID contact subject without changing the configured value."""
+    contact = settings.VAPID_CLAIMS_EMAIL.strip()
+    return contact if contact.lower().startswith("mailto:") else f"mailto:{contact}"
+
+
+def _webpush_client():
+    """Delay the optional pywebpush import until a browser push is attempted."""
+    from pywebpush import WebPushException, webpush
+    return WebPushException, webpush
+
+
 def send_course_reminder_email(course: Course, recipients, scheduled_for, recipient_kinds):
     """Send one private, role-specific email per recipient.
 
     A provider can accept one message and reject another, so the result is
     reported per recipient for safe retries by ``CourseReminderDispatch``.
     """
-    delivered_recipient_ids, failed_recipient_ids = set(), set()
+    delivered_recipient_ids, failed_recipient_ids, skipped_recipient_ids = set(), set(), set()
     errors = []
     connection = get_connection(fail_silently=False)
     try:
         connection.open()
         for recipient in recipients:
-            if not recipient.email:
+            recipient_email = (recipient.email or "").strip()
+            if not recipient_email:
+                skipped_recipient_ids.add(recipient.id)
                 continue
             subject, body = _lecture_reminder_content(
                 course, scheduled_for, recipient_kinds[recipient.id]
@@ -431,7 +490,7 @@ def send_course_reminder_email(course: Course, recipients, scheduled_for, recipi
                         subject=subject,
                         body=body,
                         from_email=settings.DEFAULT_FROM_EMAIL,
-                        to=[recipient.email.strip()],
+                        to=[recipient_email],
                         connection=connection,
                     )
                 ])
@@ -440,16 +499,22 @@ def send_course_reminder_email(course: Course, recipients, scheduled_for, recipi
                 delivered_recipient_ids.add(recipient.id)
             except Exception as exc:
                 failed_recipient_ids.add(recipient.id)
-                errors.append(str(exc) or exc.__class__.__name__)
-                logger.exception("Unable to send lecture reminder email for course %s", course.pk)
+                errors.append(exc.__class__.__name__)
+                logger.error(
+                    "Lecture reminder email rejected. course_id=%s recipient_id=%s error_type=%s",
+                    course.pk, recipient.pk, exc.__class__.__name__,
+                )
     except Exception as exc:
-        error = str(exc) or exc.__class__.__name__
+        error = exc.__class__.__name__
         failed_recipient_ids.update(recipient.id for recipient in recipients)
         errors.append(error)
-        logger.exception("Unable to open lecture reminder email connection for course %s", course.pk)
+        logger.error(
+            "Lecture reminder SMTP connection failed. course_id=%s error_type=%s",
+            course.pk, exc.__class__.__name__,
+        )
     finally:
         connection.close()
-    return delivered_recipient_ids, failed_recipient_ids, "; ".join(errors)[:255]
+    return delivered_recipient_ids, failed_recipient_ids, skipped_recipient_ids, "; ".join(errors)[:255]
 
 
 def deliver_notification(notification):
@@ -528,12 +593,13 @@ def deliver_notification(notification):
         UserAlert.objects.bulk_create(alert_rows, ignore_conflicts=True)
 
     transaction.on_commit(lambda: send_notification_browser_pushes(notification))
-    if notification.sender.has_role(User.Role.LECTURER):
-        transaction.on_commit(lambda: send_lecturer_message_emails(notification))
+    # Every message delivered to a student inbox is also emailed to that
+    # student, including messages sent by HODs and other authorised staff.
+    transaction.on_commit(lambda: send_lecturer_message_emails(notification))
 
 
 def send_lecturer_message_emails(notification):
-    """Send a lecturer announcement to every recipient without exposing student emails."""
+    """Email every delivered student message without exposing recipient emails."""
     recipient_emails = (
         NotificationRecipient.objects.filter(
             notification=notification,
@@ -590,15 +656,19 @@ def send_browser_push_alert(alert):
     The UserAlert record is retained when push is unavailable or rejected, so
     recipients still see the notification from the in-app alert feed.
     """
-    if not alert.recipient.browser_alerts_enabled or not all(
-        (settings.VAPID_PUBLIC_KEY, settings.VAPID_PRIVATE_KEY, settings.VAPID_CLAIMS_EMAIL)
-    ):
-        return 0
+    result = {"attempted": 0, "accepted": 0, "failed": 0, "skipped": 0, "skipped_reasons": {}}
+    if not alert.recipient.browser_alerts_enabled:
+        _increment_reason(result, "browser_alerts_disabled")
+        return result
+    if not all((settings.VAPID_PUBLIC_KEY, settings.VAPID_PRIVATE_KEY, settings.VAPID_CLAIMS_EMAIL)):
+        _increment_reason(result, "vapid_not_configured")
+        return result
     try:
-        from pywebpush import WebPushException, webpush
+        WebPushException, webpush = _webpush_client()
     except ImportError:
         logger.error("Browser push is configured but pywebpush is not installed.")
-        return 0
+        _increment_reason(result, "push_library_unavailable")
+        return result
 
     payload = json.dumps({
         "title": alert.title,
@@ -606,8 +676,15 @@ def send_browser_push_alert(alert):
         "target_url": alert.target_url,
         "tag": f"educonnect-{alert.id}",
     })
-    delivered = 0
-    for subscription in PushSubscription.objects.filter(recipient=alert.recipient).iterator():
+    subscriptions = PushSubscription.all_objects.filter(
+        institution_id=alert.institution_id,
+        recipient=alert.recipient,
+    )
+    if not subscriptions.exists():
+        _increment_reason(result, "no_active_subscription")
+        return result
+    for subscription in subscriptions.iterator():
+        result["attempted"] += 1
         try:
             webpush(
                 subscription_info={
@@ -616,24 +693,36 @@ def send_browser_push_alert(alert):
                 },
                 data=payload,
                 vapid_private_key=settings.VAPID_PRIVATE_KEY,
-                vapid_claims={"sub": f"mailto:{settings.VAPID_CLAIMS_EMAIL}"},
+                vapid_claims={"sub": _vapid_subject()},
                 content_encoding="aes128gcm",
             )
-            delivered += 1
+            result["accepted"] += 1
         except WebPushException as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code in {404, 410}:
                 subscription.delete()
+                logger.info(
+                    "Removed expired browser push subscription. alert_id=%s status_code=%s",
+                    alert.pk, status_code,
+                )
             else:
-                logger.warning("Unable to send browser push for alert %s: %s", alert.pk, exc)
-        except Exception:
-            logger.exception("Unable to send browser push for alert %s", alert.pk)
-    if delivered:
-        UserAlert.objects.filter(pk=alert.pk, browser_delivered_at__isnull=True).update(
+                logger.warning(
+                    "Browser push rejected. alert_id=%s status_code=%s error_type=%s",
+                    alert.pk, status_code, exc.__class__.__name__,
+                )
+            result["failed"] += 1
+        except Exception as exc:
+            result["failed"] += 1
+            logger.error(
+                "Browser push failed. alert_id=%s error_type=%s",
+                alert.pk, exc.__class__.__name__,
+            )
+    if result["accepted"]:
+        UserAlert.all_objects.filter(pk=alert.pk, browser_delivered_at__isnull=True).update(
             browser_delivered_at=timezone.now(),
             updated_at=timezone.now(),
         )
-    return delivered
+    return result
 
 
 def send_notification_browser_pushes(notification):
@@ -648,7 +737,7 @@ def send_notification_browser_pushes(notification):
         send_browser_push_alert(alert)
 
 
-def create_alert(recipient, alert_type, title, body, target_url, dedupe_key):
+def create_alert(recipient, alert_type, title, body, target_url, dedupe_key, deliver_browser_push=True):
     if not recipient or not recipient.has_role(User.Role.STUDENT, User.Role.LECTURER):
         return None
     alert, created = UserAlert.objects.get_or_create(
@@ -662,7 +751,7 @@ def create_alert(recipient, alert_type, title, body, target_url, dedupe_key):
             "target_url": target_url,
         },
     )
-    if created:
+    if created and deliver_browser_push:
         send_browser_push_alert(alert)
     return alert
 
@@ -754,24 +843,61 @@ def dispatch_due_course_reminders(now=None):
     now = now or timezone.now()
     if timezone.is_naive(now):
         now = timezone.make_aware(now, timezone.get_current_timezone())
-    summary = {"courses_due": 0, "email_delivered": 0, "email_failed": 0, "alerts_delivered": 0}
+    summary = {
+        "executed_at": now.isoformat(),
+        "timezone": str(now.tzinfo),
+        "candidate_courses": 0,
+        "courses_due": 0,
+        "courses_skipped": {},
+        "eligible_recipients": {"lecturers": 0, "students": 0},
+        "email": {"attempted": 0, "accepted": 0, "failed": 0, "skipped": 0, "skipped_reasons": {}},
+        "browser_push": {"attempted": 0, "accepted": 0, "failed": 0, "skipped": 0, "skipped_reasons": {}},
+    }
+
+    def skip_course(course, reason):
+        summary["courses_skipped"][reason] = summary["courses_skipped"].get(reason, 0) + 1
+        logger.info(
+            "Lecture reminder course skipped. course_id=%s institution_id=%s reason=%s",
+            course.pk, course.institution_id, reason,
+        )
+
+    def merge_push_result(result):
+        for key in ("attempted", "accepted", "failed", "skipped"):
+            summary["browser_push"][key] += result[key]
+        for reason, count in result["skipped_reasons"].items():
+            summary["browser_push"]["skipped_reasons"][reason] = (
+                summary["browser_push"]["skipped_reasons"].get(reason, 0) + count
+            )
+
     # Institutions may use different timezones.  Filter by their local day
     # inside the loop rather than the server's day, so a midnight boundary
     # never skips an otherwise due reminder.
-    candidate_courses = Course.all_objects.select_related("lecturer", "institution").filter(
+    candidate_courses = Course.all_objects.select_related(
+        "lecturer", "institution", "academic_session", "department__institution"
+    ).filter(
         institution__isnull=False,
-        institution__status="active",
-        schedule_time__isnull=False,
-        is_available=True,
-    ).filter(academic_session__is_current=True).exclude(
-        schedule_day="",
-    ).exclude(code="").exclude(title="").exclude(venue="")
+    )
     for course in candidate_courses:
+        summary["candidate_courses"] += 1
+        if course.institution.status != "active":
+            skip_course(course, "institution_inactive")
+            continue
+        if not course.is_available:
+            skip_course(course, "course_unavailable")
+            continue
+        if not course.academic_session_id or not course.academic_session.is_current:
+            skip_course(course, "academic_session_not_current")
+            continue
+        if not all((course.code, course.title, course.venue, course.schedule_day, course.schedule_time)):
+            skip_course(course, "incomplete_schedule")
+            continue
         local_now = now.astimezone(_course_timezone(course))
         if course.schedule_day != local_now.strftime("%A"):
+            skip_course(course, "weekday_mismatch")
             continue
         class_starts_at = _course_occurrence_datetime(course, local_now, local_now.tzinfo)
         if not class_starts_at:
+            skip_course(course, "invalid_schedule")
             continue
         minutes_until_start = (class_starts_at - local_now).total_seconds() / 60
         if not (
@@ -779,6 +905,7 @@ def dispatch_due_course_reminders(now=None):
             <= minutes_until_start
             <= LECTURE_REMINDER_LEAD_MINUTES + LECTURE_REMINDER_TOLERANCE_MINUTES
         ):
+            skip_course(course, "outside_reminder_window")
             continue
         summary["courses_due"] += 1
 
@@ -804,9 +931,17 @@ def dispatch_due_course_reminders(now=None):
         for student in students:
             recipients.setdefault(student.id, (student, "student"))
 
+        for _, recipient_kind in recipients.values():
+            summary["eligible_recipients"][f"{recipient_kind}s"] += 1
+
         email_targets, email_dispatches, recipient_kinds = [], {}, {}
         for recipient, recipient_kind in recipients.values():
-            if recipient.email_class_reminders and recipient.email:
+            recipient_email = (recipient.email or "").strip()
+            if not recipient.email_class_reminders:
+                _increment_reason(summary["email"], "preference_disabled")
+            elif not recipient_email:
+                _increment_reason(summary["email"], "missing_email_address")
+            else:
                 dispatch_id = _claim_reminder_delivery(
                     course, recipient, class_starts_at, CourseReminderDispatch.Channel.EMAIL, timezone.now()
                 )
@@ -814,35 +949,60 @@ def dispatch_due_course_reminders(now=None):
                     email_targets.append(recipient)
                     email_dispatches[recipient.id] = dispatch_id
                     recipient_kinds[recipient.id] = recipient_kind
-            if recipient.browser_alerts_enabled and recipient.class_reminder_alerts_enabled:
+                else:
+                    _increment_reason(summary["email"], "already_delivered_or_claimed")
+            if not recipient.browser_alerts_enabled:
+                _increment_reason(summary["browser_push"], "browser_alerts_disabled")
+            elif not recipient.class_reminder_alerts_enabled:
+                _increment_reason(summary["browser_push"], "class_reminder_preference_disabled")
+            else:
                 dispatch_id = _claim_reminder_delivery(
                     course, recipient, class_starts_at, CourseReminderDispatch.Channel.ALERT, timezone.now()
                 )
                 if dispatch_id:
                     try:
                         title, body = _lecture_reminder_content(course, class_starts_at, recipient_kind)
-                        create_alert(
+                        alert = create_alert(
                             recipient=recipient,
                             alert_type=UserAlert.AlertType.CLASS_REMINDER,
                             title=title,
                             body=body,
                             target_url=reverse("portal:dashboard"),
                             dedupe_key=f"class-reminder:{course.id}:{recipient.id}:{class_starts_at.isoformat()}",
+                            deliver_browser_push=False,
                         )
                     except Exception as exc:
-                        _finish_reminder_delivery({recipient.id: dispatch_id}, set(), {recipient.id}, timezone.now(), str(exc))
+                        _finish_reminder_delivery(
+                            {recipient.id: dispatch_id}, set(), {recipient.id}, timezone.now(), exc.__class__.__name__
+                        )
+                        summary["browser_push"]["failed"] += 1
                         logger.exception("Unable to create lecture reminder alert for course %s", course.pk)
                     else:
-                        _finish_reminder_delivery({recipient.id: dispatch_id}, {recipient.id}, set(), timezone.now())
-                        summary["alerts_delivered"] += 1
+                        push_result = send_browser_push_alert(alert)
+                        merge_push_result(push_result)
+                        if push_result["accepted"]:
+                            _finish_reminder_delivery({recipient.id: dispatch_id}, {recipient.id}, set(), timezone.now())
+                        else:
+                            _finish_reminder_delivery(
+                                {recipient.id: dispatch_id}, set(), {recipient.id}, timezone.now(),
+                                "Browser push was not accepted by a subscription provider.",
+                            )
+                else:
+                    _increment_reason(summary["browser_push"], "already_delivered_or_claimed")
 
         if email_targets:
-            delivered_ids, failed_ids, error_message = send_course_reminder_email(
+            summary["email"]["attempted"] += len(email_targets)
+            delivered_ids, failed_ids, skipped_ids, error_message = send_course_reminder_email(
                 course, email_targets, class_starts_at, recipient_kinds
             )
-            _finish_reminder_delivery(email_dispatches, delivered_ids, failed_ids, timezone.now(), error_message)
-            summary["email_delivered"] += len(delivered_ids)
-            summary["email_failed"] += len(failed_ids)
+            _finish_reminder_delivery(
+                email_dispatches, delivered_ids, failed_ids | skipped_ids, timezone.now(), error_message
+            )
+            summary["email"]["accepted"] += len(delivered_ids)
+            summary["email"]["failed"] += len(failed_ids)
+            for _ in skipped_ids:
+                _increment_reason(summary["email"], "missing_email_address")
+    logger.info("Lecture reminder execution completed. summary=%s", json.dumps(summary, sort_keys=True))
     return summary
 
 

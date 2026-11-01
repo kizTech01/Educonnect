@@ -7,11 +7,13 @@ from uuid import uuid4
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.core.validators import FileExtensionValidator
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
 from django.utils.text import slugify
 import secrets
+
+from .fields import EncryptedTextField
 
 
 LEVEL_CHOICES = [
@@ -113,6 +115,11 @@ class Institution(models.Model):
     @property
     def current_subscription(self):
         return self.subscriptions.order_by("-end_date", "-created_at").first()
+
+    @property
+    def has_logo(self):
+        """A database snapshot remains a valid institution logo if storage changes."""
+        return bool(self.logo or self.logo_data)
 
     @property
     def is_operational(self):
@@ -561,6 +568,24 @@ class User(AbstractUser):
         return self.is_superuser or bool(set(roles).intersection(self.active_roles()))
 
 
+class AccountActivation(models.Model):
+    """One-time, expiring activation link for provisioned accounts."""
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="activation")
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @staticmethod
+    def token_hash_for(token):
+        return salted_hmac("portal.account-activation", token, algorithm="sha256").hexdigest()
+
+    @property
+    def is_valid(self):
+        return self.consumed_at is None and self.expires_at > timezone.now()
+
+
 class RoleAssignment(TimeStampedModel):
     """An auditable, tenant-owned role granted to an existing user."""
 
@@ -738,7 +763,7 @@ class SubscriptionPaymentGateway(models.Model):
 
     slug = models.SlugField(max_length=30, unique=True, default="subscription")
     paystack_public_key = models.CharField(max_length=255, blank=True)
-    paystack_secret_key = models.CharField(max_length=255, blank=True)
+    paystack_secret_key = EncryptedTextField(max_length=2048, blank=True)
     is_active = models.BooleanField(default=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -906,6 +931,24 @@ class ScreeningIntegration(models.Model):
             and (self.opens_at is None or self.opens_at <= now)
             and (self.closes_at is None or now <= self.closes_at)
         )
+
+
+class ScreeningRequestReplay(models.Model):
+    """Shared, short-lived replay ledger for signed screening API requests."""
+
+    institution = models.ForeignKey(Institution, on_delete=models.CASCADE, related_name="screening_request_replays")
+    signature_digest = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["institution", "signature_digest"],
+                name="unique_screening_request_signature",
+            ),
+        ]
+        indexes = [models.Index(fields=["expires_at"])]
 
 
 class ScreeningApplication(models.Model):
@@ -1270,7 +1313,7 @@ class CoursePayment(TimeStampedModel):
     is_active_for_registration = models.BooleanField(default=True)
     paystack_reference = models.CharField(max_length=64, blank=True, default="")
     paystack_public_key_used = models.CharField(max_length=255, blank=True)
-    paystack_secret_key_used = models.CharField(max_length=255, blank=True)
+    paystack_secret_key_used = EncryptedTextField(max_length=2048, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -1553,7 +1596,7 @@ class CoursePaymentGateway(TimeStampedModel):
     slug = models.CharField(max_length=30, default="courses")
     payment_url = models.URLField(blank=True)
     paystack_public_key = models.CharField(max_length=255, blank=True)
-    paystack_secret_key = models.CharField(max_length=255, blank=True)
+    paystack_secret_key = EncryptedTextField(max_length=2048, blank=True)
 
     class Meta:
         ordering = ["slug"]
@@ -1576,7 +1619,7 @@ class DepartmentPaymentGateway(TimeStampedModel):
     department = models.OneToOneField(Department, on_delete=models.CASCADE, related_name="payment_gateway")
     payment_url = models.URLField(blank=True)
     paystack_public_key = models.CharField(max_length=255, blank=True)
-    paystack_secret_key = models.CharField(max_length=255, blank=True)
+    paystack_secret_key = EncryptedTextField(max_length=2048, blank=True)
 
     class Meta:
         ordering = ["department__name"]
@@ -1598,7 +1641,7 @@ class DepartmentCoursePaymentGateway(TimeStampedModel):
         related_name="course_payment_gateway",
     )
     paystack_public_key = models.CharField(max_length=255, blank=True)
-    paystack_secret_key = models.CharField(max_length=255, blank=True)
+    paystack_secret_key = EncryptedTextField(max_length=2048, blank=True)
 
     class Meta:
         ordering = ["department__name"]
@@ -1612,7 +1655,12 @@ class DepartmentCoursePaymentGateway(TimeStampedModel):
 
 
 class AcademicSession(TimeStampedModel):
+    class Semester(models.TextChoices):
+        FIRST = "first", "First Semester"
+        SECOND = "second", "Second Semester"
+
     name = models.CharField(max_length=20)
+    semester = models.CharField(max_length=20, choices=Semester.choices, default=Semester.FIRST)
     is_current = models.BooleanField(default=False)
 
     class Meta:
@@ -1622,6 +1670,11 @@ class AcademicSession(TimeStampedModel):
                 fields=["institution", "name"],
                 name="unique_institution_academic_session_name",
             ),
+            models.UniqueConstraint(
+                fields=["institution"],
+                condition=models.Q(is_current=True),
+                name="unique_current_academic_session_per_institution",
+            ),
         ]
 
     def save(self, *args, **kwargs):
@@ -1629,18 +1682,34 @@ class AcademicSession(TimeStampedModel):
         # Keep the historical rows for transcripts and receipts, but make sure
         # no role carries a live course registration into the newly-current
         # session.  This also covers sessions created outside the admin view.
-        was_current = False
-        if self.pk:
-            was_current = bool(
-                AcademicSession.all_objects.filter(pk=self.pk).values_list("is_current", flat=True).first()
-            )
-        super().save(*args, **kwargs)
-        if self.is_current:
-            AcademicSession.all_objects.filter(institution_id=self.institution_id, is_current=True).exclude(
-                pk=self.pk
-            ).update(is_current=False)
-            if not was_current:
+        # Lock the tenant row so competing rollovers for the same institution
+        # are serialized. The partial unique constraint above is the final
+        # database-level backstop for writes that bypass this model method.
+        current = get_current_institution()
+        if current:
+            if self.institution_id and self.institution_id != current.pk:
+                raise ValidationError("Cross-institution data writes are not permitted.")
+            self.institution = current
+        elif not self.institution_id:
+            self.institution = get_default_institution()
+
+        with transaction.atomic():
+            Institution.objects.select_for_update().get(pk=self.institution_id)
+            was_current = False
+            previous_semester = None
+            if self.pk:
+                previous = AcademicSession.all_objects.filter(pk=self.pk).values("is_current", "semester").first() or {}
+                was_current = bool(previous.get("is_current"))
+                previous_semester = previous.get("semester")
+            if self.is_current:
+                AcademicSession.all_objects.filter(
+                    institution_id=self.institution_id,
+                    is_current=True,
+                ).exclude(pk=self.pk).update(is_current=False)
+            super().save(*args, **kwargs)
+            if self.is_current and (not was_current or previous_semester != self.semester):
                 reset_course_registrations_for_session_rollover(self.institution_id)
+                reset_student_messages_for_academic_rollover(self.institution_id)
 
     def __str__(self):
         return self.name
@@ -2110,7 +2179,7 @@ class DepartmentalPayment(TimeStampedModel):
     association_summary = models.CharField(max_length=255, blank=True)
     paystack_reference = models.CharField(max_length=64, unique=True, default="", blank=True)
     paystack_public_key_used = models.CharField(max_length=255, blank=True)
-    paystack_secret_key_used = models.CharField(max_length=255, blank=True)
+    paystack_secret_key_used = EncryptedTextField(max_length=2048, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
 
     @property
@@ -2180,11 +2249,9 @@ class DepartmentalPayment(TimeStampedModel):
     def semester_label(self):
         return self.exam_card_semester or self.current_semester_label()
 
-    @staticmethod
-    def current_semester_label():
-        """Return the semester in progress when a card is issued."""
-        local_time = timezone.localtime(timezone.now())
-        return "First Semester" if local_time.month <= 6 else "Second Semester"
+    def current_semester_label(self):
+        """Use the semester selected by the institution administrator."""
+        return self.session.get_semester_display() if self.session_id else "First Semester"
 
     def __str__(self):
         return f"{self.student.full_name} - {self.session.name}"
@@ -2452,3 +2519,17 @@ def reset_course_registrations_for_session_rollover(institution_id):
         is_active=True,
     ).update(is_active=False, updated_at=now)
     return lecturer_count, student_count
+
+
+def reset_student_messages_for_academic_rollover(institution_id):
+    """Clear student inboxes and message alerts when an academic period changes."""
+    if not institution_id:
+        return 0
+    recipients = NotificationRecipient.all_objects.filter(institution_id=institution_id)
+    recipient_count = recipients.count()
+    recipients.delete()
+    UserAlert.all_objects.filter(
+        institution_id=institution_id,
+        alert_type=UserAlert.AlertType.MESSAGE,
+    ).delete()
+    return recipient_count

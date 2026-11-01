@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from django.core import mail
@@ -19,6 +19,7 @@ from .models import (
     PushSubscription,
     StudentCourseRegistration,
     User,
+    UserAlert,
     reset_current_institution,
     set_current_institution,
 )
@@ -99,7 +100,7 @@ class LectureReminderTests(TestCase):
         dispatch_due_course_reminders(now=self.reminder_now)
 
         self.assertEqual(summary["courses_due"], 1)
-        self.assertEqual(summary["email_delivered"], 2)
+        self.assertEqual(summary["email"]["accepted"], 2)
         self.assertEqual(
             {tuple(message.to) for message in mail.outbox},
             {(lecturer.email,), (student.email,)},
@@ -147,14 +148,25 @@ class LectureReminderTests(TestCase):
     def test_outside_reminder_window_and_started_lectures_are_skipped(self):
         _, course, _, _ = self.make_tenant_course("FIRST", "first")
 
-        dispatch_due_course_reminders(now=self.reminder_now.replace(hour=9, minute=24))
-        dispatch_due_course_reminders(now=self.reminder_now.replace(hour=10, minute=0))
+        early_summary = dispatch_due_course_reminders(now=self.reminder_now.replace(hour=9, minute=24))
+        started_summary = dispatch_due_course_reminders(now=self.reminder_now.replace(hour=10, minute=0))
 
         self.assertEqual(len(mail.outbox), 0)
         self.assertFalse(CourseReminderDispatch.all_objects.filter(course=course).exists())
+        self.assertEqual(early_summary["courses_skipped"], {"outside_reminder_window": 1})
+        self.assertEqual(started_summary["courses_skipped"], {"outside_reminder_window": 1})
 
     @override_settings(EDUCONNECT_CRON_SECRET="test-cron-secret")
-    @patch("portal.views.dispatch_due_course_reminders", return_value={"courses_due": 1, "email_delivered": 2, "email_failed": 0, "alerts_delivered": 0})
+    @patch("portal.views.dispatch_due_course_reminders", return_value={
+        "executed_at": "2030-01-07T09:30:00+01:00",
+        "timezone": "Africa/Lagos",
+        "candidate_courses": 1,
+        "courses_due": 1,
+        "courses_skipped": {},
+        "eligible_recipients": {"lecturers": 1, "students": 1},
+        "email": {"attempted": 2, "accepted": 2, "failed": 0, "skipped": 0, "skipped_reasons": {}},
+        "browser_push": {"attempted": 0, "accepted": 0, "failed": 0, "skipped": 2, "skipped_reasons": {"browser_alerts_disabled": 2}},
+    })
     def test_cron_endpoint_requires_secret_and_returns_only_summary(self, dispatch):
         url = reverse("portal:internal-lecture-reminders")
 
@@ -166,7 +178,33 @@ class LectureReminderTests(TestCase):
         self.assertEqual(missing.json(), {"detail": "Unauthorized."})
         self.assertEqual(rejected.status_code, 401)
         self.assertEqual(accepted.status_code, 200)
-        self.assertEqual(accepted.json(), {"status": "ok", "courses_due": 1, "email_delivered": 2, "email_failed": 0, "alerts_delivered": 0})
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json()["status"], "completed")
+        self.assertEqual(accepted.json()["email"], {"attempted": 2, "accepted": 2, "failed": 0, "skipped": 0, "skipped_reasons": {}})
+        self.assertEqual(accepted.json()["browser_push"]["skipped_reasons"], {"browser_alerts_disabled": 2})
+        dispatch.assert_called_once_with()
+
+    @override_settings(EDUCONNECT_CRON_SECRET="test-cron-secret")
+    @patch("portal.views.dispatch_due_course_reminders", return_value={
+        "executed_at": "2030-01-07T09:30:00+01:00",
+        "timezone": "Africa/Lagos",
+        "candidate_courses": 1,
+        "courses_due": 1,
+        "courses_skipped": {},
+        "eligible_recipients": {"lecturers": 1, "students": 1},
+        "email": {"attempted": 2, "accepted": 1, "failed": 1, "skipped": 0, "skipped_reasons": {}},
+        "browser_push": {"attempted": 1, "accepted": 0, "failed": 1, "skipped": 0, "skipped_reasons": {}},
+    })
+    def test_cron_endpoint_reports_delivery_failures_without_failing_the_execution(self, dispatch):
+        response = self.client.post(
+            reverse("portal:internal-lecture-reminders"),
+            HTTP_X_EDUCONNECT_CRON_SECRET="test-cron-secret",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "completed_with_failures")
+        self.assertEqual(response.json()["email"]["failed"], 1)
+        self.assertEqual(response.json()["browser_push"]["failed"], 1)
         dispatch.assert_called_once_with()
 
     @override_settings(EDUCONNECT_CRON_SECRET="test-cron-secret")
@@ -211,7 +249,7 @@ class LectureReminderTests(TestCase):
         summary = dispatch_due_course_reminders(now=now)
 
         self.assertEqual(summary["courses_due"], 1)
-        self.assertEqual(summary["email_delivered"], 2)
+        self.assertEqual(summary["email"]["accepted"], 2)
         self.assertEqual(
             set(CourseReminderDispatch.all_objects.filter(course=course).values_list("recipient_id", flat=True)),
             {lecturer.id, student.id},
@@ -241,3 +279,141 @@ class LectureReminderTests(TestCase):
         subscription = PushSubscription.all_objects.get()
         self.assertEqual(subscription.recipient, student)
         self.assertEqual(subscription.institution, institution)
+
+    def test_missing_email_address_is_reported_without_failing_other_recipients(self):
+        _, _, _, student = self.make_tenant_course("FIRST", "first")
+        student.email = ""
+        student.save(update_fields=["email"])
+
+        summary = dispatch_due_course_reminders(now=self.reminder_now)
+
+        self.assertEqual(summary["email"]["accepted"], 1)
+        self.assertEqual(summary["email"]["failed"], 0)
+        self.assertEqual(summary["email"]["skipped_reasons"], {"missing_email_address": 1})
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_email_provider_failures_are_reported_and_left_retryable(self):
+        _, course, _, _ = self.make_tenant_course("FIRST", "first")
+
+        def reject_all(course, recipients, scheduled_for, recipient_kinds):
+            return set(), {recipient.id for recipient in recipients}, set(), "SMTPException"
+
+        with patch("portal.services.send_course_reminder_email", side_effect=reject_all):
+            summary = dispatch_due_course_reminders(now=self.reminder_now)
+
+        self.assertEqual(summary["email"]["attempted"], 2)
+        self.assertEqual(summary["email"]["accepted"], 0)
+        self.assertEqual(summary["email"]["failed"], 2)
+        self.assertEqual(
+            CourseReminderDispatch.all_objects.filter(
+                course=course, channel=CourseReminderDispatch.Channel.EMAIL, delivered_at__isnull=True
+            ).count(),
+            2,
+        )
+
+    @override_settings(
+        VAPID_PUBLIC_KEY="test-public-key",
+        VAPID_PRIVATE_KEY="test-private-key",
+        VAPID_CLAIMS_EMAIL="mailto:alerts@example.test",
+    )
+    def test_browser_push_acceptance_is_tracked_and_vapid_subject_is_not_double_prefixed(self):
+        institution, _, _, student = self.make_tenant_course("FIRST", "first")
+        student.browser_alerts_enabled = True
+        student.class_reminder_alerts_enabled = True
+        student.save(update_fields=["browser_alerts_enabled", "class_reminder_alerts_enabled"])
+        PushSubscription.all_objects.create(
+            institution=institution,
+            recipient=student,
+            endpoint="https://push.example.test/subscriptions/accepted",
+            p256dh="browser-public-key",
+            auth="browser-auth-key",
+        )
+
+        webpush = Mock()
+        with patch("portal.services._webpush_client", return_value=(Exception, webpush)):
+            summary = dispatch_due_course_reminders(now=self.reminder_now)
+            repeat_summary = dispatch_due_course_reminders(now=self.reminder_now)
+
+        self.assertEqual(summary["browser_push"]["attempted"], 1)
+        self.assertEqual(summary["browser_push"]["accepted"], 1)
+        self.assertEqual(summary["browser_push"]["failed"], 0)
+        self.assertEqual(webpush.call_count, 1)
+        self.assertEqual(webpush.call_args.kwargs["vapid_claims"], {"sub": "mailto:alerts@example.test"})
+        self.assertEqual(repeat_summary["browser_push"]["attempted"], 0)
+
+    @override_settings(
+        VAPID_PUBLIC_KEY="test-public-key",
+        VAPID_PRIVATE_KEY="test-private-key",
+        VAPID_CLAIMS_EMAIL="alerts@example.test",
+    )
+    def test_browser_push_failure_is_reported_and_not_marked_delivered(self):
+        institution, course, _, student = self.make_tenant_course("FIRST", "first")
+        student.browser_alerts_enabled = True
+        student.class_reminder_alerts_enabled = True
+        student.save(update_fields=["browser_alerts_enabled", "class_reminder_alerts_enabled"])
+        PushSubscription.all_objects.create(
+            institution=institution,
+            recipient=student,
+            endpoint="https://push.example.test/subscriptions/rejected",
+            p256dh="browser-public-key",
+            auth="browser-auth-key",
+        )
+
+        webpush = Mock(side_effect=RuntimeError("provider unavailable"))
+        with patch("portal.services._webpush_client", return_value=(Exception, webpush)):
+            summary = dispatch_due_course_reminders(now=self.reminder_now)
+
+        self.assertEqual(summary["browser_push"]["attempted"], 1)
+        self.assertEqual(summary["browser_push"]["accepted"], 0)
+        self.assertEqual(summary["browser_push"]["failed"], 1)
+        self.assertEqual(webpush.call_count, 1)
+        self.assertTrue(UserAlert.all_objects.filter(recipient=student).exists())
+        self.assertTrue(CourseReminderDispatch.all_objects.filter(
+            course=course, recipient=student, channel=CourseReminderDispatch.Channel.ALERT, delivered_at__isnull=True
+        ).exists())
+
+    @override_settings(VAPID_PUBLIC_KEY="", VAPID_PRIVATE_KEY="", VAPID_CLAIMS_EMAIL="")
+    def test_missing_vapid_configuration_is_reported_as_a_skipped_push(self):
+        _, _, _, student = self.make_tenant_course("FIRST", "first")
+        student.browser_alerts_enabled = True
+        student.class_reminder_alerts_enabled = True
+        student.save(update_fields=["browser_alerts_enabled", "class_reminder_alerts_enabled"])
+
+        summary = dispatch_due_course_reminders(now=self.reminder_now)
+
+        self.assertEqual(summary["browser_push"]["attempted"], 0)
+        self.assertEqual(summary["browser_push"]["accepted"], 0)
+        self.assertEqual(summary["browser_push"]["skipped_reasons"], {
+            "browser_alerts_disabled": 1,
+            "vapid_not_configured": 1,
+        })
+
+    @override_settings(
+        VAPID_PUBLIC_KEY="test-public-key",
+        VAPID_PRIVATE_KEY="test-private-key",
+        VAPID_CLAIMS_EMAIL="alerts@example.test",
+    )
+    def test_expired_browser_push_subscription_is_removed(self):
+        class ExpiredPush(Exception):
+            response = type("Response", (), {"status_code": 410})()
+
+        institution, _, _, student = self.make_tenant_course("FIRST", "first")
+        student.browser_alerts_enabled = True
+        student.class_reminder_alerts_enabled = True
+        student.save(update_fields=["browser_alerts_enabled", "class_reminder_alerts_enabled"])
+        subscription = PushSubscription.all_objects.create(
+            institution=institution,
+            recipient=student,
+            endpoint="https://push.example.test/subscriptions/expired",
+            p256dh="browser-public-key",
+            auth="browser-auth-key",
+        )
+
+        with patch(
+            "portal.services._webpush_client",
+            return_value=(ExpiredPush, Mock(side_effect=ExpiredPush())),
+        ):
+            summary = dispatch_due_course_reminders(now=self.reminder_now)
+
+        self.assertEqual(summary["browser_push"]["failed"], 1)
+        self.assertFalse(PushSubscription.all_objects.filter(pk=subscription.pk).exists())

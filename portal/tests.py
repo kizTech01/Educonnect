@@ -14,7 +14,7 @@ from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.files.storage import FileSystemStorage
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, connection
+from django.db import IntegrityError, connection, transaction
 from django.http import Http404
 from django.test import Client
 from django.test import RequestFactory
@@ -60,6 +60,7 @@ from .models import (
     User,
     UserAlert,
     RoleAssignment,
+    Subscription,
     SubscriptionPlan,
     SubscriptionPlanDuration,
     get_default_institution,
@@ -3526,7 +3527,12 @@ class DashboardAndCourseFlowTests(TestCase):
 
         response = self.client.post(
             reverse("portal:admin-about"),
-            {"action": "create-academic-session", "name": "2027/2028", "is_current": "on"},
+            {
+                "action": "create-academic-session",
+                "name": "2027/2028",
+                "semester": AcademicSession.Semester.FIRST,
+                "is_current": "on",
+            },
         )
 
         self.assertEqual(response.status_code, 302)
@@ -3549,6 +3555,27 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(page_response, "Create Academic Session")
         self.assertContains(page_response, "Past Sessions")
         self.assertContains(page_response, self.session.name)
+
+    def test_admin_can_change_the_semester_without_creating_another_session(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.post(
+            reverse("portal:admin-about"),
+            {
+                "action": "save-current-semester",
+                "semester": AcademicSession.Semester.SECOND,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.session.refresh_from_db()
+        self.assertTrue(self.session.is_current)
+        self.assertEqual(self.session.semester, AcademicSession.Semester.SECOND)
+        self.assertEqual(AcademicSession.objects.filter(is_current=True).count(), 1)
+        self.assertEqual(AcademicSession.objects.count(), 1)
+
+        page_response = self.client.get(reverse("portal:admin-about"))
+        self.assertContains(page_response, "Second Semester")
 
     def test_admin_departments_does_not_offer_course_allocation_uploads(self):
         self.client.force_login(self.admin)
@@ -3966,6 +3993,235 @@ class DashboardAndCourseFlowTests(TestCase):
     BOOTSTRAP_ADMIN_USERNAME="test-bootstrap-admin",
     BOOTSTRAP_ADMIN_PASSWORD="test-bootstrap-password",
 )
+class AcademicSessionSecurityTests(TestCase):
+    """Regression coverage for the institution-admin academic session flow."""
+
+    def setUp(self):
+        self.alpha = Institution.objects.create(
+            name="Alpha University",
+            institution_code="ALPHA-SEC",
+            institution_type=Institution.Type.UNIVERSITY,
+            email="admin@alpha.example",
+            subdomain="alpha-sec",
+            status=Institution.Status.ACTIVE,
+        )
+        self.beta = Institution.objects.create(
+            name="Beta University",
+            institution_code="BETA-SEC",
+            institution_type=Institution.Type.UNIVERSITY,
+            email="admin@beta.example",
+            subdomain="beta-sec",
+            status=Institution.Status.ACTIVE,
+        )
+        plan = SubscriptionPlan.objects.create(
+            name="Session security plan",
+            price=Decimal("0.00"),
+            billing_period=SubscriptionPlan.BillingPeriod.YEARLY,
+        )
+        for institution in (self.alpha, self.beta):
+            Subscription.objects.create(
+                institution=institution,
+                plan=plan,
+                start_date=timezone.localdate(),
+                end_date=timezone.localdate() + timedelta(days=365),
+                status=Subscription.Status.ACTIVE,
+            )
+        self.department = Department.all_objects.create(
+            institution=self.alpha, name="Security", code="SEC"
+        )
+        self.admin = User.all_objects.create_user(
+            username="alpha-session-admin",
+            password="pass1234",
+            role=User.Role.ADMIN,
+            institution=self.alpha,
+        )
+        self.student = User.all_objects.create_user(
+            username="alpha-session-student",
+            password="pass1234",
+            role=User.Role.STUDENT,
+            institution=self.alpha,
+            department=self.department,
+        )
+        self.lecturer = User.all_objects.create_user(
+            username="alpha-session-lecturer",
+            password="pass1234",
+            role=User.Role.LECTURER,
+            institution=self.alpha,
+            department=self.department,
+        )
+        self.mis = User.all_objects.create_user(
+            username="alpha-session-mis",
+            password="pass1234",
+            role=User.Role.MIS,
+            institution=self.alpha,
+        )
+        self.alpha_session = AcademicSession.all_objects.create(
+            institution=self.alpha,
+            name="2026/2027",
+            semester=AcademicSession.Semester.FIRST,
+            is_current=True,
+        )
+        self.beta_session = AcademicSession.all_objects.create(
+            institution=self.beta,
+            name="2026/2027",
+            semester=AcademicSession.Semester.FIRST,
+            is_current=True,
+        )
+
+    def _post_as(self, user, data, client=None):
+        client = client or self.client
+        client.force_login(user)
+        return client.post(
+            reverse("portal:admin-about"),
+            data,
+            HTTP_HOST=f"{user.institution.subdomain}.{settings.PLATFORM_BASE_DOMAIN}",
+        )
+
+    def test_only_institution_admin_can_create_or_change_sessions(self):
+        create_data = {
+            "action": "create-academic-session",
+            "name": "2027/2028",
+            "semester": AcademicSession.Semester.SECOND,
+            "is_current": "on",
+        }
+        change_data = {
+            "action": "save-current-semester",
+            "semester": AcademicSession.Semester.SECOND,
+        }
+
+        for user in (self.student, self.lecturer, self.mis):
+            self.client.force_login(user)
+            host = f"{user.institution.subdomain}.{settings.PLATFORM_BASE_DOMAIN}"
+            self.assertEqual(self.client.get(reverse("portal:admin-about"), HTTP_HOST=host).status_code, 403)
+            self.assertEqual(self.client.post(reverse("portal:admin-about"), create_data, HTTP_HOST=host).status_code, 403)
+            self.assertEqual(self.client.post(reverse("portal:admin-about"), change_data, HTTP_HOST=host).status_code, 403)
+
+        self.alpha_session.refresh_from_db()
+        self.assertEqual(self.alpha_session.semester, AcademicSession.Semester.FIRST)
+        self.assertFalse(
+            AcademicSession.all_objects.filter(institution=self.alpha, name="2027/2028").exists()
+        )
+
+    def test_tenant_admin_cannot_modify_another_institutions_session(self):
+        response = self._post_as(
+            self.admin,
+            {
+                "action": "save-current-semester",
+                "semester": AcademicSession.Semester.SECOND,
+                # Forged input is not a form field and must be ignored.
+                "institution": self.beta.pk,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("portal:admin-about"))
+        self.alpha_session.refresh_from_db()
+        self.beta_session.refresh_from_db()
+        self.assertEqual(self.alpha_session.semester, AcademicSession.Semester.SECOND)
+        self.assertEqual(self.beta_session.semester, AcademicSession.Semester.FIRST)
+
+    def test_csrf_is_required_for_semester_changes(self):
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.admin)
+
+        response = csrf_client.post(
+            reverse("portal:admin-about"),
+            {"action": "save-current-semester", "semester": AcademicSession.Semester.SECOND},
+            HTTP_HOST=f"{self.alpha.subdomain}.{settings.PLATFORM_BASE_DOMAIN}",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.alpha_session.refresh_from_db()
+        self.assertEqual(self.alpha_session.semester, AcademicSession.Semester.FIRST)
+
+    def test_invalid_session_inputs_do_not_change_data(self):
+        response = self._post_as(
+            self.admin,
+            {"action": "save-current-semester", "semester": "third"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.alpha_session.refresh_from_db()
+        self.assertEqual(self.alpha_session.semester, AcademicSession.Semester.FIRST)
+
+        response = self._post_as(
+            self.admin,
+            {
+                "action": "create-academic-session",
+                "name": "x" * 21,
+                "semester": AcademicSession.Semester.FIRST,
+                "is_current": "on",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(AcademicSession.all_objects.filter(institution=self.alpha).count(), 1)
+
+    def test_semester_change_preserves_historical_registration_and_audit_log(self):
+        course = Course.all_objects.create(
+            institution=self.alpha,
+            department=self.department,
+            code="SEC101",
+            title="Secure Systems",
+            level="100",
+        )
+        registration = StudentCourseRegistration.all_objects.create(
+            institution=self.alpha,
+            student=self.student,
+            course=course,
+            session=self.alpha_session,
+            registered_by=self.student,
+        )
+
+        response = self._post_as(
+            self.admin,
+            {"action": "save-current-semester", "semester": AcademicSession.Semester.SECOND},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        registration.refresh_from_db()
+        self.assertEqual(registration.session_id, self.alpha_session.pk)
+        self.assertFalse(registration.is_active)
+        audit = AuditLog.objects.get(action="academic_session_semester_changed")
+        self.assertEqual(audit.institution, self.alpha)
+        self.assertEqual(audit.user, self.admin)
+        self.assertEqual(audit.object_id, str(self.alpha_session.pk))
+        self.assertEqual(audit.old_value, {"semester": AcademicSession.Semester.FIRST})
+        self.assertEqual(audit.new_value, {"semester": AcademicSession.Semester.SECOND})
+        self.assertIsNotNone(audit.created_at)
+
+    def test_session_creation_is_audited_and_current_session_is_database_unique(self):
+        response = self._post_as(
+            self.admin,
+            {
+                "action": "create-academic-session",
+                "name": "2027/2028",
+                "semester": AcademicSession.Semester.SECOND,
+                "is_current": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        created = AcademicSession.all_objects.get(institution=self.alpha, name="2027/2028")
+        audit = AuditLog.objects.get(action="academic_session_created", object_id=str(created.pk))
+        self.assertEqual(audit.institution, self.alpha)
+        self.assertEqual(audit.user, self.admin)
+        self.assertEqual(audit.new_value["semester"], AcademicSession.Semester.SECOND)
+        self.assertEqual(AcademicSession.all_objects.filter(institution=self.alpha, is_current=True).count(), 1)
+
+        institution = Institution.objects.create(
+            name="Concurrency University",
+            institution_code="CONCURRENT-SEC",
+            institution_type=Institution.Type.UNIVERSITY,
+            email="admin@concurrency.example",
+            subdomain="concurrency-sec",
+            status=Institution.Status.ACTIVE,
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            AcademicSession.all_objects.bulk_create([
+                AcademicSession(institution=institution, name="2026/2027", is_current=True),
+                AcademicSession(institution=institution, name="2027/2028", is_current=True),
+            ])
+
+
 class DefaultAdminBootstrapTests(TestCase):
     username = "test-bootstrap-admin"
     password = "test-bootstrap-password"

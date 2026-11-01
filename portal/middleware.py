@@ -1,11 +1,91 @@
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import logout
-from django.http import HttpResponse, HttpResponseForbidden
+from pathlib import PurePath
+
+from django.conf import settings
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
 from django.shortcuts import redirect
 
 from .departmental_document_diagnostics import log_departmental_document_diagnostic
 from .models import Institution, reset_current_institution, set_current_institution
+
+
+# A conservative deny-list is intentional here: individual forms still define
+# the business formats they accept, while this layer prevents files that could
+# be interpreted as executable server/client code from reaching any upload view.
+_DANGEROUS_UPLOAD_EXTENSIONS = {
+    ".bat", ".cmd", ".com", ".dll", ".exe", ".jar", ".js", ".jse",
+    ".msi", ".php", ".phtml", ".pl", ".ps1", ".py", ".rb", ".scr",
+    ".sh", ".svg", ".svgz", ".vbs", ".wsf",
+}
+
+
+class UploadSecurityMiddleware:
+    """Apply safe, tenant-neutral upload limits before any view stores a file."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        content_type = request.META.get("CONTENT_TYPE", "").lower()
+        if request.method in {"POST", "PUT", "PATCH"} and "multipart/form-data" in content_type:
+            try:
+                content_length = int(request.META.get("CONTENT_LENGTH") or 0)
+            except (TypeError, ValueError):
+                return HttpResponseBadRequest("Invalid upload size.")
+            maximum = settings.EDUCONNECT_MAX_UPLOAD_BYTES + (1024 * 1024)
+            if content_length > maximum:
+                return HttpResponseBadRequest("Upload is too large.")
+            # Accessing FILES here makes every existing file-upload route pass
+            # the same basename/extension checks, including future forms.
+            for uploaded_files in request.FILES.lists():
+                _, files = uploaded_files
+                for uploaded_file in files:
+                    name = str(getattr(uploaded_file, "name", ""))
+                    suffix = PurePath(name).suffix.lower()
+                    if (
+                        not name
+                        or len(name) > 255
+                        or "\x00" in name
+                        or "/" in name
+                        or "\\" in name
+                        or ".." in name
+                        or suffix in _DANGEROUS_UPLOAD_EXTENSIONS
+                        or uploaded_file.size > settings.EDUCONNECT_MAX_UPLOAD_BYTES
+                    ):
+                        return HttpResponseBadRequest("The uploaded file is not permitted.")
+        return self.get_response(request)
+
+
+class SecurityHeadersMiddleware:
+    """Attach browser defenses consistently without weakening existing pages."""
+
+    policy = (
+        "default-src 'self'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'; "
+        "object-src 'none'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self' data:; "
+        "media-src 'self'; "
+        "worker-src 'self'; "
+        "connect-src 'self' https://api.paystack.co; "
+        "script-src 'self' 'unsafe-inline' https://js.paystack.co; "
+        "style-src 'self' 'unsafe-inline'"
+    )
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        response.setdefault("Content-Security-Policy", self.policy)
+        response.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.setdefault("X-Content-Type-Options", "nosniff")
+        return response
 
 
 class TenantResolutionMiddleware:

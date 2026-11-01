@@ -102,7 +102,16 @@ invocation, so run it when no unintended courses are within the 25–35 minute
 window, or use a controlled test institution/course. Check its history rather
 than copying its request configuration into tickets. Expected results are:
 
-- `200` and `{ "status": "ok", ... }`: authentication and processing worked.
+- `200` and `status: "completed"`: authentication and processing worked; the
+  JSON summary records provider-accepted email and push counts separately.
+- `200` and `status: "completed_with_failures"`: processing completed but one
+  or more SMTP or push-provider attempts failed. This is not a delivery
+  success; inspect the aggregate `email` and `browser_push` counts and Render
+  logs before assuming a recipient was notified.
+- `200` and `status: "completed_with_unavailable_push"`: processing completed,
+  but an opted-in recipient had no usable VAPID configuration, push library, or
+  browser subscription. The email results remain independent; no browser
+  notification was accepted for that recipient.
 - `401`: the header is absent or does not exactly match the Render value.
 - `405`: the job was configured with a method other than POST.
 - `503`: the Render web service does not have `EDUCONNECT_CRON_SECRET` set.
@@ -111,9 +120,11 @@ than copying its request configuration into tickets. Expected results are:
 
 The execution-history duration and status are useful for detecting a slow
 endpoint, but they are not proof that email was accepted. In Render, inspect
-the web-service logs for `Lecture reminder cron execution failed` and the
-cron/worker logs for `Unable to send lecture reminder email`. Do not log the
-request-header value while diagnosing either system.
+the web-service logs for `Lecture reminder cron execution failed`, the
+structured `Lecture reminder execution completed` summary, and any SMTP or
+push error type. Do not log the request-header value, recipient addresses,
+SMTP password, VAPID private key, or other credentials while diagnosing either
+system.
 
 ### Current diagnostic position
 

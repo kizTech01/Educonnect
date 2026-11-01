@@ -1,0 +1,27 @@
+{% extends 'portal/dashboard_base.html' %}
+
+{% block title %}Practical manual | Educonnect{% endblock %}
+
+{% block dashboard_content %}
+<section class="panel-card">
+    <div class="panel-head"><h2>{{ department.name }} Practical manual</h2></div>
+    <p class="muted-note">Paid courses are shown by default. Search any course in your department to set or change its paid-course price.</p>
+    <form method="get" class="filter-form">
+        <label for="course-search">Search course</label>
+        <input id="course-search" class="input-field" type="search" name="search" value="{{ search }}" placeholder="Course code or title">
+        <button class="ghost-btn" type="submit">Search</button>
+        {% if search %}<a class="ghost-btn" href="{% url 'portal:hod-practical-manual' %}">Show paid courses</a>{% endif %}
+    </form>
+</section>
+
+<section class="panel-card">
+    <div class="panel-head"><h2>{% if search %}Search results{% else %}Paid courses{% endif %}</h2></div>
+    <div class="table-wrap"><table>
+        <thead><tr><th>Course</th><th>Level</th><th>Semester</th><th>Current price</th><th></th></tr></thead>
+        <tbody>{% for course in courses %}
+            <tr><td><strong>{{ course.code }}</strong><br>{{ course.title }}</td><td>{{ course.level }}</td><td>{{ course.get_semester_display }}</td><td>{% if course.is_free %}Free{% else %}₦{{ course.amount|floatformat:2 }}{% endif %}</td><td><a class="ghost-btn small" href="{% url 'portal:hod-practical-manual' %}?{% if search %}search={{ search|urlencode }}&amp;{% endif %}edit={{ course.id }}">Edit price</a></td></tr>
+            {% if edit_course and edit_course.id == course.id %}<tr><td colspan="5"><form method="post" class="stack-form"><input type="hidden" name="course_id" value="{{ course.id }}">{% csrf_token %}<label class="option-row">{{ pricing_form.is_free }} <span>Free course</span></label><label>Amount (₦) {{ pricing_form.amount }} {{ pricing_form.amount.errors }}</label>{{ pricing_form.non_field_errors }}<button class="primary-btn" type="submit">Save course price</button></form></td></tr>{% endif %}
+        {% empty %}<tr><td colspan="5">{% if search %}No courses matched your search.{% else %}No paid courses have been set for this department yet.{% endif %}</td></tr>{% endfor %}</tbody>
+    </table></div>
+</section>
+{% endblock %}

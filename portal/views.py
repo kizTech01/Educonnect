@@ -17,6 +17,7 @@ from django.apps import apps
 from django.contrib import messages
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
+from django.contrib.auth.forms import SetPasswordForm
 from django.core.cache import cache
 from django.core.files.storage import FileSystemStorage
 from django.core.mail import EmailMessage
@@ -47,6 +48,7 @@ from .forms import (
     CourseStudentGroupForm,
     CourseMaterialBatchForm,
     AcademicSessionForm,
+    CurrentSemesterForm,
     AccommodationApplicationForm,
     AccommodationDecisionForm,
     AccommodationSessionForm,
@@ -83,6 +85,7 @@ from .forms import (
     HostelForm,
     HostelRoomForm,
     LecturerCourseUpdateForm,
+    HODCoursePricingForm,
     LecturerProfileForm,
     LecturerUserForm,
     LecturerSignupForm,
@@ -160,13 +163,13 @@ from .models import (
     ScreeningApplication,
     GlobalPolicy,
     PolicyAcceptance,
+    AccountActivation,
+    ScreeningRequestReplay,
     TimeStampedModel,
     curriculum_for_department,
     curriculum_for_programme,
 )
-from .policies import LEGAL_REVIEW_NOTICE
 from .services import (
-    TEMPORARY_ACCOUNT_PASSWORD,
     grant_free_trial_subscription,
     deliver_notification,
     ensure_default_admin_user,
@@ -179,6 +182,8 @@ from .services import (
     dispatch_due_course_reminders,
     subscription_paystack_secret_key,
     verify_and_finalize_subscription_payment,
+    issue_account_activation,
+    send_account_activation_email,
 )
 from .pdf import build_exam_card_pdf, build_pdf_document
 from .automation import (
@@ -288,7 +293,12 @@ def internal_lecture_reminders(request):
     except Exception:
         logger.exception("Lecture reminder cron execution failed.")
         return JsonResponse({"detail": "Reminder processing failed."}, status=500)
-    return JsonResponse({"status": "ok", **summary})
+    delivery_failures = sum(
+        int((summary.get(channel) or {}).get("failed") or 0)
+        for channel in ("email", "browser_push")
+    )
+    status = "completed_with_failures" if delivery_failures else "completed"
+    return JsonResponse({"status": status, **summary})
 
 
 def institution_overview_queryset():
@@ -423,9 +433,13 @@ def institution_logo(request, institution_subdomain):
         institution = request.user.institution
     if (
         institution is None
-        or not institution.logo
+        or not institution.has_logo
         or institution.subdomain.casefold() != institution_subdomain.casefold()
     ):
+        raise Http404("Institution logo not found.")
+    logo_name = str(institution.logo.name or "").lower()
+    if logo_name.endswith((".svg", ".svgz")) or institution.logo_content_type in {"image/svg+xml", "image/svg+xml-compressed"}:
+        # Legacy active-content logos must be replaced with a raster image.
         raise Http404("Institution logo not found.")
     if institution.logo_data:
         response = HttpResponse(
@@ -699,7 +713,15 @@ def super_admin_required(view_func):
 
 
 def _client_ip(request):
-    return request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR", "")).split(",")[0].strip() or None
+    remote_addr = request.META.get("REMOTE_ADDR", "").strip()
+    # A client can freely forge X-Forwarded-For when it reaches the app
+    # directly. Honour it only when the immediate peer is a configured proxy.
+    trusted_proxies = set(getattr(settings, "TRUSTED_PROXY_IPS", ()))
+    if remote_addr in trusted_proxies:
+        forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+    return remote_addr or None
 
 
 def _screening_json(request):
@@ -729,15 +751,40 @@ def _screening_api_authenticate(request, institution_code):
     if abs(int(timezone.now().timestamp()) - timestamp) > max_skew:
         return None, JsonResponse({"detail": "The signed request has expired."}, status=401)
     signature = request.META.get(SCREENING_SIGNATURE_HEADER, "")
-    signed_content = str(timestamp).encode("utf-8") + b"." + request.body
+    # Bind a signature to the exact endpoint and HTTP method.  Without this,
+    # a valid signed empty POST could be replayed against another endpoint
+    # whose target is supplied in the URL.
+    signed_content = (
+        request.method.upper().encode("ascii")
+        + b"."
+        + request.path.encode("utf-8")
+        + b"."
+        + str(timestamp).encode("ascii")
+        + b"."
+        + request.body
+    )
     expected = hmac.new(integration.api_secret.encode("utf-8"), signed_content, hashlib.sha256).hexdigest()
     if not signature or not hmac.compare_digest(signature, expected):
         return None, JsonResponse({"detail": "Invalid API credentials."}, status=401)
-    replay_key = "screening-api-signature:" + hashlib.sha256(
-        f"{institution.id}:{signature}".encode("utf-8")
-    ).hexdigest()
-    if not cache.add(replay_key, True, timeout=max_skew):
+    signature_digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    try:
+        with transaction.atomic():
+            # The database unique constraint is shared by all Gunicorn workers
+            # and instances. Expired rows are safe to remove before reserving
+            # this signature, and their digest never stores the signature.
+            ScreeningRequestReplay.objects.filter(
+                institution=institution, expires_at__lte=timezone.now()
+            ).delete()
+            ScreeningRequestReplay.objects.create(
+                institution=institution,
+                signature_digest=signature_digest,
+                expires_at=timezone.now() + timedelta(seconds=max_skew),
+            )
+    except IntegrityError:
         return None, JsonResponse({"detail": "Duplicate signed request rejected."}, status=409)
+    except Exception:
+        logger.exception("Unable to reserve signed screening request replay token.")
+        return None, JsonResponse({"detail": "Screening authentication is temporarily unavailable."}, status=503)
     return (institution, integration), None
 
 
@@ -893,6 +940,7 @@ def sidebar_links(request):
                 "label": "Departmental",
                 "children": [
                     {"label": "Payment Link and Document", "url_name": "portal:hod-api-and-document"},
+                    {"label": "Practical manual", "url_name": "portal:hod-practical-manual"},
                     {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
                     {"label": "Students", "url_name": "portal:hod-department-students"},
                     {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
@@ -942,6 +990,7 @@ def sidebar_links(request):
             links.insert(1, {"label": "Programmes", "url_name": "portal:hod-programmes"})
             departmental_links[:] = [
                 {"label": "Payment Link and Document", "url_name": "portal:hod-api-and-document"},
+                {"label": "Practical manual", "url_name": "portal:hod-practical-manual"},
                 {"label": "Set Fee", "url_name": "portal:hod-departmental-fees"},
                 {"label": "Students", "url_name": "portal:hod-department-students"},
                 {"label": "Lecturers", "url_name": "portal:hod-department-lecturers"},
@@ -1519,9 +1568,8 @@ def current_departmental_session():
 
 
 def current_departmental_semester_label(reference_time=None):
-    reference_time = reference_time or timezone.now()
-    local_time = timezone.localtime(reference_time)
-    return "First Semester" if local_time.month <= 6 else "Second Semester"
+    """Return the semester explicitly selected for the current institution."""
+    return current_departmental_session().get_semester_display()
 
 
 def fee_map_for_session(session, department):
@@ -1972,7 +2020,6 @@ def policy_landing(request):
         published.setdefault(policy.slug, policy)
     return render(request, "portal/policy_landing.html", {
         "policies": list(published.values()),
-        "legal_review_notice": LEGAL_REVIEW_NOTICE,
     })
 
 
@@ -1985,7 +2032,6 @@ def policy_detail(request, slug):
         raise Http404("Policy not found.")
     return render(request, "portal/policy_detail.html", {
         "policy": policy,
-        "legal_review_notice": LEGAL_REVIEW_NOTICE,
     })
 
 
@@ -2378,12 +2424,13 @@ def super_admin_institutions(request):
                 admin = User.all_objects.create_user(
                     username=institution.email,
                     email=institution.email,
-                    password=TEMPORARY_ACCOUNT_PASSWORD,
+                    password=None,
                     first_name=name_parts[0],
                     last_name=name_parts[1] if len(name_parts) > 1 else "",
                     role=User.Role.ADMIN,
                     institution=institution,
                 )
+                activation_sent = _send_account_activation(request, admin)
                 free_trial, _ = grant_free_trial_subscription(institution)
                 AuditLog.objects.create(
                     user=request.user,
@@ -2398,11 +2445,12 @@ def super_admin_institutions(request):
                 )
             messages.success(
                 request,
-                f"{institution.name} has been created. The administrator signs in with {admin.email} "
-                f"and the temporary password '{TEMPORARY_ACCOUNT_PASSWORD}'. "
+                f"{institution.name} has been created. The administrator will receive a one-time account activation link. "
                 f"A six-month free trial is active until {free_trial.end_date:%d %B %Y}. "
                 f"Portal: https://{institution.subdomain}.{settings.PLATFORM_BASE_DOMAIN}",
             )
+            if not activation_sent:
+                messages.warning(request, "The account was created but the activation email could not be sent. Use the secure reset action after confirming email delivery settings.")
             return redirect("portal:super-admin-institutions")
     return render(request, "portal/super_admin_institutions.html", {
         "institutions": institution_overview_queryset(),
@@ -2542,9 +2590,7 @@ def super_admin_reset_institution_admin_password(request, user_id):
         messages.error(request, "This institution administrator has no email address, so a verified reset cannot be sent.")
         return redirect("portal:super-admin-users" if request.POST.get("return_to") == "users" else "portal:super-admin-institutions")
 
-    administrator.set_password(TEMPORARY_ACCOUNT_PASSWORD)
-    administrator.save(update_fields=["password"])
-    _send_password_reset_verification(request, administrator)
+    activation_sent = _send_account_activation(request, administrator)
     AuditLog.objects.create(
         user=request.user,
         institution=administrator.institution,
@@ -2555,7 +2601,8 @@ def super_admin_reset_institution_admin_password(request, user_id):
     )
     messages.success(
         request,
-        f"{administrator.email}'s password was reset to '{TEMPORARY_ACCOUNT_PASSWORD}' and a verification link was sent.",
+        "The administrator password was disabled and a one-time activation link was sent."
+        if activation_sent else "The administrator password was disabled, but the activation email could not be sent.",
     )
     return redirect("portal:super-admin-users" if request.POST.get("return_to") == "users" else "portal:super-admin-institutions")
 
@@ -2826,7 +2873,7 @@ def super_admin_settings(request):
             return redirect("portal:super-admin-settings")
     return render(request, "portal/super_admin_settings.html", {
         "platform_domain": settings.PLATFORM_BASE_DOMAIN,
-        "paystack_configured": gateway.is_configured or bool(settings.PAYSTACK_SECRET_KEY and settings.PAYSTACK_PUBLIC_KEY),
+        "paystack_configured": gateway.is_configured,
         "gateway_form": form,
     })
 
@@ -3247,6 +3294,10 @@ def api_student_from_screening(request):
                     email=application.email, role=User.Role.STUDENT, institution=institution, department=department,
                     id_number=identifier, level=str(payload.get("level", "")),
                 )
+                # Screening-created students are provisioned accounts, not
+                # self-registrations.  Do not leave a reusable temporary
+                # credential behind: require the applicant to set a password.
+                _send_account_activation(request, student)
             else:
                 student.department = department
                 if payload.get("level"):
@@ -3446,6 +3497,50 @@ PASSWORD_RESET_OTP_TTL_SECONDS = 15 * 60
 PASSWORD_RESET_OTP_MAX_ATTEMPTS = 5
 
 
+def _send_account_activation(request, user):
+    """Issue a fresh activation link without revealing any credential to staff."""
+    token = issue_account_activation(user)
+    activation_url = request.build_absolute_uri(
+        reverse("portal:account-activate", args=[token])
+    )
+    return send_account_activation_email(user, activation_url)
+
+
+@never_cache
+def account_activate(request, token):
+    """Allow an invited account holder to establish their first password once."""
+    token_hash = AccountActivation.token_hash_for(token)
+    activation = AccountActivation.objects.select_related("user").filter(
+        token_hash=token_hash,
+        consumed_at__isnull=True,
+        expires_at__gt=timezone.now(),
+        user__is_active=True,
+    ).first()
+    if activation is None:
+        return render(request, "portal/password_reset_confirm.html", {"validlink": False})
+
+    form = SetPasswordForm(activation.user, request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        with transaction.atomic():
+            activation = AccountActivation.objects.select_for_update().select_related("user").filter(
+                pk=activation.pk, consumed_at__isnull=True, expires_at__gt=timezone.now()
+            ).first()
+            if activation is None:
+                return render(request, "portal/password_reset_confirm.html", {"validlink": False})
+            user = form.save(commit=False)
+            user.save(update_fields=["password"])
+            activation.consumed_at = timezone.now()
+            activation.save(update_fields=["consumed_at"])
+            AuditLog.objects.create(
+                institution=user.institution, user=user, action="account_activated",
+                object_type="User", object_id=str(user.pk), description="Account password established through activation link.",
+                ip_address=_client_ip(request),
+            )
+        messages.success(request, "Your account is active. You can now sign in.")
+        return redirect("portal:home")
+    return render(request, "portal/password_reset_confirm.html", {"validlink": True, "form": form})
+
+
 def _password_reset_otp_digest(code):
     return salted_hmac("portal.password-reset-otp", code).hexdigest()
 
@@ -3520,6 +3615,8 @@ def password_reset(request):
                     return redirect("portal:password-reset")
                 user.set_password(form.cleaned_data["password1"])
                 user.save(update_fields=["password"])
+                if request.user.is_authenticated and request.user.pk == user.pk:
+                    update_session_auth_hash(request, user)
                 messages.success(request, "Your password has been reset successfully.")
                 return redirect("portal:password-reset-complete")
         return render(request, "portal/password_reset_form.html", {
@@ -3530,7 +3627,10 @@ def password_reset(request):
     if request.method == "POST" and form.is_valid():
         # Keep the response identical for unknown email addresses to avoid
         # exposing which accounts exist. A real account receives the OTP.
-        user = User.all_objects.filter(email__iexact=form.cleaned_data["email"], is_active=True).order_by("pk").first()
+        users = User.all_objects.filter(email__iexact=form.cleaned_data["email"], is_active=True)
+        if getattr(request, "institution", None):
+            users = users.filter(institution=request.institution)
+        user = users.order_by("pk").first()
         if user:
             _send_password_reset_verification(request, user)
         return redirect("portal:password-reset-done")
@@ -5162,6 +5262,56 @@ def hod_department_for(request):
 
 
 @role_required(User.Role.LECTURER, User.Role.HOD)
+def hod_practical_manual(request):
+    """Let an HOD manage paid-course pricing in their department only."""
+    department = hod_department_for(request)
+    search = request.GET.get("search", "").strip()
+    courses = Course.objects.filter(department=department).select_related("lecturer")
+    # The default view is the requested paid-course manual. Searching also
+    # exposes a free course so an HOD can set its paid amount when needed.
+    if search:
+        courses = _search_filter(courses, search, "code", "title", "lecturer__username")
+    else:
+        courses = courses.filter(is_free=False)
+
+    edit_course = None
+    pricing_form = None
+    if request.method == "POST":
+        edit_course = get_object_or_404(
+            Course.objects.filter(department=department),
+            pk=request.POST.get("course_id"),
+        )
+        pricing_form = HODCoursePricingForm(request.POST, instance=edit_course)
+        if pricing_form.is_valid():
+            updated_course = pricing_form.save()
+            AuditLog.objects.create(
+                user=request.user,
+                institution=updated_course.institution,
+                action="hod_course_pricing_updated",
+                description=f"Updated paid-course pricing for {updated_course.code} in {department.name}.",
+                object_type="Course",
+                object_id=str(updated_course.pk),
+            )
+            messages.success(request, f"Pricing saved for {updated_course.code}.")
+            target = reverse("portal:hod-practical-manual")
+            return redirect(f"{target}?search={search}" if search else target)
+
+    edit_id = request.GET.get("edit")
+    if edit_id and pricing_form is None:
+        edit_course = get_object_or_404(Course.objects.filter(department=department), pk=edit_id)
+        pricing_form = HODCoursePricingForm(instance=edit_course)
+    return render(request, "portal/hod_practical_manual.html", dashboard_context(
+        request,
+        "Practical manual",
+        department=department,
+        courses=courses,
+        search=search,
+        edit_course=edit_course,
+        pricing_form=pricing_form,
+    ))
+
+
+@role_required(User.Role.LECTURER, User.Role.HOD)
 def hod_programmes(request):
     """Show only the programmes owned by the signed-in HOD's department."""
     department = hod_department_for(request)
@@ -5894,22 +6044,75 @@ def admin_delete_programme(request, programme_id):
 @role_required(User.Role.ADMIN)
 def admin_about(request):
     session_form = AcademicSessionForm(initial={"is_current": True})
+    current_session = AcademicSession.objects.filter(is_current=True).first()
+    semester_form = CurrentSemesterForm(instance=current_session) if current_session else None
     if request.method == "POST":
-        session_form = AcademicSessionForm(request.POST)
-        if session_form.is_valid():
-            session = session_form.save()
-            for department in Department.objects.all():
-                ensure_departmental_fees_for_department(department)
-            messages.success(
-                request,
-                f"Academic session {session.name} created"
-                + (
-                    " and set as current. Live lecturer and student course registrations were cleared. "
-                    "Every student must make a new departmental payment for this session."
-                    if session.is_current else "."
-                ),
-            )
-            return redirect("portal:admin-about")
+        if request.POST.get("action") == "save-current-semester":
+            if not current_session:
+                messages.error(request, "Create a current academic session before selecting a semester.")
+            else:
+                # ModelForm validation writes cleaned values onto its instance,
+                # so capture the persisted semester before binding the form.
+                previous_semester = current_session.semester
+                semester_form = CurrentSemesterForm(request.POST, instance=current_session)
+                if semester_form.is_valid():
+                    changed = semester_form.cleaned_data["semester"] != previous_semester
+                    current_session = semester_form.save()
+                    if changed:
+                        AuditLog.objects.create(
+                            institution=current_session.institution,
+                            user=request.user,
+                            action="academic_session_semester_changed",
+                            description=(
+                                f"Changed {current_session.name} from "
+                                f"{dict(AcademicSession.Semester.choices)[previous_semester]} to "
+                                f"{current_session.get_semester_display()}."
+                            ),
+                            object_type="AcademicSession",
+                            object_id=str(current_session.pk),
+                            old_value={"semester": previous_semester},
+                            new_value={"semester": current_session.semester},
+                            ip_address=_client_ip(request),
+                        )
+                    messages.success(
+                        request,
+                        f"{current_session.get_semester_display()} is now the institution semester. "
+                        + (
+                            "Live course registrations and student messages were cleared."
+                            if changed else "No reset was needed because this semester was already selected."
+                        ),
+                    )
+                    return redirect("portal:admin-about")
+        else:
+            session_form = AcademicSessionForm(request.POST)
+            if session_form.is_valid():
+                session = session_form.save()
+                AuditLog.objects.create(
+                    institution=session.institution,
+                    user=request.user,
+                    action="academic_session_created",
+                    description=f"Created academic session {session.name}.",
+                    object_type="AcademicSession",
+                    object_id=str(session.pk),
+                    new_value={
+                        "name": session.name,
+                        "semester": session.semester,
+                        "is_current": session.is_current,
+                    },
+                    ip_address=_client_ip(request),
+                )
+                for department in Department.objects.all():
+                    ensure_departmental_fees_for_department(department)
+                messages.success(
+                    request,
+                    f"Academic session {session.name} created"
+                    + (
+                        " and set as current. Live lecturer and student course registrations and student messages were cleared. "
+                        "Every student must make a new departmental payment for this session."
+                        if session.is_current else "."
+                    ),
+                )
+                return redirect("portal:admin-about")
     return render(
         request,
         "portal/admin_about.html",
@@ -5917,7 +6120,8 @@ def admin_about(request):
             request,
             "Academic Sessions",
             session_form=session_form,
-            current_session=AcademicSession.objects.filter(is_current=True).first(),
+            semester_form=semester_form,
+            current_session=current_session,
             past_sessions=AcademicSession.objects.filter(is_current=False),
         ),
     )
@@ -6143,9 +6347,11 @@ def admin_approve_lecturer(request, user_id):
 def admin_reset_user_password(request, user_id):
     user = get_object_or_404(User, pk=user_id)
     if request.method == "POST" and not user.is_superuser:
-        user.set_password("educonnect")
-        user.save(update_fields=["password"])
-        messages.success(request, f"{user.full_name}'s password was reset to the temporary password 'educonnect'.")
+        activation_sent = _send_account_activation(request, user)
+        if activation_sent:
+            messages.success(request, "The password was disabled and a one-time activation link was sent.")
+        else:
+            messages.warning(request, "The password was disabled, but no activation email could be sent. Confirm the account email and mail settings.")
     return redirect(_redirect_with_query(request, "portal:admin-users"))
 
 
@@ -6557,7 +6763,12 @@ def download_course_file(request, course_id):
     course = get_object_or_404(Course.objects.select_related("department", "lecturer"), pk=course_id)
     if not course.file:
         raise Http404
-    if not request.user.has_role(User.Role.ADMIN, User.Role.LECTURER):
+    if request.user.has_role(User.Role.ADMIN):
+        pass
+    elif request.user.has_role(User.Role.LECTURER):
+        if not lecturer_registered_courses_queryset(request.user).filter(pk=course.pk).exists():
+            raise PermissionDenied
+    else:
         if not request.user.has_role(User.Role.STUDENT):
             raise PermissionDenied
         registration = StudentCourseRegistration.objects.filter(
@@ -6614,7 +6825,11 @@ def lecturer_paid_course_students_pdf(request, course_id):
 @role_required(User.Role.STUDENT, User.Role.LECTURER, User.Role.ADMIN)
 def download_material(request, material_id):
     material = get_object_or_404(CourseMaterial.objects.select_related("course", "lecturer"), pk=material_id)
-    if request.user.has_role(User.Role.ADMIN, User.Role.LECTURER):
+    if request.user.has_role(User.Role.ADMIN):
+        return _download_file_response(material.file, request)
+    if request.user.has_role(User.Role.LECTURER):
+        if not lecturer_registered_courses_queryset(request.user).filter(pk=material.course_id).exists():
+            raise PermissionDenied
         return _download_file_response(material.file, request)
     if not request.user.has_role(User.Role.STUDENT):
         raise PermissionDenied
@@ -6708,7 +6923,12 @@ def download_document(request, kind, document_id):
         raise Http404("Unknown document type.")
     model = Timetable if kind == "timetable" else Handbook
     document = get_object_or_404(model.objects.select_related("department", "programme"), pk=document_id)
-    if not request.user.has_role(User.Role.ADMIN, User.Role.LECTURER):
+    if request.user.has_role(User.Role.ADMIN):
+        pass
+    elif request.user.has_role(User.Role.LECTURER):
+        if document.department_id not in staff_department_ids(request.user):
+            raise PermissionDenied
+    else:
         if not request.user.has_role(User.Role.STUDENT):
             raise PermissionDenied
         if request.user.department_id != document.department_id:

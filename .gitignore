@@ -3,6 +3,7 @@ __pycache__/
 *.log
 .tmp/
 db.sqlite3
+default_*.sqlite3
 media/
 staticfiles/
 .env

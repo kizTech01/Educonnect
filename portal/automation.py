@@ -23,7 +23,7 @@ from django.db.models import Max, Q
 from django.utils import timezone
 
 from .models import AcademicSession, AuditLog, Course, CourseAllocationUpload, CourseResult, Curriculum, CurriculumCourse, Department, LecturerCourseRegistration, Programme, RoleAssignment, StudentCourseRegistration, User, curriculum_for_department, curriculum_for_programme
-from .services import TEMPORARY_ACCOUNT_PASSWORD
+from .services import issue_account_activation, send_account_activation_email
 
 
 COURSE_CODE_RE = re.compile(r"\b([A-Z]{2,6}\s?-?\d{3,4})\b", re.I)
@@ -596,14 +596,20 @@ def import_department_lecturers(upload):
                 existing += 1
                 continue
             name_parts = name.split(maxsplit=1)
-            User.objects.create_user(
-                username=lecturer_id, password=TEMPORARY_ACCOUNT_PASSWORD, role=User.Role.LECTURER,
+            user = User.objects.create_user(
+                username=lecturer_id, password=None, role=User.Role.LECTURER,
                 id_number=lecturer_id, first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
                 email=_field(row, "email"), phone_number=_field(row, "phone", "phone_number"),
                 department=upload.department, is_approved=True,
             )
+            token = issue_account_activation(user)
+            domain = settings.CORE_DOMAIN.strip()
+            if user.email and domain:
+                send_account_activation_email(
+                    user, f"https://{user.institution.subdomain}.{domain}/activate/{token}/"
+                )
             created += 1
-    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New accounts use the configured temporary password."
+    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New accounts receive an activation link when an email address is available."
 
 
 def import_course_allocations(upload):
@@ -875,8 +881,14 @@ def execute_institution_automation(job, approver):
             username=record["username"], email=record.get("email", ""), id_number=record.get("id_number") or None,
             first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
             department_id=record.get("department_id"), role=record["role"],
-            password=TEMPORARY_ACCOUNT_PASSWORD, is_approved=True,
+            password=None, is_approved=True,
         )
+        token = issue_account_activation(user)
+        domain = settings.CORE_DOMAIN.strip()
+        if user.email and domain:
+            send_account_activation_email(
+                user, f"https://{user.institution.subdomain}.{domain}/activate/{token}/"
+            )
         RoleAssignment.objects.get_or_create(
             institution=job.institution, user=user, role=record["role"], department_id=record.get("department_id"),
             defaults={"assigned_by": approver},
@@ -884,6 +896,6 @@ def execute_institution_automation(job, approver):
         created += 1
     job.status = job.Status.EXECUTED
     job.executed_at = timezone.now()
-    job.execution_summary = {"created": created, "skipped": skipped, "temporary_password_required": True}
+    job.execution_summary = {"created": created, "skipped": skipped, "activation_required": True}
     job.save(update_fields=["status", "executed_at", "execution_summary", "updated_at"])
     return job.execution_summary

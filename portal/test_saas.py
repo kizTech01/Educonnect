@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import tempfile
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import patch, PropertyMock
 from datetime import timedelta
@@ -41,13 +42,13 @@ from .models import (
     AuditLog,
     InstitutionProfile,
     DepartmentLecturerUpload,
+    AccountActivation,
     User,
     reset_current_institution,
     set_current_institution,
 )
 from .forms import InstitutionCreateForm, InstitutionUpdateForm, SubscriptionRenewalForm
 from .services import (
-    TEMPORARY_ACCOUNT_PASSWORD,
     finalize_subscription_payment,
     paystack_amount_in_kobo,
     send_subscription_expiry_notifications,
@@ -56,6 +57,15 @@ from .views import _download_file_response, delete_institution_data
 from .pdf import build_exam_card_pdf
 from config.domain import core_domain_settings
 from config.storage import default_media_storage
+
+
+def valid_png_upload(name="logo.png"):
+    """Create a real raster image for logo-form tests."""
+    from PIL import Image
+
+    image = BytesIO()
+    Image.new("RGB", (1, 1), "white").save(image, format="PNG")
+    return SimpleUploadedFile(name, image.getvalue(), content_type="image/png")
 
 
 class CloudflareR2StorageConfigurationTests(SimpleTestCase):
@@ -372,7 +382,7 @@ class MultiInstitutionSaaSTests(TestCase):
             "subdomain": institution.subdomain,
             "custom_domain": institution.custom_domain or "",
             "status": institution.status,
-        }, files={"logo": SimpleUploadedFile("replacement.png", b"replacement-logo")}, instance=institution)
+        }, files={"logo": valid_png_upload("replacement.png")}, instance=institution)
 
         self.assertTrue(form.is_valid(), form.errors)
         self.assertIn("logo", form.fields)
@@ -410,7 +420,10 @@ class MultiInstitutionSaaSTests(TestCase):
             end_date=previous_expiry, status=Subscription.Status.ACTIVE, amount=plan.price,
         )
         payment = Payment.objects.create(institution=institution, subscription=subscription, plan=plan, reference="SUB-TEST", amount=plan.price)
-        verification = {"status": "success", "reference": payment.reference, "amount": paystack_amount_in_kobo(plan.price)}
+        verification = {
+            "status": "success", "reference": payment.reference,
+            "amount": paystack_amount_in_kobo(plan.price), "currency": "NGN",
+        }
         _, changed = finalize_subscription_payment(reference=payment.reference, verification=verification)
         subscription.refresh_from_db()
         self.assertTrue(changed)
@@ -644,10 +657,15 @@ class ScreeningIntegrationTests(TestCase):
         )
         self.session = AcademicSession.all_objects.create(name="2026/2027", is_current=True, institution=self.institution)
 
-    def signed_headers(self, integration, body):
+    def signed_headers(self, integration, body, path=None, method="POST"):
         timestamp = str(int(timezone.now().timestamp()))
+        path = path or reverse("portal:api-screening-applications")
+        signed_content = (
+            method.upper().encode("ascii") + b"." + path.encode("utf-8")
+            + b"." + timestamp.encode("ascii") + b"." + body
+        )
         signature = hmac.new(
-            integration.api_secret.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256,
+            integration.api_secret.encode("utf-8"), signed_content, hashlib.sha256,
         ).hexdigest()
         return {
             "HTTP_X_EDUCONNECT_INSTITUTION": self.institution.institution_code,
@@ -693,12 +711,15 @@ class ScreeningIntegrationTests(TestCase):
         self.assertEqual(response.status_code, 201)
 
         empty_body = b""
-        admit_headers = self.signed_headers(integration, empty_body)
-        response = self.client.post(reverse("portal:api-screening-admit", args=[self.institution.institution_code, "APP-100"]), data=empty_body, content_type="application/json", **admit_headers)
+        admit_url = reverse("portal:api-screening-admit", args=[self.institution.institution_code, "APP-100"])
+        admit_headers = self.signed_headers(integration, empty_body, admit_url)
+        response = self.client.post(admit_url, data=empty_body, content_type="application/json", **admit_headers)
         self.assertEqual(response.status_code, 200)
 
         transfer_payload = json.dumps({"application_id": "APP-100", "department_code": "CSC", "academic_session": "2026/2027", "level": "100"}).encode("utf-8")
-        transfer_headers = self.signed_headers(integration, transfer_payload)
+        transfer_headers = self.signed_headers(
+            integration, transfer_payload, reverse("portal:api-student-from-screening")
+        )
         response = self.client.post(reverse("portal:api-student-from-screening"), data=transfer_payload, content_type="application/json", **transfer_headers)
         self.assertEqual(response.status_code, 201)
         application = ScreeningApplication.objects.get(institution=self.institution, external_application_id="APP-100")
@@ -749,7 +770,7 @@ class ScreeningIntegrationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Select a valid choice")
 
-    def test_creating_an_institution_uses_its_email_for_the_admin_username_and_temporary_password(self):
+    def test_creating_an_institution_requires_a_unique_activation_link_for_its_admin(self):
         self.client.force_login(self.super_admin)
 
         response = self.client.post(
@@ -762,7 +783,7 @@ class ScreeningIntegrationTests(TestCase):
                 "country": "Nigeria",
                 "subdomain": "coastal",
                 "status": Institution.Status.ACTIVE,
-                "logo": SimpleUploadedFile("coastal-logo.png", b"coastal-logo", content_type="image/png"),
+                "logo": self._valid_png_upload("coastal-logo.png"),
             },
         )
 
@@ -771,13 +792,24 @@ class ScreeningIntegrationTests(TestCase):
         administrator = User.all_objects.get(email="hello@coastal.example.test")
         self.assertEqual(administrator.username, "hello@coastal.example.test")
         self.assertEqual(administrator.role, User.Role.ADMIN)
-        self.assertTrue(administrator.check_password(TEMPORARY_ACCOUNT_PASSWORD))
+        self.assertFalse(administrator.has_usable_password())
+        activation = AccountActivation.objects.get(user=administrator)
+        self.assertTrue(activation.is_valid)
+        self.assertEqual(len(activation.token_hash), 64)
         self.assertEqual(Path(institution.logo.name).suffix, ".png")
         trial = institution.current_subscription
         self.assertEqual(trial.status, Subscription.Status.TRIAL)
         self.assertEqual(trial.amount, Decimal("0.00"))
         self.assertEqual((trial.end_date - trial.start_date).days, 183)
         self.assertTrue(trial.plan.is_trial)
+
+    @staticmethod
+    def _valid_png_upload(name):
+        from PIL import Image
+
+        image = BytesIO()
+        Image.new("RGB", (1, 1), "white").save(image, format="PNG")
+        return SimpleUploadedFile(name, image.getvalue(), content_type="image/png")
 
     def test_renewal_form_offers_only_the_requested_paid_plan_durations(self):
         trial = SubscriptionPlan.objects.create(
@@ -847,7 +879,7 @@ class ScreeningIntegrationTests(TestCase):
                 "subdomain": f"https://Northern Coast College.{settings.CORE_DOMAIN}/",
                 "status": Institution.Status.ACTIVE,
             },
-            files={"logo": SimpleUploadedFile("ncc-logo.png", b"ncc-logo", content_type="image/png")},
+            files={"logo": valid_png_upload("ncc-logo.png")},
         )
 
         self.assertTrue(form.is_valid(), form.errors)
@@ -902,9 +934,7 @@ class ScreeningIntegrationTests(TestCase):
                 "subdomain": "meridian-tech",
                 "custom_domain": "",
                 "status": Institution.Status.ACTIVE,
-                "logo": SimpleUploadedFile(
-                    "replacement-logo.png", b"replacement-logo", content_type="image/png",
-                ),
+                "logo": valid_png_upload("replacement-logo.png"),
             },
         )
 
@@ -1088,7 +1118,7 @@ class ScreeningIntegrationTests(TestCase):
                 response = self.client.get(reverse(url_name))
                 self.assertEqual(response.status_code, 200)
 
-    def test_super_admin_resets_an_institution_admin_password_and_sends_a_verification_code(self):
+    def test_super_admin_reset_disables_password_and_sends_activation_link(self):
         self.client.force_login(self.super_admin)
 
         response = self.client.post(
@@ -1097,9 +1127,10 @@ class ScreeningIntegrationTests(TestCase):
 
         self.assertRedirects(response, reverse("portal:super-admin-institutions"))
         self.institution_admin.refresh_from_db()
-        self.assertTrue(self.institution_admin.check_password(TEMPORARY_ACCOUNT_PASSWORD))
+        self.assertFalse(self.institution_admin.has_usable_password())
+        self.assertTrue(AccountActivation.objects.get(user=self.institution_admin).is_valid)
         self.assertEqual(mail.outbox[0].to, [self.institution_admin.email])
-        self.assertIn("verification code", mail.outbox[0].body)
+        self.assertIn("/activate/", mail.outbox[0].body)
 
     def test_institution_list_stacks_sections_and_shows_reset_for_every_institution_admin(self):
         second_institution = Institution.objects.create(
@@ -1135,7 +1166,8 @@ class ScreeningIntegrationTests(TestCase):
 
         self.assertRedirects(reset_response, reverse("portal:super-admin-institutions"))
         second_admin.refresh_from_db()
-        self.assertTrue(second_admin.check_password(TEMPORARY_ACCOUNT_PASSWORD))
+        self.assertFalse(second_admin.has_usable_password())
+        self.assertTrue(AccountActivation.objects.get(user=second_admin).is_valid)
 
 
 class InstitutionDeletionStorageTests(TransactionTestCase):
@@ -1449,6 +1481,7 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
             "status": "success",
             "reference": self.payment.reference,
             "amount": paystack_amount_in_kobo(self.payment.amount),
+            "currency": "NGN",
         }
 
         first = self.webhook_response(self.gateway.paystack_secret_key)
