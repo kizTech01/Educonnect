@@ -210,7 +210,8 @@ AUTH_PASSWORD_VALIDATORS = [
         "NAME": (
             "django.contrib.auth.password_validation."
             "MinimumLengthValidator"
-        )
+        ),
+        "OPTIONS": {"min_length": 12},
     },
     {
         "NAME": (
@@ -381,6 +382,9 @@ if not DEBUG:
     )
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
+    # Prevent browsers from making an HTTPS page silently load active content
+    # over HTTP if a future template or integration contains such a URL.
+    SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin"
 
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

@@ -16,8 +16,12 @@ from .models import Institution, reset_current_institution, set_current_institut
 # be interpreted as executable server/client code from reaching any upload view.
 _DANGEROUS_UPLOAD_EXTENSIONS = {
     ".bat", ".cmd", ".com", ".dll", ".exe", ".jar", ".js", ".jse",
-    ".msi", ".php", ".phtml", ".pl", ".ps1", ".py", ".rb", ".scr",
-    ".sh", ".svg", ".svgz", ".vbs", ".wsf",
+    ".mjs", ".msi", ".php", ".phtml", ".pl", ".ps1", ".py", ".rb",
+    ".scr", ".sh", ".svg", ".svgz", ".vbs", ".wsf", ".wasm",
+    # Even though protected downloads apply a safe disposition, reject active
+    # web-document formats at the upload boundary.  This prevents a future
+    # view from accidentally serving user-controlled markup in this origin.
+    ".htm", ".html", ".xhtml", ".mht", ".mhtml", ".xml", ".xsl",
 }
 
 
@@ -72,8 +76,9 @@ class SecurityHeadersMiddleware:
         "media-src 'self'; "
         "worker-src 'self'; "
         "connect-src 'self' https://api.paystack.co; "
-        "script-src 'self' 'unsafe-inline' https://js.paystack.co; "
-        "style-src 'self' 'unsafe-inline'"
+        "script-src 'self' https://js.paystack.co; "
+        "style-src 'self' 'unsafe-inline'; "
+        "upgrade-insecure-requests; block-all-mixed-content"
     )
 
     def __init__(self, get_response):
@@ -85,6 +90,8 @@ class SecurityHeadersMiddleware:
         response.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         response.setdefault("X-Content-Type-Options", "nosniff")
+        response.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        response.setdefault("Cross-Origin-Resource-Policy", "same-site")
         return response
 
 

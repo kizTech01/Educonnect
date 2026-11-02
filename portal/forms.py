@@ -7,6 +7,7 @@ from django import forms
 from PIL import Image, UnidentifiedImageError
 from django.conf import settings
 from django.contrib.auth.forms import PasswordChangeForm, PasswordResetForm
+from django.contrib.auth.password_validation import validate_password
 from django.core.validators import FileExtensionValidator
 from django.db.models import Q
 from django.utils.text import slugify
@@ -255,6 +256,8 @@ class InstitutionCreateForm(StyledModelForm):
         logo = self.cleaned_data.get("logo")
         if not logo:
             return logo
+        if logo.size > 2 * 1024 * 1024:
+            raise forms.ValidationError("Institution logos must be 2 MB or smaller.")
         try:
             image = Image.open(logo)
             image.verify()
@@ -265,6 +268,42 @@ class InstitutionCreateForm(StyledModelForm):
         finally:
             logo.seek(0)
         return logo
+
+    def save(self, commit=True):
+        """Store a verified per-tenant logo fallback before remote storage work.
+
+        The database copy is intentionally small and authoritative for
+        branding.  It lets each institution retain its own logo even if a
+        transient object-storage read fails immediately after an update.
+        """
+        institution = super().save(commit=False)
+        logo = self.cleaned_data.get("logo")
+        if logo:
+            try:
+                position = logo.tell()
+                logo.seek(0)
+                logo_bytes = logo.read()
+                logo.seek(position)
+            except (AttributeError, OSError, ValueError):
+                logo_bytes = b""
+            if logo_bytes:
+                image_type = Image.open(__import__("io").BytesIO(logo_bytes)).format
+                content_types = {
+                    "JPEG": "image/jpeg",
+                    "PNG": "image/png",
+                    "WEBP": "image/webp",
+                }
+                institution.logo_data = logo_bytes
+                institution.logo_content_type = content_types[image_type]
+                # ``Institution.save`` must distinguish this verified
+                # replacement from a direct FileField update.  The latter
+                # can fail while reading the new storage object and must
+                # never leave a previous institution logo as its fallback.
+                institution._has_staged_logo_snapshot = True
+        if commit:
+            institution.save()
+            self.save_m2m()
+        return institution
 
     def clean_subdomain(self):
         value = self.cleaned_data["subdomain"].strip().lower()
@@ -1008,10 +1047,36 @@ class NotificationForm(StyledModelForm):
 
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.message_sender = user
         if user and user.has_role(User.Role.LECTURER):
-            self.fields.pop("courses")
+            # A lecturer may communicate only with students connected to a
+            # current teaching allocation.  The querysets and the clean method
+            # both enforce this; the latter protects future UI changes too.
+            allocated_courses = Course.objects.filter(
+                Q(lecturer=user)
+                | Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True)
+            ).distinct()
+            self.allowed_course_ids = set(allocated_courses.values_list("id", flat=True))
+            self.allowed_department_ids = set(
+                allocated_courses.values_list("department_id", flat=True)
+            )
+            self.fields["courses"].queryset = allocated_courses
+            self.fields["departments"].queryset = Department.objects.filter(
+                id__in=self.allowed_department_ids
+            )
         else:
             self.fields["courses"].queryset = Course.objects.all()
+
+    def clean(self):
+        cleaned = super().clean()
+        if getattr(self, "message_sender", None) and self.message_sender.has_role(User.Role.LECTURER):
+            courses = cleaned.get("courses")
+            departments = cleaned.get("departments")
+            if courses and any(course.id not in self.allowed_course_ids for course in courses):
+                self.add_error("courses", "You can only message students in your allocated courses.")
+            if departments and any(department.id not in self.allowed_department_ids for department in departments):
+                self.add_error("departments", "You can only message departments where you have an allocated course.")
+        return cleaned
 
 
 class BaseProfileForm(StyledModelForm):
@@ -1118,8 +1183,8 @@ class PasswordResetOTPRequestForm(forms.Form):
 
 class PasswordResetOTPConfirmForm(forms.Form):
     otp = forms.CharField(label="Email verification code", min_length=6, max_length=6)
-    password1 = forms.CharField(label="New password", min_length=8, widget=forms.PasswordInput)
-    password2 = forms.CharField(label="Confirm new password", min_length=8, widget=forms.PasswordInput)
+    password1 = forms.CharField(label="New password", min_length=12, widget=forms.PasswordInput)
+    password2 = forms.CharField(label="Confirm new password", min_length=12, widget=forms.PasswordInput)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1131,13 +1196,18 @@ class PasswordResetOTPConfirmForm(forms.Form):
         cleaned = super().clean()
         if cleaned.get("password1") and cleaned.get("password1") != cleaned.get("password2"):
             self.add_error("password2", "The passwords do not match.")
+        if cleaned.get("password1"):
+            try:
+                validate_password(cleaned["password1"])
+            except forms.ValidationError as exc:
+                self.add_error("password1", exc)
         return cleaned
 
 
 class BaseUserForm(StyledModelForm):
     faculty = forms.ModelChoiceField(queryset=Faculty.objects.all(), required=False)
-    password1 = forms.CharField(widget=forms.PasswordInput)
-    password2 = forms.CharField(widget=forms.PasswordInput)
+    password1 = forms.CharField(min_length=12, widget=forms.PasswordInput)
+    password2 = forms.CharField(min_length=12, widget=forms.PasswordInput)
 
     class Meta:
         model = User
@@ -1179,6 +1249,11 @@ class BaseUserForm(StyledModelForm):
         cleaned_data = super().clean()
         if cleaned_data.get("password1") != cleaned_data.get("password2"):
             self.add_error("password2", "Passwords do not match.")
+        if cleaned_data.get("password1"):
+            try:
+                validate_password(cleaned_data["password1"], self.instance)
+            except forms.ValidationError as exc:
+                self.add_error("password1", exc)
         faculty = cleaned_data.get("faculty")
         department = cleaned_data.get("department")
         if department and not faculty:

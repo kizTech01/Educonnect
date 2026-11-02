@@ -8,7 +8,7 @@
         <div class="sidebar-brand">
             {% if institution.has_logo %}
                 {% url 'portal:institution-logo' institution.subdomain as institution_logo_url %}
-                <img src="{{ institution_logo_url }}?v={{ institution.updated_at|date:'U' }}" alt="{{ institution.name }} logo" onerror="this.hidden=true;this.nextElementSibling.hidden=false;">
+                <img class="institution-logo-image" src="{{ institution_logo_url }}?v={{ institution.updated_at|date:'U' }}" alt="{{ institution.name }} logo">
             {% endif %}
             <span class="institution-logo-placeholder" aria-hidden="true"{% if institution.has_logo %} hidden{% endif %}>{{ institution.name|slice:":1"|upper }}</span>
             <div>

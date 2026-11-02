@@ -164,6 +164,7 @@ from .models import (
     GlobalPolicy,
     PolicyAcceptance,
     AccountActivation,
+    LoginThrottle,
     ScreeningRequestReplay,
     TimeStampedModel,
     curriculum_for_department,
@@ -394,21 +395,35 @@ def delete_institution_data(institution):
 
 
 def _login_throttle_key(request, username):
-    identity = f"{request.META.get('REMOTE_ADDR', '')}:{username.lower()}"
-    return f"portal-login:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+    identity = f"{_client_ip(request) or 'unknown'}:{username.strip().casefold()}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _login_is_throttled(request, username):
-    return int(cache.get(_login_throttle_key(request, username), 0)) >= 5
+    return LoginThrottle.objects.filter(
+        key_digest=_login_throttle_key(request, username),
+        failure_count__gte=5,
+        locked_until__gt=timezone.now(),
+    ).exists()
 
 
 def _record_failed_login(request, username):
     key = _login_throttle_key(request, username)
-    cache.set(key, int(cache.get(key, 0)) + 1, timeout=15 * 60)
+    now = timezone.now()
+    with transaction.atomic():
+        record, _ = LoginThrottle.objects.select_for_update().get_or_create(
+            key_digest=key,
+            defaults={"failure_count": 0, "locked_until": now},
+        )
+        if record.locked_until <= now:
+            record.failure_count = 0
+        record.failure_count += 1
+        record.locked_until = now + timedelta(minutes=15)
+        record.save(update_fields=["failure_count", "locked_until", "updated_at"])
 
 
 def _clear_failed_logins(request, username):
-    cache.delete(_login_throttle_key(request, username))
+    LoginThrottle.objects.filter(key_digest=_login_throttle_key(request, username)).delete()
 
 
 def _exam_card_verification_limited(request):
@@ -438,13 +453,17 @@ def institution_logo(request, institution_subdomain):
     ):
         raise Http404("Institution logo not found.")
     logo_name = str(institution.logo.name or "").lower()
-    if logo_name.endswith((".svg", ".svgz")) or institution.logo_content_type in {"image/svg+xml", "image/svg+xml-compressed"}:
+    allowed_logo_types = {"image/jpeg", "image/png", "image/webp"}
+    if (
+        logo_name.endswith((".svg", ".svgz"))
+        or institution.logo_content_type not in {"", *allowed_logo_types}
+    ):
         # Legacy active-content logos must be replaced with a raster image.
         raise Http404("Institution logo not found.")
     if institution.logo_data:
         response = HttpResponse(
             bytes(institution.logo_data),
-            content_type=institution.logo_content_type or "application/octet-stream",
+            content_type=institution.logo_content_type or "image/png",
         )
     else:
         storage_status = _departmental_storage_status(institution.logo)
@@ -462,6 +481,7 @@ def institution_logo(request, institution_subdomain):
     # The URL has a tenant segment and a version query string, but do not let
     # a shared intermediary cache substitute any institution's branding.
     response["Cache-Control"] = "private, no-store, max-age=0"
+    response["X-Content-Type-Options"] = "nosniff"
     return response
 
 
@@ -559,9 +579,14 @@ def _download_file_response(uploaded_file, request):
         file_opened=True,
     )
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    # Never render a user upload inline unless it is a deliberately supported,
+    # non-active format.  This remains safe even if a future form misses an
+    # extension validator or a storage object contains a misleading filename.
+    safe_inline_types = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+    as_attachment = request.GET.get("download") == "1" or content_type not in safe_inline_types
     response = FileResponse(
         source,
-        as_attachment=request.GET.get("download") == "1",
+        as_attachment=as_attachment,
         filename=filename,
         content_type=content_type,
     )
@@ -572,7 +597,7 @@ def _download_file_response(uploaded_file, request):
     log_departmental_document_diagnostic(
         request,
         "file_response_created",
-        disposition="attachment" if request.GET.get("download") == "1" else "inline",
+        disposition="attachment" if as_attachment else "inline",
         response_status=200,
     )
     return response

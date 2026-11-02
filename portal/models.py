@@ -149,7 +149,14 @@ class Institution(models.Model):
         # after a replacement: if the new storage object is temporarily
         # unreadable, serving the old bytes would show the wrong institution
         # branding even though the FileField points at the new logo.
-        if logo_changed or (previous is not None and not self.logo):
+        # Forms stage the verified new logo bytes on the instance before this
+        # save.  Preserve that new snapshot, while still clearing an obsolete
+        # old snapshot when a non-form update cannot provide replacement bytes.
+        has_staged_logo_snapshot = getattr(self, "_has_staged_logo_snapshot", False)
+        if (
+            (logo_changed and not has_staged_logo_snapshot)
+            or (previous is not None and not self.logo)
+        ):
             type(self).objects.filter(pk=self.pk).update(
                 logo_data=b"", logo_content_type=""
             )
@@ -584,6 +591,29 @@ class AccountActivation(models.Model):
     @property
     def is_valid(self):
         return self.consumed_at is None and self.expires_at > timezone.now()
+
+
+class LoginThrottle(models.Model):
+    """Shared, short-lived login-failure counter for every web worker.
+
+    Django's local-memory cache is process-local, which makes it ineffective
+    when Gunicorn runs more than one worker.  Keeping only a one-way digest of
+    the client/identity pair in PostgreSQL gives every worker the same lockout
+    decision without retaining an IP address or username in this security log.
+    """
+
+    key_digest = models.CharField(max_length=64, unique=True)
+    failure_count = models.PositiveSmallIntegerField(default=0)
+    locked_until = models.DateTimeField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["locked_until"],
+                name="portal_log_locked__6ed9e7_idx",
+            )
+        ]
 
 
 class RoleAssignment(TimeStampedModel):

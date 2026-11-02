@@ -10,6 +10,19 @@ document.querySelectorAll('a[href^="#"]').forEach((link) => {
     });
 });
 
+// Keep the tenant-specific initial visible if a legacy or unavailable logo
+// cannot be loaded.  This replaces inline event handlers so CSP can disallow
+// inline scripts throughout the application.
+document.querySelectorAll(".institution-logo-image").forEach((logo) => {
+    logo.addEventListener("error", () => {
+        logo.hidden = true;
+        const fallback = logo.nextElementSibling;
+        if (fallback) {
+            fallback.hidden = false;
+        }
+    });
+});
+
 const scrollTopButton = document.querySelector("[data-scroll-top]");
 if (scrollTopButton) {
     const toggleScrollTopButton = () => {
