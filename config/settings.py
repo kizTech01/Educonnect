@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 from config.domain import core_domain_settings, parse_csv, unique
@@ -35,6 +36,10 @@ SECRET_KEY = os.getenv(
 )
 
 DEBUG = os.getenv("DJANGO_DEBUG", "False").lower() in {"1", "true", "yes", "on"}
+# Django intentionally runs tests with DEBUG disabled.  Keep test-only
+# credentials deterministic without ever permitting that fallback in a
+# deployed process.
+TESTING = "test" in sys.argv
 
 # CORE_DOMAIN is the single source of truth for the shared platform host and
 # every institution subdomain. PLATFORM_BASE_DOMAIN remains as a compatibility
@@ -93,8 +98,10 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "portal.middleware.TenantResolutionMiddleware",
+    "portal.middleware.UploadSecurityMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "portal.middleware.TenantAccessMiddleware",
+    "portal.middleware.SecurityHeadersMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
@@ -274,6 +281,20 @@ LOGIN_URL = "portal:home"
 LOGIN_REDIRECT_URL = "portal:dashboard"
 LOGOUT_REDIRECT_URL = "portal:home"
 
+# These explicit defaults make the browser-session contract clear in every
+# environment.  ``*_SECURE`` is enabled only behind HTTPS in production below.
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_AGE = int(os.getenv("SESSION_COOKIE_AGE", str(60 * 60 * 8)))
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+SESSION_SAVE_EVERY_REQUEST = False
+
+# Reject oversized multipart requests before Django parses them into temporary
+# files.  Individual forms can retain smaller feature-specific limits.
+EDUCONNECT_MAX_UPLOAD_BYTES = int(os.getenv("EDUCONNECT_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+DATA_UPLOAD_MAX_MEMORY_SIZE = EDUCONNECT_MAX_UPLOAD_BYTES + (1024 * 1024)
+
 
 # Email
 EMAIL_BACKEND = os.getenv(
@@ -302,6 +323,12 @@ DEFAULT_FROM_EMAIL = os.getenv(
 )
 
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
+
+# Web Push is optional. Without VAPID keys the in-page browser-alert fallback
+# remains available, but a closed browser cannot receive a notification.
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "").strip()
 
 # Used exclusively by the authenticated machine-to-machine lecture reminder
 # trigger.  Leave blank outside the service that receives cron requests; the
@@ -334,6 +361,10 @@ BOOTSTRAP_ADMIN_EMAIL = os.getenv(
 
 
 # Production security
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = (
         "HTTP_X_FORWARDED_PROTO",
@@ -343,11 +374,10 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_SSL_REDIRECT = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
-    X_FRAME_OPTIONS = "DENY"
-
     SECURE_HSTS_SECONDS = int(
-        os.getenv("SECURE_HSTS_SECONDS", "3600")
+        # Keep an explicit override for staged deployments, but use the
+        # one-year baseline required before advertising HSTS preload.
+        os.getenv("SECURE_HSTS_SECONDS", "31536000")
     )
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
@@ -358,4 +388,13 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Platform subscription payments use a platform-owned Paystack account.  Course
 # and departmental gateways remain separate, existing institution workflows.
 PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "").strip()
+PAYSTACK_CREDENTIALS_ENCRYPTION_KEY = os.getenv(
+    "PAYSTACK_CREDENTIALS_ENCRYPTION_KEY", ""
+).strip()
+# Comma-separated retiring Fernet keys.  They are read-only compatibility
+# keys during a staged rotation; new writes always use the primary key above.
+PAYSTACK_CREDENTIALS_PREVIOUS_ENCRYPTION_KEYS = os.getenv(
+    "PAYSTACK_CREDENTIALS_PREVIOUS_ENCRYPTION_KEYS", ""
+).strip()
+TRUSTED_PROXY_IPS = tuple(parse_csv(os.getenv("TRUSTED_PROXY_IPS", "")))
 PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY", "").strip()

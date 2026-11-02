@@ -4,6 +4,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 from django import forms
+from PIL import Image, UnidentifiedImageError
 from django.conf import settings
 from django.contrib.auth.forms import PasswordChangeForm, PasswordResetForm
 from django.core.validators import FileExtensionValidator
@@ -221,9 +222,9 @@ class InstitutionCreateForm(StyledModelForm):
     logo = forms.FileField(
         required=True,
         label="Institution logo",
-        help_text="Upload this institution's logo (JPG, PNG, SVG, or WebP).",
-        validators=[FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "svg", "webp"])],
-        widget=forms.ClearableFileInput(attrs={"accept": ".jpg,.jpeg,.png,.svg,.webp,image/jpeg,image/png,image/svg+xml,image/webp"}),
+        help_text="Upload a PNG, JPEG, or WebP institution logo.",
+        validators=[FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png", "webp"])],
+        widget=forms.ClearableFileInput(attrs={"accept": ".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"}),
     )
     # A plain text field lets us turn an institution name or portal URL into the
     # slug stored by the model, rather than rejecting it before ``clean_subdomain``
@@ -249,6 +250,21 @@ class InstitutionCreateForm(StyledModelForm):
         if User.all_objects.filter(username__iexact=email).exists():
             raise forms.ValidationError("This email is already used as a username.")
         return email
+
+    def clean_logo(self):
+        logo = self.cleaned_data.get("logo")
+        if not logo:
+            return logo
+        try:
+            image = Image.open(logo)
+            image.verify()
+            if image.format not in {"JPEG", "PNG", "WEBP"}:
+                raise forms.ValidationError("Institution logos must be a PNG, JPEG, or WebP image.")
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise forms.ValidationError("Upload a valid PNG, JPEG, or WebP image.") from exc
+        finally:
+            logo.seek(0)
+        return logo
 
     def clean_subdomain(self):
         value = self.cleaned_data["subdomain"].strip().lower()
@@ -279,7 +295,7 @@ class InstitutionUpdateForm(InstitutionCreateForm):
         # the existing institution logo, but does not have to upload it again.
         self.fields["logo"].required = False
         self.fields["logo"].widget = forms.FileInput(attrs={
-            "accept": ".jpg,.jpeg,.png,.svg,.webp,image/jpeg,image/png,image/svg+xml,image/webp"
+            "accept": ".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
         })
 
     def clean(self):
@@ -633,6 +649,21 @@ class LecturerCourseUpdateForm(CourseDetailsForm):
         # students. Preserve the existing availability while a lecturer edits
         # schedule, material, or pricing details.
         fields = [field for field in CourseDetailsForm.Meta.fields if field != "is_available"]
+
+
+class HODCoursePricingForm(CoursePricingMixin, StyledModelForm):
+    """Limit HOD edits to the paid/free state and amount of a department course."""
+
+    class Meta:
+        model = Course
+        fields = ["is_free", "amount"]
+        widgets = {
+            "amount": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["amount"].required = False
 
 
 class StudentCourseFilterForm(forms.Form):
@@ -1302,7 +1333,15 @@ class CoursePaymentGatewayForm(StyledModelForm):
 class AcademicSessionForm(StyledModelForm):
     class Meta:
         model = AcademicSession
-        fields = ["name", "is_current"]
+        fields = ["name", "semester", "is_current"]
+
+
+class CurrentSemesterForm(StyledModelForm):
+    """Restrict semester changes to the current institution session."""
+
+    class Meta:
+        model = AcademicSession
+        fields = ["semester"]
 
 
 class ProgrammeFacultyFormMixin:

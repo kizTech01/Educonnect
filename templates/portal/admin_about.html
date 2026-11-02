@@ -6,18 +6,32 @@
 <section class="panel-card">
     <div class="panel-head">
         <h2>Academic Sessions</h2>
-        {% if current_session %}<span class="status-pill success">Current: {{ current_session.name }}</span>{% endif %}
+        {% if current_session %}<span class="status-pill success">Current: {{ current_session.name }} · {{ current_session.get_semester_display }}</span>{% endif %}
     </div>
-    <p class="muted-note">Create a new session for departmental fees and student payments. Marking it current moves the existing current session to the past sessions list.</p>
+    <p class="muted-note">Create a new session for departmental fees and student payments. The institution administrator alone selects the current semester.</p>
     <form method="post" class="stack-form">
         {% csrf_token %}
         <input type="hidden" name="action" value="create-academic-session">
         <label>{{ session_form.name.label }} {{ session_form.name }} {{ session_form.name.errors }}</label>
+        <label>{{ session_form.semester.label }} {{ session_form.semester }} {{ session_form.semester.errors }}</label>
         <label class="option-row">{{ session_form.is_current }} <span>Make this the current academic session</span></label>
         {{ session_form.is_current.errors }}
         <button type="submit" class="primary-btn">Create Academic Session</button>
     </form>
 </section>
+
+{% if current_session and semester_form %}
+<section class="panel-card">
+    <div class="panel-head"><h2>Current Semester</h2></div>
+    <p class="muted-note">Changing the semester clears live course registrations and student messages for this institution. Historical records and receipts remain intact.</p>
+    <form method="post" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="save-current-semester">
+        <label>{{ semester_form.semester.label }} {{ semester_form.semester }} {{ semester_form.semester.errors }}</label>
+        <button type="submit" class="primary-btn">Save Semester</button>
+    </form>
+</section>
+{% endif %}
 
 <section class="panel-card">
     <div class="panel-head"><h2>Past Sessions</h2></div>

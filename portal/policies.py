@@ -5,11 +5,6 @@ from datetime import date
 
 POLICY_PUBLICATION_DATE = date(2026, 10, 10)
 POLICY_VERSION = "1.0-draft"
-LEGAL_REVIEW_NOTICE = (
-    "This is a production draft for review by a qualified Nigerian lawyer and "
-    "data-protection professional before final adoption. It is not legal advice "
-    "and does not represent a signed institutional agreement."
-)
 
 
 def section(heading, *paragraphs):

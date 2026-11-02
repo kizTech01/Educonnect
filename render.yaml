@@ -20,6 +20,14 @@ services:
       # production service; do not store or synchronize them in this Blueprint.
       - key: DJANGO_SECRET_KEY
         generateValue: true
+      # Required before applying the encryption migration. Keep the primary
+      # and any retiring keys in Render's secret store, never in this file.
+      - key: PAYSTACK_CREDENTIALS_ENCRYPTION_KEY
+        sync: false
+      - key: PAYSTACK_CREDENTIALS_PREVIOUS_ENCRYPTION_KEYS
+        sync: false
+      - key: TRUSTED_PROXY_IPS
+        sync: false
       - key: BOOTSTRAP_ADMIN_USERNAME
         sync: false
       - key: BOOTSTRAP_ADMIN_PASSWORD
@@ -42,7 +50,17 @@ services:
         sync: false
       - key: EMAIL_USE_TLS
         value: "True"
+      - key: EMAIL_USE_SSL
+        value: "False"
+      - key: EMAIL_TIMEOUT
+        value: "30"
       - key: DEFAULT_FROM_EMAIL
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_CLAIMS_EMAIL
         sync: false
 
   - type: cron
@@ -106,17 +124,57 @@ services:
       - key: EMAIL_BACKEND
         value: django.core.mail.backends.smtp.EmailBackend
       - key: EMAIL_HOST
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST
       - key: EMAIL_PORT
         value: "587"
       - key: EMAIL_HOST_USER
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_USER
       - key: EMAIL_HOST_PASSWORD
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_PASSWORD
       - key: EMAIL_USE_TLS
-        value: "True"
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_TLS
+      - key: EMAIL_USE_SSL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_SSL
+      - key: EMAIL_TIMEOUT
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_TIMEOUT
       - key: DEFAULT_FROM_EMAIL
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: DEFAULT_FROM_EMAIL
+      - key: VAPID_PUBLIC_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PUBLIC_KEY
+      - key: VAPID_PRIVATE_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PRIVATE_KEY
+      - key: VAPID_CLAIMS_EMAIL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_CLAIMS_EMAIL
 
   - type: cron
     name: educonnect-course-reminders
@@ -179,17 +237,57 @@ services:
       - key: EMAIL_BACKEND
         value: django.core.mail.backends.smtp.EmailBackend
       - key: EMAIL_HOST
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST
       - key: EMAIL_PORT
         value: "587"
       - key: EMAIL_HOST_USER
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_USER
       - key: EMAIL_HOST_PASSWORD
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_HOST_PASSWORD
       - key: EMAIL_USE_TLS
-        value: "True"
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_TLS
+      - key: EMAIL_USE_SSL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_USE_SSL
+      - key: EMAIL_TIMEOUT
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: EMAIL_TIMEOUT
       - key: DEFAULT_FROM_EMAIL
-        sync: false
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: DEFAULT_FROM_EMAIL
+      - key: VAPID_PUBLIC_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PUBLIC_KEY
+      - key: VAPID_PRIVATE_KEY
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_PRIVATE_KEY
+      - key: VAPID_CLAIMS_EMAIL
+        fromService:
+          type: web
+          name: educonnect-web
+          envVarKey: VAPID_CLAIMS_EMAIL
 
 databases:
   - name: educonnect-db
