@@ -3101,19 +3101,16 @@ def ai_assistant(request):
     ))
 
 
-@role_required(User.Role.ADMIN, User.Role.MIS)
+@role_required(User.Role.ADMIN)
 @require_http_methods(["GET", "POST"])
 def ai_automation(request):
-    """Tenant-scoped, human-approved document automation workflow."""
-    is_institution_admin = request.user.has_role(User.Role.ADMIN)
+    """Execute a validated tenant account-import proposal as soon as it is uploaded."""
     jobs = AIAutomationJob.objects.select_related("requested_by", "approved_by").order_by("-created_at")
-    if not is_institution_admin:
-        jobs = jobs.filter(requested_by=request.user)
 
     form = AIAutomationUploadForm()
     if request.method == "POST":
         action = request.POST.get("action")
-        if action == "analyze":
+        if action == "run":
             form = AIAutomationUploadForm(request.POST, request.FILES)
             if form.is_valid():
                 upload = form.cleaned_data["file"]
@@ -3135,19 +3132,9 @@ def ai_automation(request):
                         institution=request.institution, user=request.user,
                         action="ai_automation_analyzed", object_type="AIAutomationJob", object_id=str(job.id),
                         new_value={"action": job.action, "proposed_count": len(job.proposed_changes)},
-                        description="AI/document automation proposal generated; no records were changed.",
+                        description="AI/document automation proposal generated for immediate execution.",
                         ip_address=_client_ip(request),
                     )
-                    messages.success(request, "Proposal analyzed. Review it before an Institution Admin approves execution.")
-                    return redirect("portal:ai-automation")
-        elif action in {"approve", "execute"}:
-            if not is_institution_admin:
-                raise PermissionDenied("Only an Institution Admin may approve or execute automation.")
-            job = get_object_or_404(AIAutomationJob.objects, pk=request.POST.get("job_id"))
-            if action == "approve":
-                if job.status != AIAutomationJob.Status.ANALYZED:
-                    messages.error(request, "Only an analyzed proposal can be approved.")
-                else:
                     job.status = AIAutomationJob.Status.APPROVED
                     job.approved_by = request.user
                     job.approved_at = timezone.now()
@@ -3156,26 +3143,29 @@ def ai_automation(request):
                         institution=request.institution, user=request.user,
                         action="ai_automation_approved", object_type="AIAutomationJob", object_id=str(job.id),
                         new_value={"action": job.action, "proposed_count": len(job.proposed_changes)},
-                        description="Institution Admin approved a reviewed automation proposal.", ip_address=_client_ip(request),
+                        description="Institution Admin automatically approved the uploaded automation proposal.",
+                        ip_address=_client_ip(request),
                     )
-                    messages.success(request, "Proposal approved. Execute it only after confirming the displayed changes.")
-            else:
-                try:
-                    summary = execute_institution_automation(job, request.user)
-                except ValueError as exc:
-                    messages.error(request, str(exc))
-                else:
-                    AuditLog.objects.create(
-                        institution=request.institution, user=request.user,
-                        action="ai_automation_executed", object_type="AIAutomationJob", object_id=str(job.id),
-                        new_value=summary,
-                        description="Institution Admin executed a previously approved automation proposal.", ip_address=_client_ip(request),
-                    )
-                    messages.success(request, f"Automation executed: {summary['created']} account(s) created; {summary['skipped']} skipped.")
-            return redirect("portal:ai-automation")
+                    try:
+                        summary = execute_institution_automation(job, request.user)
+                    except ValueError as exc:
+                        form.add_error(None, str(exc))
+                    else:
+                        AuditLog.objects.create(
+                            institution=request.institution, user=request.user,
+                            action="ai_automation_executed", object_type="AIAutomationJob", object_id=str(job.id),
+                            new_value=summary,
+                            description="Institution Admin automatically executed an uploaded automation proposal.",
+                            ip_address=_client_ip(request),
+                        )
+                        messages.success(
+                            request,
+                            f"Automation completed: {summary['created']} account(s) created; {summary['skipped']} skipped.",
+                        )
+                        return redirect("portal:ai-automation")
 
     return render(request, "portal/ai_automation.html", dashboard_context(
-        request, "AI Import Review", form=form, jobs=jobs, is_institution_admin=is_institution_admin,
+        request, "AI Account Automation", form=form, jobs=jobs,
     ))
 
 

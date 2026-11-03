@@ -257,7 +257,7 @@ class InstitutionalRBACTests(TestCase):
         self.client.force_login(administrator)
         self.assertEqual(self.client.get(reverse("portal:ai-automation")).status_code, 200)
 
-    def test_ai_automation_requires_analysis_approval_then_execution(self):
+    def test_ai_automation_executes_a_valid_upload_immediately(self):
         administrator = User.objects.create_user(
             username="automation-admin", password="pass1234", role=User.Role.ADMIN,
         )
@@ -269,21 +269,10 @@ class InstitutionalRBACTests(TestCase):
         )
         response = self.client.post(
             reverse("portal:ai-automation"),
-            {"action": "analyze", "file": upload, "command": "Create lecturer accounts from this file"},
+            {"action": "run", "file": upload, "command": "Create lecturer accounts from this file"},
         )
         self.assertRedirects(response, reverse("portal:ai-automation"))
         job = AIAutomationJob.objects.get()
-        self.assertEqual(job.status, AIAutomationJob.Status.ANALYZED)
-        self.assertFalse(User.objects.filter(username="LEC-001").exists())
-
-        response = self.client.post(reverse("portal:ai-automation"), {"action": "approve", "job_id": job.id})
-        self.assertRedirects(response, reverse("portal:ai-automation"))
-        job.refresh_from_db()
-        self.assertEqual(job.status, AIAutomationJob.Status.APPROVED)
-
-        response = self.client.post(reverse("portal:ai-automation"), {"action": "execute", "job_id": job.id})
-        self.assertRedirects(response, reverse("portal:ai-automation"))
-        job.refresh_from_db()
         self.assertEqual(job.status, AIAutomationJob.Status.EXECUTED)
         self.assertTrue(User.objects.filter(username="LEC-001", role=User.Role.LECTURER).exists())
         self.assertTrue(AuditLog.objects.filter(action="ai_automation_executed", object_id=str(job.id)).exists())
@@ -409,6 +398,68 @@ class DepartmentAutomationTests(TestCase):
 
         self.course.refresh_from_db()
         self.assertEqual(self.course.lecturer, lecturer)
+
+    def test_scanned_handbook_uses_vision_records_and_normalises_credit_units(self):
+        session = AcademicSession.objects.filter(
+            institution=self.department.institution, is_current=True,
+        ).first()
+        if session is None:
+            session = AcademicSession.objects.create(
+                institution=self.department.institution,
+                name="2035/2036",
+                is_current=True,
+            )
+        handbook = Handbook.objects.create(
+            institution=self.department.institution,
+            department=self.department,
+            title="Scanned Computing Handbook",
+            academic_session=session.name,
+            file=SimpleUploadedFile("handbook.png", b"image-bytes", content_type="image/png"),
+        )
+
+        from .automation import import_handbook_courses
+
+        with patch("portal.automation._ai_extract_image", return_value=[
+            {
+                "code": "CSC320",
+                "title": "Artificial Intelligence",
+                "level": "300",
+                "semester": "second",
+                "credit_units": "3 units",
+                "requirement": "compulsory",
+            },
+        ]):
+            self.assertIn("1 catalogue courses created", import_handbook_courses(handbook))
+
+        course = Course.objects.get(department=self.department, code="CSC320")
+        self.assertEqual(course.credit_units, 3)
+        self.assertTrue(CurriculumCourse.objects.filter(course=course).exists())
+
+    def test_handbook_automation_rejects_an_image_without_course_records(self):
+        session = AcademicSession.objects.filter(
+            institution=self.department.institution, is_current=True,
+        ).first()
+        if session is None:
+            session = AcademicSession.objects.create(
+                institution=self.department.institution,
+                name="2035/2036",
+                is_current=True,
+            )
+        handbook = Handbook.objects.create(
+            institution=self.department.institution,
+            department=self.department,
+            title="Unreadable Handbook",
+            academic_session=session.name,
+            file=SimpleUploadedFile("handbook.webp", b"image-bytes", content_type="image/webp"),
+        )
+
+        from .automation import import_handbook_courses
+
+        with patch("portal.automation._ai_extract_image", return_value=[]):
+            with self.assertRaisesMessage(ValueError, "No valid course records"):
+                import_handbook_courses(handbook)
+
+        self.assertFalse(Course.objects.filter(department=self.department, code="CSC320").exists())
 
     def test_programme_import_uses_ai_records_and_keeps_the_selected_department(self):
         with patch("portal.automation._ai_extract", return_value=[

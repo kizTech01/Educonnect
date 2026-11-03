@@ -28,6 +28,34 @@ from .services import issue_account_activation, provisioned_password_for, send_a
 
 COURSE_CODE_RE = re.compile(r"\b([A-Z]{2,6}\s?-?\d{3,4})\b", re.I)
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+AUTOMATION_RECORD_FIELDS = (
+    "full_name", "lecturer_id", "lecturer_name", "email", "phone_number",
+    "course_code", "course_title", "title", "level", "semester", "credit_units",
+    "requirement", "student_id", "ca", "test", "other", "other_assessment", "exam",
+    "total", "programme_code", "programme_name", "award", "duration_years", "is_active",
+)
+
+
+def _automation_output_schema():
+    """Return the strict, reusable record envelope for document extraction."""
+    return {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        field: {"type": "string"} for field in AUTOMATION_RECORD_FIELDS
+                    },
+                    "required": list(AUTOMATION_RECORD_FIELDS),
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
 
 
 def extract_text(uploaded_file):
@@ -109,13 +137,20 @@ def _ai_extract(text, task):
     if not key:
         return None
     prompt = (
-        f"Extract {task} from this university document. Return JSON only, an array of objects. "
-        "Never invent information; use empty strings for unknown values.\n\n" + text[:60000]
+        f"Extract {task} from this university document. Return JSON in the supplied schema. "
+        "Never invent information; use empty strings for unknown fields.\n\n" + text[:60000]
     )
     body = json.dumps({
         "model": getattr(settings, "OPENAI_AUTOMATION_MODEL", "gpt-4.1-mini"),
         "input": prompt,
-        "text": {"format": {"type": "json_object"}},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "university_automation_records",
+                "strict": True,
+                "schema": _automation_output_schema(),
+            },
+        },
     }).encode()
     return _openai_extract(body, key)
 
@@ -137,7 +172,8 @@ def _openai_extract(body, key):
                 if content.get("type") == "output_text"
             )
         parsed = json.loads(output)
-        return parsed.get("items", parsed if isinstance(parsed, list) else [])
+        items = parsed.get("items", []) if isinstance(parsed, dict) else parsed
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     except Exception:
         return None
 
@@ -155,8 +191,8 @@ def _ai_extract_image(uploaded_file, task):
     suffix = os.path.splitext(uploaded_file.name)[1].lower()
     media_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}[suffix]
     prompt = (
-        f"Extract {task} from this scanned university document. Return JSON only, an array of objects. "
-        "Never invent information; use empty strings for unknown values."
+        f"Extract {task} from this scanned university document. Return JSON in the supplied schema. "
+        "Never invent information; use empty strings for unknown fields."
     )
     body = json.dumps({
         "model": getattr(settings, "OPENAI_AUTOMATION_MODEL", "gpt-4.1-mini"),
@@ -164,7 +200,14 @@ def _ai_extract_image(uploaded_file, task):
             {"type": "input_text", "text": prompt},
             {"type": "input_image", "image_url": f"data:{media_type};base64,{base64.b64encode(data).decode()}"},
         ]}],
-        "text": {"format": {"type": "json_object"}},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "university_automation_records",
+                "strict": True,
+                "schema": _automation_output_schema(),
+            },
+        },
     }).encode()
     return _openai_extract(body, key)
 
@@ -196,9 +239,39 @@ def course_records(text):
     return records
 
 
+def handbook_course_records(handbook):
+    """Extract handbook courses, including scanned handbooks through vision AI."""
+    task = "courses with code, title, level, semester, credit_units, and requirement (compulsory or elective)"
+    suffix = os.path.splitext(handbook.file.name)[1].lower()
+    if suffix in IMAGE_SUFFIXES:
+        records = _ai_extract_image(handbook.file, task)
+        if records is None:
+            raise ValueError(
+                "Scanned handbook extraction requires a working OPENAI_API_KEY and a supported image file."
+            )
+        return records
+    return course_records(extract_text(handbook.file))
+
+
+def _credit_units(value, default=2):
+    """Normalise numeric and human-readable credit-unit values safely."""
+    match = re.search(r"\d+", str(value or ""))
+    units = int(match.group()) if match else default
+    return min(max(units, 1), 30)
+
+
 def import_handbook_courses(handbook):
-    records = course_records(extract_text(handbook.file))
-    created = linked = updated = skipped = 0
+    records = handbook_course_records(handbook)
+    valid_records = [
+        record for record in records
+        if isinstance(record, dict)
+        and re.sub(r"[^A-Z0-9]", "", str(record.get("code", "")).upper())
+        and str(record.get("title", "")).strip()
+    ]
+    if not valid_records:
+        raise ValueError("No valid course records were found in the handbook. Check the course code and title data.")
+    created = linked = updated = 0
+    skipped = len(records) - len(valid_records)
     session = AcademicSession.all_objects.filter(
         institution_id=handbook.institution_id,
         name=handbook.academic_session,
@@ -230,12 +303,9 @@ def import_handbook_courses(handbook):
             effective_session=session,
             version=latest_version + 1,
         )
-        for record in records:
+        for record in valid_records:
             code = re.sub(r"[^A-Z0-9]", "", str(record.get("code", "")).upper())[:20]
             title = str(record.get("title", "")).strip()[:200]
-            if not code or not title:
-                skipped += 1
-                continue
             # The catalogue identity is the safely normalised course code in
             # this department/institution, never a handbook version or a
             # programme.  This is what prevents one CSC201 row per programme.
@@ -247,7 +317,7 @@ def import_handbook_courses(handbook):
                 "title": title,
                 "level": str(record.get("level", "100")) if str(record.get("level", "100")) in {"100", "200", "300", "400", "500"} else "100",
                 "semester": "second" if str(record.get("semester", "")).lower().startswith("second") else "first",
-                "credit_units": max(1, int(record.get("credit_units") or 2)),
+                "credit_units": _credit_units(record.get("credit_units")),
             }
             curriculum_values = {
                 field: course_values[field] for field in ("level", "semester", "credit_units")
@@ -588,7 +658,9 @@ def import_department_lecturers(upload):
             if not lecturer_id or not name:
                 skipped += 1
                 continue
-            user = User.objects.filter(username=lecturer_id).first() or User.objects.filter(id_number=lecturer_id).first()
+            user = User.all_objects.filter(
+                institution=upload.institution,
+            ).filter(Q(username__iexact=lecturer_id) | Q(id_number__iexact=lecturer_id)).first()
             if user:
                 if user.role == User.Role.LECTURER and not user.department_id:
                     user.department = upload.department
@@ -603,6 +675,8 @@ def import_department_lecturers(upload):
                 department=upload.department, is_approved=True,
             )
             created += 1
+        if not created and not existing:
+            raise ValueError("No valid lecturer records were found. Use Lecturer ID and Lecturer Name columns.")
     return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New lecturer accounts use this institution's subdomain followed by 'educonnect' as the temporary password."
 
 

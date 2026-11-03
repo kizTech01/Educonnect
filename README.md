@@ -74,7 +74,7 @@ To create the first administrator, set `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP
 
 Existing Admin, Lecturer, and Student accounts are preserved. New institution roles are additive role assignments, so a lecturer can also be an HOD or Exam Officer without a second account. HODs assign Exam Officers only from their own department; the assignment is audited. Institution Admin navigation intentionally has no timetable or handbook operation—those existing records remain in the academic/HOD workspace.
 
-Every institutional role has **EduConnect AI** according to its server-side role assignment. The assistant uses the user's active role (not merely any role assigned to the account), the current institution, and a small allow-list of role-relevant queries. It never provides cross-institution data or performs administrative actions. Institution Admin AI Automation has been removed.
+Every institutional role has **EduConnect AI** according to its server-side role assignment. The assistant uses the user's active role (not merely any role assigned to the account), the current institution, and a small allow-list of role-relevant queries. It never provides cross-institution data or performs administrative actions. Institution Admin AI Automation is available for supported account-import files and executes valid rows immediately after upload.
 
 ## Provisioned account passwords
 
@@ -85,6 +85,10 @@ The legacy shared password (`educonnect`) is accepted only once for eligible leg
 ## Documentation
 
 Project documentation is organized in [Software documentation](docs/SOFTWARE_DOCUMENTATION.md), with deployment, SaaS architecture, reminders, and security material linked from a single maintained index.
+
+## Academic document automation
+
+Departmental lecturer lists, course-allocation documents, and handbooks support CSV, TXT, DOCX, XLSX, and text-based PDF uploads. When `OPENAI_API_KEY` is configured, scanned JPG, JPEG, PNG, and WebP documents are extracted with constrained structured AI output; every extracted lecturer, course, and curriculum entry is still validated and scoped to the selected institution and department. An import stops with a clear error when it contains no valid records, so an unreadable document cannot silently create an empty setup.
 
 ## Email and scale
 

@@ -52,7 +52,7 @@
                         <td class="actions-cell">
                             <form method="post" enctype="multipart/form-data" action="{% url 'portal:admin-departments' %}">
                                 {% csrf_token %}<input type="hidden" name="action" value="upload-lecturers"><input type="hidden" name="department_id" value="{{ department.id }}">
-                                <label class="ghost-btn small">Add Department Lecturers <input type="file" name="file" required hidden onchange="this.form.submit()"></label>
+                                <label class="ghost-btn small">AI Import Department Lecturers <input type="file" name="file" accept=".csv,.txt,.docx,.xlsx,.pdf,.jpg,.jpeg,.png,.webp" required hidden onchange="this.form.submit()"></label>
                             </form>
                             <form method="post" action="{% url 'portal:admin-delete-department' department.id %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                 {% csrf_token %}
