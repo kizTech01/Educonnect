@@ -55,6 +55,7 @@ from .models import (
     LEVEL_CHOICES,
     curriculum_for_programme,
 )
+from .services import provisioned_password_for
 
 
 LEVEL_FILTER_CHOICES = tuple([("", "All levels")] + LEVEL_CHOICES)
@@ -1204,6 +1205,14 @@ class PasswordResetOTPConfirmForm(forms.Form):
         return cleaned
 
 
+class EmailOTPVerificationForm(forms.Form):
+    otp = forms.CharField(label="Email verification code", min_length=6, max_length=6)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["otp"].widget.attrs.update({"class": "input-field", "autocomplete": "one-time-code"})
+
+
 class BaseUserForm(StyledModelForm):
     faculty = forms.ModelChoiceField(queryset=Faculty.objects.all(), required=False)
     password1 = forms.CharField(min_length=12, widget=forms.PasswordInput)
@@ -1322,6 +1331,37 @@ class LecturerUserForm(BaseUserForm):
         return user
 
 
+class ProvisionedLecturerForm(LecturerUserForm):
+    """Institution-created lecturer accounts always start with the agreed temporary password."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields.pop("password1")
+        self.fields.pop("password2")
+        # The lecturer ID is the account username.  Keep the model field in
+        # the form so Django also validates its uniqueness, but never ask an
+        # institution administrator to enter a second identifier.
+        self.fields["username"].required = False
+        self.fields["username"].widget = forms.HiddenInput()
+
+    def clean(self):
+        cleaned_data = super().clean()
+        lecturer_id = cleaned_data.get("id_number")
+        if lecturer_id:
+            cleaned_data["username"] = lecturer_id
+            self.instance.username = lecturer_id
+        return cleaned_data
+
+    def save(self, commit=True):
+        user = forms.ModelForm.save(self, commit=False)
+        user.role = User.Role.LECTURER
+        user.is_approved = False
+        user.set_password(provisioned_password_for(user.institution))
+        if commit:
+            user.save()
+        return user
+
+
 class RequiredProfileFieldsMixin:
     required_fields = ()
 
@@ -1340,7 +1380,6 @@ class StudentSignupForm(RequiredProfileFieldsMixin, StudentUserForm):
         label="I agree to the EduConnect Terms & Conditions and acknowledge the Privacy Policy.",
     )
     required_fields = (
-        "username",
         "first_name",
         "last_name",
         "email",
@@ -1349,6 +1388,19 @@ class StudentSignupForm(RequiredProfileFieldsMixin, StudentUserForm):
         "level",
         "phone_number",
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["username"].required = False
+        self.fields["username"].widget = forms.HiddenInput()
+
+    def clean(self):
+        cleaned_data = super().clean()
+        student_id = cleaned_data.get("id_number")
+        if student_id:
+            cleaned_data["username"] = student_id
+            self.instance.username = student_id
+        return cleaned_data
 
 
 class LecturerSignupForm(RequiredProfileFieldsMixin, LecturerUserForm):

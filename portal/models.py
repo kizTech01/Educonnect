@@ -502,6 +502,10 @@ class User(AbstractUser):
         validators=[FileExtensionValidator(allowed_extensions=["jpg", "jpeg", "png"])],
     )
     is_approved = models.BooleanField(default=True)
+    # Existing users pre-date the email-OTP onboarding flow, so they remain
+    # verified. New institution administrators are explicitly marked false
+    # during provisioning and must confirm the code delivered to their email.
+    email_verified = models.BooleanField(default=True)
     email_class_reminders = models.BooleanField(default=True)
     browser_alerts_enabled = models.BooleanField(default=False)
     class_reminder_alerts_enabled = models.BooleanField(default=False)
@@ -591,6 +595,20 @@ class AccountActivation(models.Model):
     @property
     def is_valid(self):
         return self.consumed_at is None and self.expires_at > timezone.now()
+
+
+class EmailVerificationOTP(models.Model):
+    """A short-lived email-verification code for provisioned admin accounts."""
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="email_verification_otp")
+    code_hash = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    attempts = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @staticmethod
+    def code_hash_for(code):
+        return salted_hmac("portal.email-verification-otp", code, algorithm="sha256").hexdigest()
 
 
 class LoginThrottle(models.Model):

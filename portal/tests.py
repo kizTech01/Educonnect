@@ -46,6 +46,7 @@ from .models import (
     DepartmentalPayment,
     DepartmentalPaymentDocument,
     DepartmentalPaymentItem,
+    EmailVerificationOTP,
     Handbook,
     InstitutionProfile,
     Institution,
@@ -67,8 +68,8 @@ from .models import (
     set_current_institution,
     reset_current_institution,
 )
-from .services import dispatch_due_course_reminders, ensure_default_admin_user
-from .forms import CourseForm
+from .services import dispatch_due_course_reminders, ensure_default_admin_user, send_email_verification_otp
+from .forms import CourseForm, ProvisionedLecturerForm
 from .views import (
     AI_ROLE_EXAMPLES,
     _ai_answer,
@@ -463,7 +464,6 @@ class CurriculumCohortTests(TestCase):
         response = self.client.post(
             reverse("portal:student-signup"),
             {
-                "username": "freshstudent",
                 "first_name": "Fresh",
                 "last_name": "Student",
                 "email": "freshstudent@example.com",
@@ -471,13 +471,13 @@ class CurriculumCohortTests(TestCase):
                 "department": self.department.id,
                 "level": "100",
                 "phone_number": "08000000000",
-                "password1": "pass1234",
-                "password2": "pass1234",
+                "password1": "student-password-123",
+                "password2": "student-password-123",
                 "accept_terms": "on",
             },
         )
         self.assertEqual(response.status_code, 302)
-        new_student = User.objects.get(username="freshstudent")
+        new_student = User.objects.get(username="STU-FRESH")
         self.assertEqual(new_student.curriculum, new_curriculum)
 
         self.client.force_login(returning_student)
@@ -514,7 +514,6 @@ class CurriculumCohortTests(TestCase):
         response = self.client.post(
             reverse("portal:student-signup"),
             {
-                "username": "newwithoutreplacement",
                 "first_name": "New",
                 "last_name": "Student",
                 "email": "newwithoutreplacement@example.com",
@@ -522,14 +521,14 @@ class CurriculumCohortTests(TestCase):
                 "department": self.department.id,
                 "level": "100",
                 "phone_number": "08000000000",
-                "password1": "pass1234",
-                "password2": "pass1234",
+                "password1": "student-password-123",
+                "password2": "student-password-123",
                 "accept_terms": "on",
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        student = User.objects.get(username="newwithoutreplacement")
+        student = User.objects.get(username="STU-CONTINUING")
         self.assertEqual(student.curriculum, old_curriculum)
 
 
@@ -644,7 +643,6 @@ class DashboardAndCourseFlowTests(TestCase):
         response = self.client.post(
             reverse("portal:student-signup"),
             {
-                "username": "newstudent",
                 "first_name": "New",
                 "last_name": "Student",
                 "email": "newstudent@example.com",
@@ -652,20 +650,20 @@ class DashboardAndCourseFlowTests(TestCase):
                 "department": self.department.id,
                 "level": "100",
                 "phone_number": "08000000000",
-                "password1": "pass1234",
-                "password2": "pass1234",
+                "password1": "student-password-123",
+                "password2": "student-password-123",
                 "accept_terms": "on",
             },
         )
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, reverse("portal:student-dashboard"))
+        self.assertTrue(User.objects.get(username="STU-NEW").check_password("student-password-123"))
 
     def test_student_signup_shows_an_error_for_a_duplicate_institution_id(self):
         response = self.client.post(
             reverse("portal:student-signup"),
             {
-                "username": "duplicate-student-id",
                 "first_name": "Duplicate",
                 "last_name": "Student",
                 "email": "duplicate-id@example.com",
@@ -673,8 +671,8 @@ class DashboardAndCourseFlowTests(TestCase):
                 "department": self.department.id,
                 "level": "100",
                 "phone_number": "08000000001",
-                "password1": "pass1234",
-                "password2": "pass1234",
+                "password1": "student-password-123",
+                "password2": "student-password-123",
                 "accept_terms": "on",
             },
         )
@@ -685,7 +683,7 @@ class DashboardAndCourseFlowTests(TestCase):
             "id_number",
             "An account with this student or staff ID already exists at this institution.",
         )
-        self.assertFalse(User.objects.filter(username="duplicate-student-id").exists())
+        self.assertFalse(User.objects.filter(username=self.student.id_number).count() > 1)
 
     def test_lecturer_without_department_can_open_departmental_download(self):
         self.lecturer.department = None
@@ -1814,7 +1812,6 @@ class DashboardAndCourseFlowTests(TestCase):
             award="BSc",
         )
         payload = {
-            "username": "programme-student",
             "first_name": "Programme",
             "last_name": "Student",
             "email": "programme-student@example.com",
@@ -1822,8 +1819,8 @@ class DashboardAndCourseFlowTests(TestCase):
             "department": self.department.id,
             "level": "100",
             "phone_number": "08000000000",
-            "password1": "pass1234",
-            "password2": "pass1234",
+            "password1": "student-password-123",
+            "password2": "student-password-123",
             "accept_terms": "on",
         }
 
@@ -1835,7 +1832,7 @@ class DashboardAndCourseFlowTests(TestCase):
             reverse("portal:student-signup"), {**payload, "programme": programme.id},
         )
         self.assertRedirects(created, reverse("portal:student-dashboard"))
-        self.assertEqual(User.objects.get(username="programme-student").programme, programme)
+        self.assertEqual(User.objects.get(username="STU-PROGRAMME").programme, programme)
 
     def test_admin_can_search_departments_and_assign_an_hod(self):
         self.client.force_login(self.admin)
@@ -4315,3 +4312,100 @@ class DefaultAdminBootstrapTests(TestCase):
         self.assertEqual(logout_response.status_code, 302)
         self.assertEqual(logout_response.url, reverse("portal:home"))
         self.assertIsNone(self.client.session.get("_auth_user_id"))
+
+
+class ProvisionedAccountTests(TestCase):
+    def setUp(self):
+        self.institution = Institution.objects.create(
+            name="OTP University",
+            institution_code="OTP-UNI",
+            institution_type=Institution.Type.UNIVERSITY,
+            email="admin@otp.example",
+            subdomain="otp-uni",
+            status=Institution.Status.ACTIVE,
+        )
+        self.admin = User.all_objects.create_user(
+            username=self.institution.email,
+            email=self.institution.email,
+            password="otp-unieduconnect",
+            first_name="OTP",
+            last_name="Administrator",
+            role=User.Role.ADMIN,
+            institution=self.institution,
+            email_verified=False,
+        )
+
+    def test_institution_admin_default_password_requires_emailed_otp(self):
+        self.assertTrue(self.admin.check_password("otp-unieduconnect"))
+        self.assertTrue(send_email_verification_otp(self.admin))
+        self.assertEqual(len(mail.outbox), 1)
+
+        response = self.client.post(
+            reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
+            {"role": User.Role.ADMIN, "username": self.admin.email, "password": "otp-unieduconnect"},
+        )
+        self.assertRedirects(response, reverse("portal:institution-admin-email-verification"))
+        self.assertIsNone(self.client.session.get("_auth_user_id"))
+
+        import re
+        code = re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1)
+        response = self.client.post(
+            reverse("portal:institution-admin-email-verification"), {"otp": code},
+        )
+        # This isolated account fixture intentionally has no subscription;
+        # the redirect itself is the successful verification outcome and the
+        # tenant-access middleware then sends it to billing.
+        self.assertRedirects(
+            response,
+            reverse("portal:dashboard"),
+            fetch_redirect_response=False,
+        )
+        self.admin.refresh_from_db()
+        self.assertTrue(self.admin.email_verified)
+        self.assertFalse(EmailVerificationOTP.objects.filter(user=self.admin).exists())
+
+    def test_department_lecturer_import_uses_the_temporary_password(self):
+        faculty = Faculty.objects.create(institution=self.institution, name="Science", code="SCI")
+        department = Department.objects.create(
+            institution=self.institution, faculty=faculty, name="Computing", code="CSC",
+        )
+        upload = DepartmentLecturerUpload.objects.create(
+            institution=self.institution,
+            department=department,
+            file=SimpleUploadedFile(
+                "lecturers.csv",
+                b"Lecturer ID,Lecturer Name,Email\nLEC-OTP-1,Ada Lecturer,ada@otp.example\n",
+                content_type="text/csv",
+            ),
+        )
+
+        import_department_lecturers(upload)
+
+        lecturer = User.all_objects.get(username="LEC-OTP-1")
+        self.assertTrue(lecturer.check_password("otp-unieduconnect"))
+        self.assertTrue(lecturer.is_approved)
+
+    def test_manually_created_lecturer_uses_the_id_as_username_and_temporary_password(self):
+        faculty = Faculty.objects.create(institution=self.institution, name="Engineering", code="ENG")
+        department = Department.objects.create(
+            institution=self.institution, faculty=faculty, name="Software Engineering", code="SWE",
+        )
+        form = ProvisionedLecturerForm(
+            data={
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "email": "ada.lovelace@otp.example",
+                "id_number": "LEC-MANUAL-1",
+                "faculty": faculty.pk,
+                "department": department.pk,
+                "phone_number": "08000000000",
+            },
+            institution=self.institution,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        lecturer = form.save()
+
+        self.assertEqual(lecturer.username, "LEC-MANUAL-1")
+        self.assertTrue(lecturer.check_password("otp-unieduconnect"))
+        self.assertFalse(lecturer.is_approved)

@@ -63,30 +63,15 @@
             {% if lecturer_form.non_field_errors %}
                 <div class="flash error">{{ lecturer_form.non_field_errors }}</div>
             {% endif %}
-            <label>Username {{ lecturer_form.username }} {{ lecturer_form.username.errors }}</label>
+            {{ lecturer_form.username }}
             <label>First name {{ lecturer_form.first_name }} {{ lecturer_form.first_name.errors }}</label>
             <label>Last name {{ lecturer_form.last_name }} {{ lecturer_form.last_name.errors }}</label>
             <label>Email address {{ lecturer_form.email }} {{ lecturer_form.email.errors }}</label>
-            <label>Lecturer ID {{ lecturer_form.id_number }} {{ lecturer_form.id_number.errors }}</label>
+            <label>Lecturer ID / username {{ lecturer_form.id_number }} {{ lecturer_form.id_number.errors }}</label>
             <label>Faculty {{ lecturer_form.faculty }} {{ lecturer_form.faculty.errors }}</label>
             <label>Department {{ lecturer_form.department }} {{ lecturer_form.department.errors }}</label>
             <label>Phone number {{ lecturer_form.phone_number }} {{ lecturer_form.phone_number.errors }}</label>
-            <label>
-                <span>Password</span>
-                <div class="password-control">
-                    {{ lecturer_form.password1 }}
-                    <button type="button" class="password-toggle" data-password-toggle>Show</button>
-                </div>
-                {{ lecturer_form.password1.errors }}
-            </label>
-            <label>
-                <span>Confirm password</span>
-                <div class="password-control">
-                    {{ lecturer_form.password2 }}
-                    <button type="button" class="password-toggle" data-password-toggle>Show</button>
-                </div>
-                {{ lecturer_form.password2.errors }}
-            </label>
+            <p class="form-note">New lecturers use the institution subdomain followed by <code>educonnect</code> as their temporary password. They can change it later using the email verification code sent by the password-reset flow.</p>
             <button type="submit" class="primary-btn">Create Lecturer</button>
         </form>
     </div>

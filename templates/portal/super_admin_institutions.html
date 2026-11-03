@@ -4,7 +4,7 @@
 <section class="institution-management-layout">
   <section class="panel-card">
     <div class="panel-head"><h2>Add institution</h2></div>
-    <p class="muted-note">Upload a logo unique to this institution. Its email is used as the administrator username; new administrators begin with the temporary password <strong>educonnect</strong> and receive six months of free access.</p>
+    <p class="muted-note">Upload a logo unique to this institution. Its email is used as the administrator username; new administrators begin with the institution subdomain followed by <strong>educonnect</strong> as their temporary password and receive six months of free access.</p>
     <form method="post" enctype="multipart/form-data" class="stack-form">
       {% csrf_token %}
       {{ form.as_p }}

@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+
+{% block title %}Verify Institution Admin Email | Educonnect{% endblock %}
+
+{% block content %}
+<section class="login-section auth-page"><div class="container"><div class="auth-grid"><div class="login-card auth-card">
+    <span class="card-tag">Email verification</span>
+    <h3>Verify your institution email</h3>
+    <p>Enter the six-digit code sent to {{ email }}. This confirms the institution administrator account before dashboard access.</p>
+    <form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="primary-btn full-width" type="submit">Verify email</button></form>
+    <a href="{% url 'portal:institution-admin-email-verification' %}?resend=1" class="ghost-btn small">Send a new code</a>
+    <a href="{% url 'portal:role-login' role='admin' %}" class="ghost-btn small">Back to sign in</a>
+</div></div></div></section>
+{% endblock %}

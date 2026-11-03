@@ -23,7 +23,7 @@ from django.db.models import Max, Q
 from django.utils import timezone
 
 from .models import AcademicSession, AuditLog, Course, CourseAllocationUpload, CourseResult, Curriculum, CurriculumCourse, Department, LecturerCourseRegistration, Programme, RoleAssignment, StudentCourseRegistration, User, curriculum_for_department, curriculum_for_programme
-from .services import issue_account_activation, send_account_activation_email
+from .services import issue_account_activation, provisioned_password_for, send_account_activation_email
 
 
 COURSE_CODE_RE = re.compile(r"\b([A-Z]{2,6}\s?-?\d{3,4})\b", re.I)
@@ -597,19 +597,13 @@ def import_department_lecturers(upload):
                 continue
             name_parts = name.split(maxsplit=1)
             user = User.objects.create_user(
-                username=lecturer_id, password=None, role=User.Role.LECTURER,
+                username=lecturer_id, password=provisioned_password_for(upload.institution), role=User.Role.LECTURER,
                 id_number=lecturer_id, first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
                 email=_field(row, "email"), phone_number=_field(row, "phone", "phone_number"),
                 department=upload.department, is_approved=True,
             )
-            token = issue_account_activation(user)
-            domain = settings.CORE_DOMAIN.strip()
-            if user.email and domain:
-                send_account_activation_email(
-                    user, f"https://{user.institution.subdomain}.{domain}/activate/{token}/"
-                )
             created += 1
-    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New accounts receive an activation link when an email address is available."
+    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New lecturer accounts use this institution's subdomain followed by 'educonnect' as the temporary password."
 
 
 def import_course_allocations(upload):
@@ -877,15 +871,17 @@ def execute_institution_automation(job, approver):
             skipped += 1
             continue
         name_parts = record["name"].split(maxsplit=1)
+        is_lecturer = record["role"] == User.Role.LECTURER
         user = User.objects.create_user(
             username=record["username"], email=record.get("email", ""), id_number=record.get("id_number") or None,
             first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
             department_id=record.get("department_id"), role=record["role"],
-            password=None, is_approved=True,
+            password=provisioned_password_for(job.institution) if is_lecturer else None,
+            is_approved=True,
         )
-        token = issue_account_activation(user)
         domain = settings.CORE_DOMAIN.strip()
-        if user.email and domain:
+        if not is_lecturer and user.email and domain:
+            token = issue_account_activation(user)
             send_account_activation_email(
                 user, f"https://{user.institution.subdomain}.{domain}/activate/{token}/"
             )

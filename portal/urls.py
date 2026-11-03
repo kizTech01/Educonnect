@@ -54,6 +54,7 @@ urlpatterns = [
     path("profile/", views.profile, name="profile"),
     path("profile/change-password/", views.institution_admin_change_password, name="institution-admin-change-password"),
     path("profile/password-reset/", views.send_profile_password_reset, name="profile-password-reset"),
+    path("verify-institution-admin-email/", views.institution_admin_email_verification, name="institution-admin-email-verification"),
     path("ai/", views.ai_assistant, name="ai-assistant"),
     path("ai/automation/", views.ai_automation, name="ai-automation"),
     path("screening/", views.screening_portal, name="screening-portal"),

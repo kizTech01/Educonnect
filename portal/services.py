@@ -36,6 +36,7 @@ from .models import (
     SubscriptionEvent,
     SubscriptionNotification,
     AccountActivation,
+    EmailVerificationOTP,
 )
 
 PAYSTACK_API_BASE = "https://api.paystack.co"
@@ -53,9 +54,16 @@ LECTURE_REMINDER_LEAD_MINUTES = 30
 LECTURE_REMINDER_TOLERANCE_MINUTES = 5
 REMINDER_DELIVERY_CLAIM_MINUTES = 5
 ACCOUNT_ACTIVATION_TTL = timedelta(hours=24)
+EMAIL_VERIFICATION_OTP_TTL = timedelta(minutes=15)
 FREE_TRIAL_PLAN_NAME = "Six-month free trial"
 FREE_TRIAL_DURATION_DAYS = 183
 logger = logging.getLogger(__name__)
+
+
+def provisioned_password_for(institution):
+    """Return the temporary password used for accounts provisioned by one institution."""
+    subdomain = (getattr(institution, "subdomain", "") or "").strip().lower()
+    return f"{subdomain}educonnect" if subdomain else "educonnect"
 
 
 def issue_account_activation(user):
@@ -95,6 +103,38 @@ def send_account_activation_email(user, activation_url):
         ).send(fail_silently=False) == 1
     except Exception:
         logger.warning("Unable to send account activation email for user_id=%s", user.pk)
+        return False
+
+
+def send_email_verification_otp(user):
+    """Deliver a fresh, short-lived onboarding code without persisting the code itself."""
+    if not user or not user.is_active or not user.email:
+        return False
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    EmailVerificationOTP.objects.update_or_create(
+        user=user,
+        defaults={
+            "code_hash": EmailVerificationOTP.code_hash_for(code),
+            "expires_at": timezone.now() + EMAIL_VERIFICATION_OTP_TTL,
+            "attempts": 0,
+        },
+    )
+    portal_name = getattr(user.institution, "name", "") or "EduConnect"
+    message = (
+        f"Hello {user.full_name},\n\n"
+        f"Your {portal_name} account verification code is: {code}\n\n"
+        "Enter this code after signing in with your email address and temporary password. "
+        "The code expires in 15 minutes. If you did not expect this account, contact your institution."
+    )
+    try:
+        return EmailMessage(
+            subject=f"Verify your {portal_name} account",
+            body=message,
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@educonnect.local"),
+            to=[user.email],
+        ).send(fail_silently=False) == 1
+    except Exception:
+        logger.warning("Unable to send email-verification OTP for user_id=%s", user.pk)
         return False
 
 
