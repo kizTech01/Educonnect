@@ -71,6 +71,7 @@ from .models import (
 from .services import (
     dispatch_due_course_reminders,
     ensure_default_admin_user,
+    provisioned_password_for,
     send_email_verification_otp,
 )
 from .forms import CourseForm, LecturerSignupForm, ProvisionedLecturerForm
@@ -1879,7 +1880,14 @@ class DashboardAndCourseFlowTests(TestCase):
         departmental_menu = next(item for item in sidebar_links(request) if item["label"] == "Departmental")
         self.assertEqual(
             [item["label"] for item in departmental_menu["children"]],
-            ["Payment Link and Document", "Set Fee", "Students", "Lecturers", "Assign Exam Officer"],
+            [
+                "Payment Link and Document",
+                "Practical manual",
+                "Set Fee",
+                "Students",
+                "Lecturers",
+                "Assign Exam Officer",
+            ],
         )
         self.assertIn("Timetable and Handbook", labels)
 
@@ -4223,6 +4231,10 @@ class AcademicSessionSecurityTests(TestCase):
             ])
 
 
+@override_settings(
+    BOOTSTRAP_ADMIN_USERNAME="test-bootstrap-admin",
+    BOOTSTRAP_ADMIN_PASSWORD="test-bootstrap-password",
+)
 class DefaultAdminBootstrapTests(TestCase):
     username = "test-bootstrap-admin"
     password = "test-bootstrap-password"
@@ -4337,6 +4349,23 @@ class ProvisionedAccountTests(TestCase):
             role=User.Role.ADMIN,
             institution=self.institution,
             email_verified=False,
+        )
+
+    def test_temporary_password_is_unique_to_each_institution_subdomain(self):
+        mau = Institution.objects.create(
+            name="Modibbo Adama University",
+            institution_code="MAU",
+            institution_type=Institution.Type.UNIVERSITY,
+            email="admin@mau.example",
+            subdomain="MAU",
+            status=Institution.Status.ACTIVE,
+        )
+
+        self.assertEqual(provisioned_password_for(mau), "maueduconnect")
+        self.assertEqual(provisioned_password_for(self.institution), "otp-unieduconnect")
+        self.assertNotEqual(
+            provisioned_password_for(mau),
+            provisioned_password_for(self.institution),
         )
 
     def test_institution_admin_default_password_requires_emailed_otp(self):

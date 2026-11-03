@@ -76,6 +76,16 @@ Existing Admin, Lecturer, and Student accounts are preserved. New institution ro
 
 Every institutional role has **EduConnect AI** according to its server-side role assignment. The assistant uses the user's active role (not merely any role assigned to the account), the current institution, and a small allow-list of role-relevant queries. It never provides cross-institution data or performs administrative actions. Institution Admin AI Automation has been removed.
 
+## Provisioned account passwords
+
+New institution administrators and lecturer accounts use a tenant-specific temporary password: the institution portal subdomain followed by `educonnect`. For example, an institution on the `mau` subdomain receives `maueduconnect`; an `abc-university` tenant receives `abc-universityeduconnect`. The value is normalized to lowercase. Administrators must also verify their email with an OTP before accessing the portal. Applicants and users invited through activation links set their own passwords instead of receiving a shared temporary password.
+
+The legacy shared password (`educonnect`) is accepted only once for eligible legacy administrator and lecturer accounts that have not changed it; it is immediately replaced with the tenant-specific value. Institutions should instruct users to change any temporary password promptly.
+
+## Documentation
+
+Project documentation is organized in [Software documentation](docs/SOFTWARE_DOCUMENTATION.md), with deployment, SaaS architecture, reminders, and security material linked from a single maintained index.
+
 ## Email and scale
 
 Set the SMTP environment variables in production. Lecturer announcements are delivered in private BCC batches of 100 recipients, so student addresses are never disclosed to other recipients. Class reminders continue to respect each user's email reminder preference.
