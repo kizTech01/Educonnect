@@ -29,6 +29,7 @@ from .models import (
     AuditLog,
     AIAutomationJob,
     Course,
+    CurriculumCourse,
     CourseAllocationUpload,
     CoursePayment,
     CoursePaymentGateway,
@@ -434,6 +435,40 @@ class DepartmentAutomationTests(TestCase):
         course = Course.objects.get(department=self.department, code="CSC320")
         self.assertEqual(course.credit_units, 3)
         self.assertTrue(CurriculumCourse.objects.filter(course=course).exists())
+
+    def test_handbook_automation_accepts_standard_ai_course_field_names(self):
+        session = AcademicSession.objects.filter(
+            institution=self.department.institution, is_current=True,
+        ).first()
+        if session is None:
+            session = AcademicSession.objects.create(
+                institution=self.department.institution,
+                name="2035/2036",
+                is_current=True,
+            )
+        handbook = Handbook.objects.create(
+            institution=self.department.institution,
+            department=self.department,
+            title="AI Extracted Handbook",
+            academic_session=session.name,
+            file=SimpleUploadedFile("handbook.png", b"image-bytes", content_type="image/png"),
+        )
+
+        from .automation import import_handbook_courses
+
+        with patch("portal.automation._ai_extract_image", return_value=[
+            {
+                "course_code": "CSC330",
+                "course_title": "Data Structures",
+                "level": "300",
+                "semester": "first",
+                "credit_units": "3",
+                "requirement": "compulsory",
+            },
+        ]):
+            self.assertIn("1 catalogue courses created", import_handbook_courses(handbook))
+
+        self.assertTrue(Course.objects.filter(department=self.department, code="CSC330").exists())
 
     def test_handbook_automation_rejects_an_image_without_course_records(self):
         session = AcademicSession.objects.filter(

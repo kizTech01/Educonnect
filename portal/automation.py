@@ -28,36 +28,6 @@ from .services import issue_account_activation, provisioned_password_for, send_a
 
 COURSE_CODE_RE = re.compile(r"\b([A-Z]{2,6}\s?-?\d{3,4})\b", re.I)
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
-AUTOMATION_RECORD_FIELDS = (
-    "full_name", "lecturer_id", "lecturer_name", "email", "phone_number",
-    "course_code", "course_title", "title", "level", "semester", "credit_units",
-    "requirement", "student_id", "ca", "test", "other", "other_assessment", "exam",
-    "total", "programme_code", "programme_name", "award", "duration_years", "is_active",
-)
-
-
-def _automation_output_schema():
-    """Return the strict, reusable record envelope for document extraction."""
-    return {
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        field: {"type": "string"} for field in AUTOMATION_RECORD_FIELDS
-                    },
-                    "required": list(AUTOMATION_RECORD_FIELDS),
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["items"],
-        "additionalProperties": False,
-    }
-
-
 def extract_text(uploaded_file):
     """Read an uploaded file while leaving it usable by Django storage.
 
@@ -137,20 +107,13 @@ def _ai_extract(text, task):
     if not key:
         return None
     prompt = (
-        f"Extract {task} from this university document. Return JSON in the supplied schema. "
-        "Never invent information; use empty strings for unknown fields.\n\n" + text[:60000]
+        f"Extract {task} from this university document. Return JSON only, as an array of objects. "
+        "Never invent information; use empty strings for unknown values.\n\n" + text[:60000]
     )
     body = json.dumps({
         "model": getattr(settings, "OPENAI_AUTOMATION_MODEL", "gpt-4.1-mini"),
         "input": prompt,
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "university_automation_records",
-                "strict": True,
-                "schema": _automation_output_schema(),
-            },
-        },
+        "text": {"format": {"type": "json_object"}},
     }).encode()
     return _openai_extract(body, key)
 
@@ -172,7 +135,7 @@ def _openai_extract(body, key):
                 if content.get("type") == "output_text"
             )
         parsed = json.loads(output)
-        items = parsed.get("items", []) if isinstance(parsed, dict) else parsed
+        items = parsed.get("items", parsed if isinstance(parsed, list) else [])
         return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     except Exception:
         return None
@@ -191,8 +154,8 @@ def _ai_extract_image(uploaded_file, task):
     suffix = os.path.splitext(uploaded_file.name)[1].lower()
     media_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}[suffix]
     prompt = (
-        f"Extract {task} from this scanned university document. Return JSON in the supplied schema. "
-        "Never invent information; use empty strings for unknown fields."
+        f"Extract {task} from this scanned university document. Return JSON only, as an array of objects. "
+        "Never invent information; use empty strings for unknown values."
     )
     body = json.dumps({
         "model": getattr(settings, "OPENAI_AUTOMATION_MODEL", "gpt-4.1-mini"),
@@ -200,14 +163,7 @@ def _ai_extract_image(uploaded_file, task):
             {"type": "input_text", "text": prompt},
             {"type": "input_image", "image_url": f"data:{media_type};base64,{base64.b64encode(data).decode()}"},
         ]}],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "university_automation_records",
-                "strict": True,
-                "schema": _automation_output_schema(),
-            },
-        },
+        "text": {"format": {"type": "json_object"}},
     }).encode()
     return _openai_extract(body, key)
 
@@ -253,6 +209,15 @@ def handbook_course_records(handbook):
     return course_records(extract_text(handbook.file))
 
 
+def _course_record_value(record, *names):
+    """Read equivalent course fields returned by document and vision extraction."""
+    for name in names:
+        value = record.get(name)
+        if str(value or "").strip():
+            return value
+    return ""
+
+
 def _credit_units(value, default=2):
     """Normalise numeric and human-readable credit-unit values safely."""
     match = re.search(r"\d+", str(value or ""))
@@ -265,8 +230,8 @@ def import_handbook_courses(handbook):
     valid_records = [
         record for record in records
         if isinstance(record, dict)
-        and re.sub(r"[^A-Z0-9]", "", str(record.get("code", "")).upper())
-        and str(record.get("title", "")).strip()
+        and re.sub(r"[^A-Z0-9]", "", str(_course_record_value(record, "code", "course_code")).upper())
+        and str(_course_record_value(record, "title", "course_title")).strip()
     ]
     if not valid_records:
         raise ValueError("No valid course records were found in the handbook. Check the course code and title data.")
@@ -304,8 +269,8 @@ def import_handbook_courses(handbook):
             version=latest_version + 1,
         )
         for record in valid_records:
-            code = re.sub(r"[^A-Z0-9]", "", str(record.get("code", "")).upper())[:20]
-            title = str(record.get("title", "")).strip()[:200]
+            code = re.sub(r"[^A-Z0-9]", "", str(_course_record_value(record, "code", "course_code")).upper())[:20]
+            title = str(_course_record_value(record, "title", "course_title")).strip()[:200]
             # The catalogue identity is the safely normalised course code in
             # this department/institution, never a handbook version or a
             # programme.  This is what prevents one CSC201 row per programme.
