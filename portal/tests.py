@@ -69,7 +69,7 @@ from .models import (
     reset_current_institution,
 )
 from .services import dispatch_due_course_reminders, ensure_default_admin_user, send_email_verification_otp
-from .forms import CourseForm, ProvisionedLecturerForm
+from .forms import CourseForm, LecturerSignupForm, ProvisionedLecturerForm
 from .views import (
     AI_ROLE_EXAMPLES,
     _ai_answer,
@@ -4409,3 +4409,30 @@ class ProvisionedAccountTests(TestCase):
         self.assertEqual(lecturer.username, "LEC-MANUAL-1")
         self.assertTrue(lecturer.check_password("otp-unieduconnect"))
         self.assertFalse(lecturer.is_approved)
+
+    def test_lecturer_signup_uses_the_lecturer_id_as_username(self):
+        faculty = Faculty.objects.create(institution=self.institution, name="Arts", code="ART")
+        department = Department.objects.create(
+            institution=self.institution, faculty=faculty, name="History", code="HIS",
+        )
+        form = LecturerSignupForm(
+            data={
+                "first_name": "Chinua",
+                "last_name": "Lecturer",
+                "email": "chinua@otp.example",
+                "id_number": "LEC-SIGNUP-1",
+                "faculty": faculty.pk,
+                "department": department.pk,
+                "phone_number": "08000000001",
+                "password1": "lecturer-password-123",
+                "password2": "lecturer-password-123",
+                "accept_terms": "on",
+            },
+            institution=self.institution,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        lecturer = form.save()
+
+        self.assertEqual(lecturer.username, "LEC-SIGNUP-1")
+        self.assertTrue(lecturer.check_password("lecturer-password-123"))

@@ -1409,7 +1409,6 @@ class LecturerSignupForm(RequiredProfileFieldsMixin, LecturerUserForm):
         label="I agree to the EduConnect Terms & Conditions and acknowledge the Privacy Policy.",
     )
     required_fields = (
-        "username",
         "first_name",
         "last_name",
         "email",
@@ -1417,6 +1416,19 @@ class LecturerSignupForm(RequiredProfileFieldsMixin, LecturerUserForm):
         "department",
         "phone_number",
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["username"].required = False
+        self.fields["username"].widget = forms.HiddenInput()
+
+    def clean(self):
+        cleaned_data = super().clean()
+        lecturer_id = cleaned_data.get("id_number")
+        if lecturer_id:
+            cleaned_data["username"] = lecturer_id
+            self.instance.username = lecturer_id
+        return cleaned_data
 
 
 class DepartmentPaymentGatewayForm(StyledModelForm):
