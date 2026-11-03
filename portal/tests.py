@@ -332,6 +332,29 @@ class DepartmentAutomationTests(TestCase):
         self.assertEqual(created_course.level, "400")
         self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=co_lecturer, course=created_course).exists())
 
+    def test_ai_lecturer_extraction_creates_departmental_accounts(self):
+        lecturer_upload = DepartmentLecturerUpload.objects.create(
+            department=self.department,
+            file=SimpleUploadedFile(
+                "lecturers.txt", b"Unstructured departmental staff document",
+                content_type="text/plain",
+            ),
+        )
+
+        with patch("portal.automation._ai_extract", return_value=[
+            {
+                "lecturer_id": "LEC-CS-AI-001",
+                "full_name": "Ada Lovelace",
+                "email": "ada@example.test",
+                "phone_number": "08030000001",
+            },
+        ]):
+            self.assertIn("1 accounts created", import_department_lecturers(lecturer_upload))
+
+        lecturer = User.objects.get(username="LEC-CS-AI-001")
+        self.assertEqual(lecturer.role, User.Role.LECTURER)
+        self.assertEqual(lecturer.department, self.department)
+
     def test_allocation_upload_accepts_an_exact_unique_lecturer_name(self):
         lecturer = User.objects.create_user(
             username="LEC-CS-NAME",

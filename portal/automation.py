@@ -421,7 +421,34 @@ def _records_from_upload(upload, task):
         usable_rows = [row for row in local_rows if _field(row, "lecturer_id", "staff_id", "id") and _field(row, "full_name", "lecturer_name", "name")]
     else:
         usable_rows = _course_allocation_records(text)
-    return usable_rows or _ai_extract(text, task) or local_rows
+    # Let AI read every supported text document when it is configured, including
+    # ordinary CSV, Word and spreadsheet uploads.  Structured source rows remain
+    # authoritative and are merged in so a partial AI response cannot omit a
+    # lecturer or a course allocation from an otherwise valid source document.
+    ai_rows = _ai_extract(text, task) or []
+    if "lecturers with" in task:
+        usable_ai_rows = [
+            row for row in ai_rows
+            if _field(row, "lecturer_id", "staff_id", "id")
+            and _field(row, "full_name", "lecturer_name", "name")
+        ]
+        record_key = lambda row: _allocation_key(_field(row, "lecturer_id", "staff_id", "id"))
+    else:
+        usable_ai_rows = [
+            row for row in ai_rows
+            if _field(row, "course_code", "course", "code")
+            and _field(row, "lecturer_id", "staff_id", "lecturer_name", "full_name", "name")
+        ]
+        record_key = lambda row: (
+            _allocation_key(_field(row, "lecturer_id", "staff_id", "lecturer_name", "full_name", "name")),
+            _allocation_key(_field(row, "course_code", "course", "code")),
+        )
+    if not usable_rows:
+        return usable_ai_rows or local_rows
+    merged = {record_key(row): row for row in usable_rows}
+    for row in usable_ai_rows:
+        merged.setdefault(record_key(row), row)
+    return list(merged.values())
 
 
 def _programme_records(uploaded_file):
