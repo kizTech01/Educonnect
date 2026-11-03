@@ -46,7 +46,6 @@ from .models import (
     DepartmentalPayment,
     DepartmentalPaymentDocument,
     DepartmentalPaymentItem,
-    EmailVerificationOTP,
     Handbook,
     InstitutionProfile,
     Institution,
@@ -72,7 +71,6 @@ from .services import (
     dispatch_due_course_reminders,
     ensure_default_admin_user,
     provisioned_password_for,
-    send_email_verification_otp,
 )
 from .forms import CourseForm, LecturerSignupForm, ProvisionedLecturerForm
 from .views import (
@@ -4368,39 +4366,34 @@ class ProvisionedAccountTests(TestCase):
             provisioned_password_for(self.institution),
         )
 
-    def test_institution_admin_default_password_requires_emailed_otp(self):
+    def test_institution_admin_can_sign_in_with_the_default_password_without_an_email_otp(self):
         self.assertTrue(self.admin.check_password("otp-unieduconnect"))
-        self.assertTrue(send_email_verification_otp(self.admin))
-        self.assertEqual(len(mail.outbox), 1)
 
         response = self.client.post(
             reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
             {"role": User.Role.ADMIN, "username": self.admin.email, "password": "otp-unieduconnect"},
         )
-        self.assertRedirects(response, reverse("portal:institution-admin-email-verification"))
-        self.assertIsNone(self.client.session.get("_auth_user_id"))
-
-        import re
-        code = re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1)
-        response = self.client.post(
-            reverse("portal:institution-admin-email-verification"), {"otp": code},
-        )
-        # This isolated account fixture intentionally has no subscription;
-        # the redirect itself is the successful verification outcome and the
-        # tenant-access middleware then sends it to billing.
         self.assertRedirects(
             response,
             reverse("portal:dashboard"),
             fetch_redirect_response=False,
         )
-        self.admin.refresh_from_db()
-        self.assertTrue(self.admin.email_verified)
-        self.assertFalse(EmailVerificationOTP.objects.filter(user=self.admin).exists())
+        self.assertEqual(self.client.session.get("_auth_user_id"), str(self.admin.pk))
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_temporary_password_change_sends_an_email_otp_only_after_request(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.post(reverse("portal:profile-password-reset"))
+
+        self.assertRedirects(response, reverse("portal:password-reset"))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.admin.email])
+        self.assertIn("verification code", mail.outbox[0].body)
 
     def test_legacy_institution_admin_password_upgrades_to_the_portal_subdomain_password(self):
         self.admin.set_password("educonnect")
-        self.admin.email_verified = True
-        self.admin.save(update_fields=["password", "email_verified"])
+        self.admin.save(update_fields=["password"])
 
         response = self.client.post(
             reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
@@ -4411,11 +4404,12 @@ class ProvisionedAccountTests(TestCase):
             },
         )
 
-        self.assertRedirects(response, reverse("portal:institution-admin-email-verification"))
+        self.assertRedirects(response, reverse("portal:dashboard"), fetch_redirect_response=False)
         self.admin.refresh_from_db()
         self.assertTrue(self.admin.check_password("otp-unieduconnect"))
         self.assertFalse(self.admin.check_password("educonnect"))
         self.assertFalse(self.admin.email_verified)
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_department_lecturer_import_uses_the_temporary_password(self):
         faculty = Faculty.objects.create(institution=self.institution, name="Science", code="SCI")

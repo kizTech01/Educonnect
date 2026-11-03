@@ -770,7 +770,7 @@ class ScreeningIntegrationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Select a valid choice")
 
-    def test_creating_an_institution_requires_a_unique_activation_link_for_its_admin(self):
+    def test_creating_an_institution_provisions_an_admin_without_sending_an_otp(self):
         self.client.force_login(self.super_admin)
 
         response = self.client.post(
@@ -796,6 +796,7 @@ class ScreeningIntegrationTests(TestCase):
         self.assertTrue(administrator.check_password("coastaleduconnect"))
         self.assertFalse(administrator.email_verified)
         self.assertFalse(AccountActivation.objects.filter(user=administrator).exists())
+        self.assertEqual(len(mail.outbox), 0)
         self.assertEqual(Path(institution.logo.name).suffix, ".png")
         trial = institution.current_subscription
         self.assertEqual(trial.status, Subscription.Status.TRIAL)

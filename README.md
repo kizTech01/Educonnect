@@ -78,7 +78,7 @@ Every institutional role has **EduConnect AI** according to its server-side role
 
 ## Provisioned account passwords
 
-New institution administrators and lecturer accounts use a tenant-specific temporary password: the institution portal subdomain followed by `educonnect`. For example, an institution on the `mau` subdomain receives `maueduconnect`; an `abc-university` tenant receives `abc-universityeduconnect`. The value is normalized to lowercase. Administrators must also verify their email with an OTP before accessing the portal. Applicants and users invited through activation links set their own passwords instead of receiving a shared temporary password.
+New institution administrators and lecturer accounts use a tenant-specific temporary password: the institution portal subdomain followed by `educonnect`. For example, an institution on the `mau` subdomain receives `maueduconnect`; an `abc-university` tenant receives `abc-universityeduconnect`. The value is normalized to lowercase. Administrators can sign in directly with this temporary password; EduConnect emails a verification code only after they choose to replace it. Applicants and users invited through activation links set their own passwords instead of receiving a shared temporary password.
 
 The legacy shared password (`educonnect`) is accepted only once for eligible legacy administrator and lecturer accounts that have not changed it; it is immediately replaced with the tenant-specific value. Institutions should instruct users to change any temporary password promptly.
 

@@ -105,7 +105,6 @@ from .forms import (
     UserPasswordResetForm,
     PasswordResetOTPRequestForm,
     PasswordResetOTPConfirmForm,
-    EmailOTPVerificationForm,
     GlobalPolicyForm,
 )
 from .models import (
@@ -166,7 +165,6 @@ from .models import (
     GlobalPolicy,
     PolicyAcceptance,
     AccountActivation,
-    EmailVerificationOTP,
     LoginThrottle,
     ScreeningRequestReplay,
     TimeStampedModel,
@@ -188,7 +186,6 @@ from .services import (
     verify_and_finalize_subscription_payment,
     issue_account_activation,
     send_account_activation_email,
-    send_email_verification_otp,
     provisioned_password_for,
     upgrade_legacy_provisioned_password,
 )
@@ -2150,19 +2147,6 @@ def portal_login(request, role=None):
         messages.warning(request, "Your lecturer account is waiting for admin approval.")
         return redirect("portal:home")
 
-    if active_role == User.Role.ADMIN and not user.email_verified:
-        # Password authentication succeeds first, then the institution
-        # administrator proves control of the account email before a session
-        # is created. The pending identity is server-side session state only.
-        request.session["pending_admin_email_verification_user_id"] = user.pk
-        request.session["pending_admin_email_verification_active_role"] = active_role
-        request.session.modified = True
-        if send_email_verification_otp(user):
-            messages.info(request, "A six-digit verification code has been sent to your account email.")
-        else:
-            messages.error(request, "We could not send a verification code. Confirm the configured email service and try again.")
-        return redirect("portal:institution-admin-email-verification")
-
     _clear_failed_logins(request, username)
     login(request, user)
     # HOD is an additive responsibility of a lecturer account.  Retain the
@@ -2486,7 +2470,6 @@ def super_admin_institutions(request):
                     institution=institution,
                     email_verified=False,
                 )
-                verification_sent = send_email_verification_otp(admin)
                 free_trial, _ = grant_free_trial_subscription(institution)
                 AuditLog.objects.create(
                     user=request.user,
@@ -2501,12 +2484,10 @@ def super_admin_institutions(request):
                 )
             messages.success(
                 request,
-                f"{institution.name} has been created. The administrator can sign in with their institution email and the temporary password based on the institution subdomain, then enter the OTP sent to that email. "
+                f"{institution.name} has been created. The administrator can sign in with their institution email and the temporary password based on the institution subdomain. "
                 f"A six-month free trial is active until {free_trial.end_date:%d %B %Y}. "
                 f"Portal: https://{institution.subdomain}.{settings.PLATFORM_BASE_DOMAIN}",
             )
-            if not verification_sent:
-                messages.warning(request, "The account was created but its email OTP could not be sent. Confirm the email settings; the administrator can request a new code after signing in.")
             return redirect("portal:super-admin-institutions")
     return render(request, "portal/super_admin_institutions.html", {
         "institutions": institution_overview_queryset(),
@@ -3453,7 +3434,10 @@ def profile(request):
     form = form_class(instance=request.user)
     password_form = (
         InstitutionAdminPasswordChangeForm(request.user)
-        if request.user.role == User.Role.ADMIN
+        if (
+            request.user.role == User.Role.ADMIN
+            and not request.user.check_password(provisioned_password_for(request.user.institution))
+        )
         else None
     )
     if request.method == "POST":
@@ -3508,6 +3492,10 @@ def profile(request):
             browser_alerts_enabled=request.user.browser_alerts_enabled,
             profile_can_receive_alerts=request.user.has_role(User.Role.STUDENT, User.Role.LECTURER),
             profile_is_institution_admin=request.user.role == User.Role.ADMIN,
+            profile_uses_temporary_password=(
+                request.user.role == User.Role.ADMIN
+                and request.user.check_password(provisioned_password_for(request.user.institution))
+            ),
         ),
     )
 
@@ -3515,9 +3503,16 @@ def profile(request):
 @role_required(User.Role.ADMIN)
 @require_http_methods(["POST"])
 def institution_admin_change_password(request):
-    """Allow a signed-in institution administrator to replace their password."""
+    """Require email verification before replacing a provisioned password."""
     if not request.user.institution_id:
         raise PermissionDenied
+
+    if request.user.check_password(provisioned_password_for(request.user.institution)):
+        if _send_password_reset_verification(request, request.user):
+            messages.success(request, f"A password reset verification code has been sent to {request.user.email}.")
+            return redirect("portal:password-reset")
+        messages.error(request, "We could not send the password reset email right now.")
+        return redirect("portal:profile")
 
     form = InstitutionAdminPasswordChangeForm(request.user, request.POST)
     if form.is_valid():
@@ -3560,71 +3555,6 @@ def _send_account_activation(request, user):
         reverse("portal:account-activate", args=[token])
     )
     return send_account_activation_email(user, activation_url)
-
-
-@never_cache
-@require_http_methods(["GET", "POST"])
-def institution_admin_email_verification(request):
-    """Complete the OTP step required before a provisioned admin gets a session."""
-    user_id = request.session.get("pending_admin_email_verification_user_id")
-    active_role = request.session.get("pending_admin_email_verification_active_role")
-    user = User.all_objects.filter(
-        pk=user_id,
-        role=User.Role.ADMIN,
-        is_active=True,
-    ).first()
-    if not user or active_role != User.Role.ADMIN:
-        request.session.pop("pending_admin_email_verification_user_id", None)
-        request.session.pop("pending_admin_email_verification_active_role", None)
-        messages.error(request, "Sign in again before verifying your email.")
-        return redirect("portal:role-login", role=User.Role.ADMIN)
-
-    if request.method == "GET" and request.GET.get("resend"):
-        if send_email_verification_otp(user):
-            messages.info(request, "A fresh verification code has been sent to your email.")
-        else:
-            messages.error(request, "We could not send a verification code. Please try again shortly.")
-        return redirect("portal:institution-admin-email-verification")
-
-    form = EmailOTPVerificationForm(request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        with transaction.atomic():
-            verification = EmailVerificationOTP.objects.select_for_update().filter(
-                user=user,
-                expires_at__gt=timezone.now(),
-            ).first()
-            if verification is None:
-                form.add_error("otp", "This verification code has expired. Request a new code.")
-            elif verification.attempts >= PASSWORD_RESET_OTP_MAX_ATTEMPTS:
-                verification.delete()
-                form.add_error("otp", "Too many invalid codes. Request a new code.")
-            elif not constant_time_compare(
-                EmailVerificationOTP.code_hash_for(form.cleaned_data["otp"]),
-                verification.code_hash,
-            ):
-                verification.attempts = F("attempts") + 1
-                verification.save(update_fields=["attempts"])
-                form.add_error("otp", "That verification code is incorrect.")
-            else:
-                User.all_objects.filter(pk=user.pk).update(email_verified=True)
-                verification.delete()
-                user.email_verified = True
-                request.session.pop("pending_admin_email_verification_user_id", None)
-                request.session.pop("pending_admin_email_verification_active_role", None)
-                login(request, user)
-                request.session["active_role"] = User.Role.ADMIN
-                AuditLog.objects.create(
-                    institution=user.institution,
-                    user=user,
-                    action="institution_admin_email_verified",
-                    object_type="User",
-                    object_id=str(user.pk),
-                    description="Institution administrator verified their email with an OTP.",
-                    ip_address=_client_ip(request),
-                )
-                messages.success(request, "Email verified. Welcome to your institution dashboard.")
-                return redirect("portal:dashboard")
-    return render(request, "portal/institution_admin_email_verification.html", {"form": form, "email": user.email})
 
 
 @never_cache

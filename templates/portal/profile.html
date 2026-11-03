@@ -41,7 +41,7 @@
     <div class="panel-head">
         <h2>Change Password</h2>
     </div>
-    {% if profile_is_institution_admin %}
+    {% if profile_is_institution_admin and not profile_uses_temporary_password %}
         <p class="muted-note">Choose a new password for your institution administrator account.</p>
         <form method="post" action="{% url 'portal:institution-admin-change-password' %}" class="stack-form">
             {% csrf_token %}
@@ -49,10 +49,10 @@
             <button type="submit" class="primary-btn">Update Password</button>
         </form>
     {% else %}
-        <p class="muted-note">We will verify the request through your email before your password can be changed.</p>
+        <p class="muted-note">We will verify the request through your email before your temporary password can be changed.</p>
         <form method="post" action="{% url 'portal:profile-password-reset' %}">
             {% csrf_token %}
-            <button type="submit" class="ghost-btn">Send Password Reset Code</button>
+            <button type="submit" class="ghost-btn">Verify Email and Change Password</button>
         </form>
     {% endif %}
 </section>

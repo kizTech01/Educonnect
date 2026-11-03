@@ -33,7 +33,7 @@ Document every role, its permissions, approval steps, and tenant boundary. Inclu
 
 1. Institution is created and its administrator is provisioned.
 2. A temporary password is generated as `<lowercase-subdomain>educonnect` (for example, `maueduconnect`).
-3. The administrator completes email OTP verification before using the dashboard.
+3. The administrator can use the dashboard immediately; an email OTP is sent only when they choose to replace the temporary password.
 4. Lecturer accounts created by institution workflows use the same tenant-specific temporary-password policy.
 5. Self-service applicants and activation-link users set their own password; they do not share a tenant password.
 6. Password reset, account activation, approval, suspension, and deactivation are recorded in the audit trail.
