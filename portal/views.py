@@ -190,6 +190,7 @@ from .services import (
     send_account_activation_email,
     send_email_verification_otp,
     provisioned_password_for,
+    upgrade_legacy_provisioned_password,
 )
 from .pdf import build_exam_card_pdf, build_pdf_document
 from .automation import (
@@ -2107,6 +2108,17 @@ def portal_login(request, role=None):
         username=username,
         password=password,
     )
+
+    # Older provisioned accounts used the global ``educonnect`` temporary
+    # password.  Let their owner use the current portal-subdomain password
+    # once, then replace the legacy hash immediately.
+    if not user and active_role in {User.Role.ADMIN, User.Role.LECTURER}:
+        legacy_user = User.all_objects.filter(
+            username__iexact=username,
+            is_active=True,
+        ).first()
+        if upgrade_legacy_provisioned_password(legacy_user, password):
+            user = legacy_user
 
     if not user:
         _record_failed_login(request, username)

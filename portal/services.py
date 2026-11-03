@@ -55,6 +55,7 @@ LECTURE_REMINDER_TOLERANCE_MINUTES = 5
 REMINDER_DELIVERY_CLAIM_MINUTES = 5
 ACCOUNT_ACTIVATION_TTL = timedelta(hours=24)
 EMAIL_VERIFICATION_OTP_TTL = timedelta(minutes=15)
+LEGACY_PROVISIONED_PASSWORD = "educonnect"
 FREE_TRIAL_PLAN_NAME = "Six-month free trial"
 FREE_TRIAL_DURATION_DAYS = 183
 logger = logging.getLogger(__name__)
@@ -64,6 +65,33 @@ def provisioned_password_for(institution):
     """Return the temporary password used for accounts provisioned by one institution."""
     subdomain = (getattr(institution, "subdomain", "") or "").strip().lower()
     return f"{subdomain}educonnect" if subdomain else "educonnect"
+
+
+def upgrade_legacy_provisioned_password(user, supplied_password):
+    """Accept the current portal password once for accounts provisioned before it changed.
+
+    Only accounts that still have the former temporary password are eligible.
+    A successful upgrade replaces that legacy password immediately; it is not a
+    second persistent password or a general fallback authentication path.
+    """
+    if not user or user.role not in {User.Role.ADMIN, User.Role.LECTURER}:
+        return False
+    current_password = provisioned_password_for(user.institution)
+    if (
+        current_password == LEGACY_PROVISIONED_PASSWORD
+        or supplied_password != current_password
+        or not user.check_password(LEGACY_PROVISIONED_PASSWORD)
+    ):
+        return False
+    user.set_password(current_password)
+    update_fields = ["password"]
+    if user.role == User.Role.ADMIN:
+        # The administrator must confirm control of the account email again
+        # before the newly upgraded temporary password yields a dashboard.
+        user.email_verified = False
+        update_fields.append("email_verified")
+    user.save(update_fields=update_fields)
+    return True
 
 
 def issue_account_activation(user):

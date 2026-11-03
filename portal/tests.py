@@ -68,7 +68,11 @@ from .models import (
     set_current_institution,
     reset_current_institution,
 )
-from .services import dispatch_due_course_reminders, ensure_default_admin_user, send_email_verification_otp
+from .services import (
+    dispatch_due_course_reminders,
+    ensure_default_admin_user,
+    send_email_verification_otp,
+)
 from .forms import CourseForm, LecturerSignupForm, ProvisionedLecturerForm
 from .views import (
     AI_ROLE_EXAMPLES,
@@ -4363,6 +4367,26 @@ class ProvisionedAccountTests(TestCase):
         self.admin.refresh_from_db()
         self.assertTrue(self.admin.email_verified)
         self.assertFalse(EmailVerificationOTP.objects.filter(user=self.admin).exists())
+
+    def test_legacy_institution_admin_password_upgrades_to_the_portal_subdomain_password(self):
+        self.admin.set_password("educonnect")
+        self.admin.email_verified = True
+        self.admin.save(update_fields=["password", "email_verified"])
+
+        response = self.client.post(
+            reverse("portal:role-login", kwargs={"role": User.Role.ADMIN}),
+            {
+                "role": User.Role.ADMIN,
+                "username": self.admin.email,
+                "password": "otp-unieduconnect",
+            },
+        )
+
+        self.assertRedirects(response, reverse("portal:institution-admin-email-verification"))
+        self.admin.refresh_from_db()
+        self.assertTrue(self.admin.check_password("otp-unieduconnect"))
+        self.assertFalse(self.admin.check_password("educonnect"))
+        self.assertFalse(self.admin.email_verified)
 
     def test_department_lecturer_import_uses_the_temporary_password(self):
         faculty = Faculty.objects.create(institution=self.institution, name="Science", code="SCI")
