@@ -28,6 +28,7 @@ from .models import (
     AcademicSession,
     AuditLog,
     AIAutomationJob,
+    AccountActivation,
     Course,
     CurriculumCourse,
     CourseAllocationUpload,
@@ -275,8 +276,33 @@ class InstitutionalRBACTests(TestCase):
         self.assertRedirects(response, reverse("portal:ai-automation"))
         job = AIAutomationJob.objects.get()
         self.assertEqual(job.status, AIAutomationJob.Status.EXECUTED)
-        self.assertTrue(User.objects.filter(username="LEC-001", role=User.Role.LECTURER).exists())
+        lecturer = User.objects.get(username="LEC-001", role=User.Role.LECTURER)
+        self.assertFalse(lecturer.has_usable_password())
+        self.assertTrue(AccountActivation.objects.filter(user=lecturer, consumed_at__isnull=True).exists())
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("/activate/", mail.outbox[0].body)
         self.assertTrue(AuditLog.objects.filter(action="ai_automation_executed", object_id=str(job.id)).exists())
+
+    def test_ai_automation_rejects_account_rows_without_email(self):
+        administrator = User.objects.create_user(
+            username="automation-admin-no-email", password="pass1234", role=User.Role.ADMIN,
+        )
+        self.client.force_login(administrator)
+        upload = SimpleUploadedFile(
+            "lecturers.csv",
+            b"name,lecturer_id,department_code\nAda Lovelace,LEC-002,SEC\n",
+            content_type="text/csv",
+        )
+
+        response = self.client.post(
+            reverse("portal:ai-automation"),
+            {"action": "run", "file": upload, "command": "Create lecturer accounts from this file"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Name, email, and a username or ID are required")
+        self.assertFalse(User.objects.filter(username="LEC-002").exists())
+        self.assertFalse(AIAutomationJob.objects.exists())
 
 class DepartmentAutomationTests(TestCase):
     def setUp(self):

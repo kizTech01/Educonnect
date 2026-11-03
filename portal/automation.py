@@ -870,7 +870,7 @@ def import_course_results(uploaded_file, *, course, session, semester, lecturer,
     return f"Result import finished: {created} drafts created, {updated} drafts updated, {protected} locked result(s) left unchanged, {skipped} row(s) skipped."
 
 
-def analyze_institution_automation(upload, command):
+def analyze_institution_automation(upload, command, institution):
     """Produce a non-mutating account-import proposal from a supplied file.
 
     This is intentionally deterministic at the execution boundary: AI/document
@@ -899,14 +899,20 @@ def analyze_institution_automation(upload, command):
         department_code = _field(row, "department", "department_code")
         username = _field(row, "username") or staff_id or email
         key = (email.casefold() or username.casefold())
-        if not name or not username:
-            errors.append({"row": row_number, "error": "Name and a username, ID, or email are required."})
+        if not name or not username or not email:
+            errors.append({
+                "row": row_number,
+                "error": "Name, email, and a username or ID are required so the account owner can activate the account.",
+            })
             continue
         if key in seen or User.all_objects.filter(username__iexact=username).exists() or (email and User.all_objects.filter(email__iexact=email).exists()):
             duplicates.append({"row": row_number, "identifier": email or username})
             continue
         seen.add(key)
-        department = Department.objects.filter(code__iexact=department_code).first() if department_code else None
+        department = (
+            Department.all_objects.filter(institution=institution, code__iexact=department_code).first()
+            if department_code else None
+        )
         if department_code and not department:
             errors.append({"row": row_number, "error": f"Department '{department_code}' does not exist in this institution."})
             continue
@@ -923,7 +929,7 @@ def analyze_institution_automation(upload, command):
 
 
 @transaction.atomic
-def execute_institution_automation(job, approver):
+def execute_institution_automation(job, approver, activation_url_builder=None):
     """Execute exactly one reviewed proposal, once, under a transaction."""
     if job.status == job.Status.EXECUTED:
         return job.execution_summary
@@ -937,20 +943,23 @@ def execute_institution_automation(job, approver):
             skipped += 1
             continue
         name_parts = record["name"].split(maxsplit=1)
-        is_lecturer = record["role"] == User.Role.LECTURER
         user = User.objects.create_user(
             username=record["username"], email=record.get("email", ""), id_number=record.get("id_number") or None,
             first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
             department_id=record.get("department_id"), role=record["role"],
-            password=provisioned_password_for(job.institution) if is_lecturer else None,
+            password=None,
             is_approved=True,
         )
-        domain = settings.CORE_DOMAIN.strip()
-        if not is_lecturer and user.email and domain:
-            token = issue_account_activation(user)
-            send_account_activation_email(
-                user, f"https://{user.institution.subdomain}.{domain}/activate/{token}/"
-            )
+        token = issue_account_activation(user)
+        if activation_url_builder is not None:
+            activation_url = activation_url_builder(token)
+        else:
+            domain = settings.CORE_DOMAIN.strip()
+            if not domain:
+                raise ValueError("CORE_DOMAIN must be configured before account automation can send activation links.")
+            activation_url = f"https://{user.institution.subdomain}.{domain}/activate/{token}/"
+        if not send_account_activation_email(user, activation_url):
+            raise ValueError(f"The activation email for '{user.email}' could not be delivered. No accounts were created.")
         RoleAssignment.objects.get_or_create(
             institution=job.institution, user=user, role=record["role"], department_id=record.get("department_id"),
             defaults={"assigned_by": approver},

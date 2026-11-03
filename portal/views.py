@@ -3116,7 +3116,7 @@ def ai_automation(request):
                 upload = form.cleaned_data["file"]
                 command = form.cleaned_data["command"]
                 try:
-                    proposal = analyze_institution_automation(upload, command)
+                    proposal = analyze_institution_automation(upload, command, request.institution)
                 except (ValueError, ValidationError) as exc:
                     form.add_error(None, str(exc))
                 else:
@@ -3147,7 +3147,13 @@ def ai_automation(request):
                         ip_address=_client_ip(request),
                     )
                     try:
-                        summary = execute_institution_automation(job, request.user)
+                        summary = execute_institution_automation(
+                            job,
+                            request.user,
+                            activation_url_builder=lambda token: request.build_absolute_uri(
+                                reverse("portal:account-activate", args=[token])
+                            ),
+                        )
                     except ValueError as exc:
                         form.add_error(None, str(exc))
                     else:

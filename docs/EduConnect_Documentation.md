@@ -129,7 +129,7 @@ Legacy accounts with the old `educonnect` temporary password can use the new der
 
 There are two implemented mechanisms:
 
-- `AccountActivation` creates a token-hash-backed, one-time password-set link lasting 24 hours. It is used for activation/reset situations such as screening-created students and admin-initiated user password reset ([`portal/services.py`](../portal/services.py), [`portal/views.py`](../portal/views.py)).
+- `AccountActivation` creates a token-hash-backed, one-time password-set link lasting 24 hours. It is used for activation/reset situations such as screening-created students, reviewed account-import automation, and admin-initiated user password reset ([`portal/services.py`](../portal/services.py), [`portal/views.py`](../portal/views.py)).
 - Password reset sends a six-digit email OTP, stores only an HMAC digest in the browser session, expires after 15 minutes, and allows five failed code attempts before reset is required. Unknown-email responses remain neutral ([`portal/views.py`](../portal/views.py)).
 
 `EmailVerificationOTP` and `send_email_verification_otp` exist and issue a 15-minute code, but no URL route or view consumes the record or prevents administrator login based on `email_verified`. Therefore, **administrator sign-in OTP verification is not implemented end to end** ([`portal/models.py`](../portal/models.py), [`portal/services.py`](../portal/services.py), [`portal/urls.py`](../portal/urls.py)).
