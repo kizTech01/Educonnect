@@ -1420,6 +1420,47 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
             paystack_secret_key="sk_test_subscription",
             is_active=True,
         )
+        self.duration = SubscriptionPlanDuration.objects.create(
+            plan=self.plan,
+            duration_days=365,
+            price=self.plan.price,
+        )
+
+    @patch("portal.services.initialize_paystack_transaction")
+    def test_subscription_checkout_falls_back_to_browser_when_server_cannot_reach_paystack(
+        self, initialize_paystack_transaction
+    ):
+        initialize_paystack_transaction.side_effect = ValueError(
+            "Unable to reach Paystack right now. Please try again shortly."
+        )
+        administrator = User.objects.create_user(
+            username="billing-admin",
+            email="billing-admin@example.test",
+            password="safe-password-123",
+            role=User.Role.ADMIN,
+            institution=self.institution,
+            is_approved=True,
+        )
+        self.client.force_login(administrator)
+
+        with override_settings(
+            CORE_DOMAIN="example.test",
+            PLATFORM_BASE_DOMAIN="example.test",
+            ALLOWED_HOSTS=["billing.example.test"],
+        ):
+            response = self.client.post(
+                reverse("portal:billing-renew"),
+                {"plan": self.plan.pk, "plan_duration": self.duration.pk},
+                HTTP_HOST="billing.example.test",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Open Paystack")
+        self.assertContains(response, "pk_test_subscription")
+        self.assertContains(response, "Renew Institution Subscription")
+        self.assertContains(response, "SUB-")
+        payment = Payment.objects.filter(institution=self.institution).latest("created_at")
+        self.assertEqual(payment.status, Payment.Status.PENDING)
 
     def webhook_response(self, secret):
         body = json.dumps({

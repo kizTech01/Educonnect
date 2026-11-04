@@ -325,8 +325,8 @@ def create_subscription_payment(*, institution, plan_duration, email, callback_u
             callback_url=callback_url,
             metadata={"kind": "subscription", "institution_id": institution.id, "payment_id": payment.id},
         )
-    except Exception:
-        # Keep the auditable pending attempt, but do not imply checkout started.
+    except ValueError as exc:
+        exc.payment = payment
         raise
     return payment, transaction_data
 

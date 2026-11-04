@@ -14,13 +14,14 @@
 
     <div class="detail-grid">
         <p><strong>{{ checkout_label }}:</strong> {{ checkout_value }}</p>
-        <p><strong>Reference:</strong> {{ payment.paystack_reference }}</p>
+        <p><strong>Reference:</strong> {{ checkout_reference }}</p>
         <p><strong>Amount:</strong> {{ checkout_amount_display }}</p>
     </div>
 
     <div class="reader-body">
         <p class="muted-note">Paystack will open directly in your browser. If it does not appear automatically, use the button below.</p>
         <button type="button" class="primary-btn" id="open-paystack">Open Paystack</button>
+        <p class="muted-note" id="paystack-status" role="status" aria-live="polite"></p>
         <a href="{{ checkout_cancel_url }}" class="ghost-btn small">Cancel</a>
     </div>
 </section>
@@ -30,6 +31,10 @@
 (function () {
     const launchPaystack = function () {
         if (!window.PaystackPop || typeof window.PaystackPop.setup !== "function") {
+            const status = document.getElementById("paystack-status");
+            if (status) {
+                status.textContent = "Paystack checkout could not load. Check your connection or disable content blockers, then reload this page.";
+            }
             return;
         }
 
@@ -37,11 +42,11 @@
             key: "{{ checkout_public_key|escapejs }}",
             email: "{{ checkout_email|escapejs }}",
             amount: {{ checkout_amount_in_kobo }},
-            ref: "{{ payment.paystack_reference|escapejs }}",
+            ref: "{{ checkout_reference|escapejs }}",
             callback: function (response) {
                 const reference = response && (response.reference || response.trxref)
                     ? (response.reference || response.trxref)
-                    : "{{ payment.paystack_reference|escapejs }}";
+                    : "{{ checkout_reference|escapejs }}";
                 window.location.href = "{{ checkout_callback_url|escapejs }}?reference=" + encodeURIComponent(reference);
             },
             onClose: function () {
@@ -49,7 +54,14 @@
             },
         });
 
-        handler.openIframe();
+        try {
+            handler.openIframe();
+        } catch (error) {
+            const status = document.getElementById("paystack-status");
+            if (status) {
+                status.textContent = "Paystack checkout could not open. Please use the Open Paystack button or try another browser.";
+            }
+        }
     };
 
     const button = document.getElementById("open-paystack");

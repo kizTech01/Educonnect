@@ -1231,6 +1231,9 @@ def _render_paystack_browser_checkout(
     callback_url,
     cancel_url,
     notice,
+    public_key=None,
+    email=None,
+    reference=None,
 ):
     payment_amount = getattr(payment, "amount", None)
     if payment_amount is None:
@@ -1244,8 +1247,13 @@ def _render_paystack_browser_checkout(
         checkout_value=checkout_value,
         checkout_amount_display=f"{payment_amount:.2f}",
         checkout_amount_in_kobo=paystack_amount_in_kobo(payment_amount),
-        checkout_public_key=payment.paystack_public_key_used,
-        checkout_email=request.user.email,
+        checkout_public_key=public_key or getattr(payment, "paystack_public_key_used", ""),
+        checkout_email=email or request.user.email,
+        checkout_reference=(
+            reference
+            or getattr(payment, "paystack_reference", "")
+            or getattr(payment, "reference", "")
+        ),
         checkout_callback_url=callback_url,
         checkout_cancel_url=cancel_url,
         checkout_notice=notice,
@@ -3430,6 +3438,7 @@ def billing_renew(request):
         if not subscription_paystack_secret_key():
             form.add_error(None, "Subscription billing is not configured. Please contact Educonnect support.")
         else:
+            payment = None
             try:
                 payment, checkout = create_subscription_payment(
                     institution=institution,
@@ -3440,6 +3449,33 @@ def billing_renew(request):
                 AuditLog.objects.create(user=request.user, institution=institution, action="subscription_checkout_started", description=f"Started checkout {payment.reference}.")
                 return redirect(checkout["authorization_url"])
             except ValueError as exc:
+                payment = getattr(exc, "payment", payment)
+                if payment and _is_paystack_transport_error(exc):
+                    gateway = SubscriptionPaymentGateway.objects.filter(
+                        slug="subscription",
+                        is_active=True,
+                    ).first()
+                    if gateway and gateway.is_configured:
+                        AuditLog.objects.create(
+                            user=request.user,
+                            institution=institution,
+                            action="subscription_checkout_started",
+                            description=f"Started browser checkout {payment.reference}.",
+                        )
+                        return _render_paystack_browser_checkout(
+                            request,
+                            title="Renew Subscription",
+                            checkout_heading="Renew Institution Subscription",
+                            payment=payment,
+                            checkout_label="Plan",
+                            checkout_value=f"{payment.plan.name} ({payment.duration_days} days)",
+                            callback_url=request.build_absolute_uri(reverse("portal:billing-callback")),
+                            cancel_url=reverse("portal:billing-renew"),
+                            notice="The server could not reach Paystack directly. Continue securely in your browser.",
+                            public_key=gateway.paystack_public_key,
+                            email=request.user.email or institution.email,
+                            reference=payment.reference,
+                        )
                 form.add_error(None, str(exc))
     return render(request, "portal/billing_renew.html", dashboard_context(
         request,
