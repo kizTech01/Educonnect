@@ -1,3 +1,5 @@
+from secrets import token_urlsafe
+
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import logout
@@ -77,6 +79,7 @@ class SecurityHeadersMiddleware:
         "worker-src 'self'; "
         "connect-src 'self' https://api.paystack.co; "
         "script-src 'self' https://js.paystack.co; "
+        "frame-src 'self' https://checkout.paystack.com; "
         "style-src 'self' 'unsafe-inline'; "
         "upgrade-insecure-requests; block-all-mixed-content"
     )
@@ -85,8 +88,13 @@ class SecurityHeadersMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
+        request.csp_nonce = token_urlsafe(18)
         response = self.get_response(request)
-        response.setdefault("Content-Security-Policy", self.policy)
+        policy = self.policy.replace(
+            "script-src 'self' https://js.paystack.co;",
+            f"script-src 'self' https://js.paystack.co 'nonce-{request.csp_nonce}';",
+        )
+        response.setdefault("Content-Security-Policy", policy)
         response.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         response.setdefault("X-Content-Type-Options", "nosniff")

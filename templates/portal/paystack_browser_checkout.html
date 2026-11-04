@@ -26,7 +26,7 @@
 </section>
 
 <script src="https://js.paystack.co/v1/inline.js"></script>
-<script>
+<script nonce="{{ csp_nonce }}">
 (function () {
     const launchPaystack = function () {
         if (!window.PaystackPop || typeof window.PaystackPop.setup !== "function") {

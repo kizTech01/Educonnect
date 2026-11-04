@@ -1249,6 +1249,7 @@ def _render_paystack_browser_checkout(
         checkout_callback_url=callback_url,
         checkout_cancel_url=cancel_url,
         checkout_notice=notice,
+        csp_nonce=getattr(request, "csp_nonce", ""),
     )
     return render(request, "portal/paystack_browser_checkout.html", context)
 

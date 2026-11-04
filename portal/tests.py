@@ -2692,6 +2692,10 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "Open Paystack")
         self.assertContains(response, "Pay for CSC201")
         self.assertContains(response, "Paystack could not be reached from the server")
+        nonce = response.context["csp_nonce"]
+        self.assertContains(response, f'<script nonce="{nonce}">', html=False)
+        self.assertIn(f"'nonce-{nonce}'", response["Content-Security-Policy"])
+        self.assertIn("frame-src 'self' https://checkout.paystack.com", response["Content-Security-Policy"])
 
     @patch("portal.views.initialize_paystack_transaction")
     def test_departmental_payment_redirects_to_paystack_authorization_url(self, initialize_paystack_transaction):
