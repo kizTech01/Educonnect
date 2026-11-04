@@ -433,6 +433,16 @@ class MultiInstitutionSaaSTests(TestCase):
         subscription.refresh_from_db()
         self.assertFalse(changed)
         self.assertEqual(subscription.end_date, previous_expiry + timedelta(days=365))
+        failed_retry = {
+            "status": "failed", "reference": payment.reference,
+            "amount": 0, "currency": "NGN",
+        }
+        _, changed = finalize_subscription_payment(reference=payment.reference, verification=failed_retry)
+        payment.refresh_from_db()
+        subscription.refresh_from_db()
+        self.assertFalse(changed)
+        self.assertEqual(payment.status, Payment.Status.SUCCESS)
+        self.assertEqual(subscription.end_date, previous_expiry + timedelta(days=365))
 
     def test_subscription_enforcement_applies_on_tenant_and_central_hosts(self):
         plan = SubscriptionPlan.objects.create(

@@ -2394,7 +2394,12 @@ def paystack_webhook(request):
         except Exception:
             logger.exception("paystack_webhook_processing_failed event=charge.success")
             return JsonResponse({"ok": False, "message": "Webhook processing failed."}, status=500)
-    logger.info("paystack_webhook_processed event=%s processed=%s", str(event)[:80], processed)
+    logger.info(
+        "paystack_webhook_processed event=%s reference=%s processed=%s",
+        str(event)[:80],
+        str(data.get("reference") or "")[:100],
+        processed,
+    )
     return JsonResponse({"ok": True, "event": event, "processed": processed})
 
 
@@ -4372,6 +4377,10 @@ def departmental_payment_callback(request, payment_id):
     if not reference:
         messages.warning(request, "Departmental payment is still pending confirmation.")
         return _student_callback_redirect(request, payment.student_id, destination)
+    if payment.is_paid:
+        logger.info("paystack_callback_already_processed workflow=departmental reference=%s", reference)
+        messages.success(request, "Departmental payment was already confirmed successfully.")
+        return _student_callback_redirect(request, payment.student_id, destination)
     try:
         verification = verify_paystack_transaction(payment.paystack_secret_key_used, reference)
     except ValueError as exc:
@@ -4393,11 +4402,17 @@ def departmental_payment_callback(request, payment_id):
         _finalize_departmental_payment(payment)
         messages.success(request, "Departmental payment confirmed successfully.")
     else:
-        logger.warning("paystack_callback_verification_failed workflow=departmental reason=verification_mismatch")
-        payment.status = DepartmentalPayment.Status.FAILED
-        payment.paid_at = None
-        payment.save(update_fields=["status", "paid_at", "updated_at"])
-        messages.warning(request, "Departmental payment was not confirmed by the gateway.")
+        with transaction.atomic():
+            payment = DepartmentalPayment.all_objects.select_for_update().get(pk=payment.pk)
+            if payment.is_paid:
+                logger.info("paystack_callback_already_processed workflow=departmental reference=%s", reference)
+                messages.success(request, "Departmental payment was already confirmed successfully.")
+            else:
+                logger.warning("paystack_callback_verification_failed workflow=departmental reference=%s reason=verification_mismatch", reference)
+                payment.status = DepartmentalPayment.Status.FAILED
+                payment.paid_at = None
+                payment.save(update_fields=["status", "paid_at", "updated_at"])
+                messages.warning(request, "Departmental payment was not confirmed by the gateway.")
     return _student_callback_redirect(request, payment.student_id, destination)
 
 
@@ -4474,9 +4489,6 @@ def course_payment_callback(request, payment_id):
         return _student_callback_redirect(request, payment.student_id, destination)
     else:
         logger.warning("paystack_callback_verification_failed workflow=course reason=verification_mismatch")
-        payment.status = CoursePayment.Status.PENDING
-        payment.paid_at = None
-        payment.save(update_fields=["status", "paid_at", "updated_at"])
         messages.warning(request, f"{payment.course.code} payment is still pending confirmation.")
     return _student_callback_redirect(request, payment.student_id, destination)
 

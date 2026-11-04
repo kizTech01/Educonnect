@@ -291,6 +291,7 @@ def _paystack_request(secret_key, path, payload=None):
             http_status,
         )
         raise ValueError(parsed.get("message") or "Paystack could not process the request.")
+    logger.info("paystack_api_request_succeeded operation=%s http_status=%s", operation, http_status)
     return parsed
 
 
@@ -303,23 +304,63 @@ def initialize_paystack_transaction(*, secret_key, email, amount, reference, cal
     }
     if metadata:
         payload["metadata"] = metadata
-    response = _paystack_request(secret_key, "transaction/initialize", payload=payload)
+    logger.info("paystack_transaction_initialization_started reference=%s", reference)
+    try:
+        response = _paystack_request(secret_key, "transaction/initialize", payload=payload)
+    except Exception as exc:
+        logger.warning(
+            "paystack_transaction_initialization_failed reference=%s error_type=%s",
+            reference,
+            type(exc).__name__,
+        )
+        raise
     data = response.get("data") or {}
     authorization_url = data.get("authorization_url") if isinstance(data, dict) else None
-    parsed_url = urlsplit(authorization_url) if isinstance(authorization_url, str) else None
-    if not parsed_url or parsed_url.scheme != "https" or not parsed_url.netloc:
-        logger.warning("paystack_api_request_failed operation=transaction failure_kind=missing_authorization_url")
+    try:
+        parsed_url = urlsplit(authorization_url) if isinstance(authorization_url, str) else None
+        valid_authorization_url = bool(
+            parsed_url
+            and parsed_url.scheme.lower() == "https"
+            and parsed_url.hostname
+            and parsed_url.hostname.lower() == "checkout.paystack.com"
+            and parsed_url.port is None
+            and not parsed_url.username
+            and not parsed_url.password
+            and parsed_url.path.strip("/")
+            and not parsed_url.fragment
+        )
+    except ValueError:
+        valid_authorization_url = False
+    if not valid_authorization_url:
+        logger.warning(
+            "paystack_transaction_initialization_failed reference=%s failure_kind=invalid_authorization_url",
+            reference,
+        )
         raise ValueError("Paystack did not return an authorization URL.")
     data["authorization_url"] = authorization_url
+    logger.info("paystack_transaction_initialization_succeeded reference=%s", reference)
     return data
 
 
 def verify_paystack_transaction(secret_key, reference):
-    response = _paystack_request(secret_key, f"transaction/verify/{quote(reference)}")
+    logger.info("paystack_transaction_verification_started reference=%s", reference)
+    try:
+        response = _paystack_request(secret_key, f"transaction/verify/{quote(reference)}")
+    except Exception as exc:
+        logger.warning(
+            "paystack_transaction_verification_failed reference=%s error_type=%s",
+            reference,
+            type(exc).__name__,
+        )
+        raise
     data = response.get("data") or {}
     if not isinstance(data, dict) or not data:
-        logger.warning("paystack_api_request_failed operation=transaction failure_kind=missing_verification_data")
+        logger.warning(
+            "paystack_transaction_verification_failed reference=%s failure_kind=missing_verification_data",
+            reference,
+        )
         raise ValueError("Paystack did not return transaction details.")
+    logger.info("paystack_transaction_verification_succeeded reference=%s", reference)
     return data
 
 
@@ -397,6 +438,8 @@ def finalize_subscription_payment(*, reference, verification):
         )
         if payment is None:
             return None, False
+        if payment.status == Payment.Status.SUCCESS:
+            return payment, False
         expected_kobo = paystack_amount_in_kobo(payment.amount)
         verified_amount = verification.get("amount")
         if (
@@ -416,9 +459,6 @@ def finalize_subscription_payment(*, reference, verification):
                 object_id=str(payment.id),
             )
             return payment, False
-        if payment.status == Payment.Status.SUCCESS:
-            return payment, False
-
         subscription = Subscription.objects.select_for_update().get(pk=payment.subscription_id)
         today = timezone.localdate()
         baseline = max(subscription.end_date, today)

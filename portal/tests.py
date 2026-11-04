@@ -2900,6 +2900,33 @@ class DashboardAndCourseFlowTests(TestCase):
             )
 
     @patch("portal.services.urlopen")
+    def test_paystack_rejects_authorization_url_outside_checkout_host(self, urlopen):
+        class DummyResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"status":true,"data":{"authorization_url":"https://example.com/fake-checkout"}}'
+
+        urlopen.return_value = DummyResponse()
+
+        from .services import initialize_paystack_transaction
+
+        with self.assertRaisesMessage(ValueError, "Paystack did not return an authorization URL."):
+            initialize_paystack_transaction(
+                secret_key="sk_test_ok",
+                email="student@example.com",
+                amount=Decimal("1000.00"),
+                reference="ref-123",
+                callback_url="https://example.com/callback",
+            )
+
+    @patch("portal.services.urlopen")
     def test_paystack_http_error_with_non_object_json_does_not_crash(self, urlopen):
         urlopen.side_effect = HTTPError(
             "https://api.paystack.co/transaction/initialize",
@@ -3087,7 +3114,7 @@ class DashboardAndCourseFlowTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.url, reverse("portal:student-courses"))
+        self.assertEqual(response.url, reverse("portal:student-courses") + "#registered-courses")
         finalize_course_payment.assert_called_once_with(payment)
 
     @patch("portal.views.verify_paystack_transaction")
@@ -3116,7 +3143,7 @@ class DashboardAndCourseFlowTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.url, reverse("portal:student-courses"))
+        self.assertEqual(response.url, reverse("portal:student-courses") + "#registered-courses")
 
     @patch("portal.views.verify_paystack_transaction", side_effect=RuntimeError("gateway client failure"))
     def test_course_payment_callback_does_not_500_when_verification_client_fails(
@@ -3621,6 +3648,80 @@ class DashboardAndCourseFlowTests(TestCase):
         payment.refresh_from_db()
         self.assertEqual(response.status_code, 302)
         self.assertEqual(payment.status, DepartmentalPayment.Status.PAID)
+
+    @patch("portal.views.verify_paystack_transaction")
+    def test_departmental_callback_does_not_downgrade_payment_completed_by_webhook(
+        self, verify_paystack_transaction
+    ):
+        from .models import AcademicSession, DepartmentalPayment
+
+        session, _ = AcademicSession.objects.get_or_create(name="2030/2031", defaults={"is_current": True})
+        payment = DepartmentalPayment.objects.create(
+            student=self.student,
+            department=self.department,
+            session=session,
+            total_amount=Decimal("4000.00"),
+            paystack_public_key_used="pk_test_department",
+            paystack_secret_key_used="sk_test_department",
+        )
+
+        def complete_payment_during_verification(secret_key, reference):
+            DepartmentalPayment.all_objects.filter(pk=payment.pk).update(
+                status=DepartmentalPayment.Status.PAID,
+                paid_at=timezone.now(),
+            )
+            return {
+                "reference": reference,
+                "status": "failed",
+                "amount": 0,
+                "currency": "NGN",
+            }
+
+        verify_paystack_transaction.side_effect = complete_payment_during_verification
+        self.client.force_login(self.student)
+        response = self.client.get(
+            reverse("portal:departmental-payment-callback", args=[payment.id]),
+            {"reference": payment.paystack_reference},
+        )
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(payment.status, DepartmentalPayment.Status.PAID)
+
+    @patch("portal.views.verify_paystack_transaction")
+    def test_course_callback_does_not_downgrade_concurrent_successful_webhook(
+        self, verify_paystack_transaction
+    ):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            paystack_public_key_used="pk_test_course",
+            paystack_secret_key_used="sk_test_course",
+        )
+
+        def complete_payment_during_verification(secret_key, reference):
+            CoursePayment.all_objects.filter(pk=payment.pk).update(
+                status=CoursePayment.Status.PAID,
+                paid_at=timezone.now(),
+            )
+            return {
+                "reference": reference,
+                "status": "failed",
+                "amount": 0,
+                "currency": "NGN",
+            }
+
+        verify_paystack_transaction.side_effect = complete_payment_during_verification
+        self.client.force_login(self.student)
+        response = self.client.get(
+            reverse("portal:course-payment-callback", args=[payment.id]),
+            {"reference": payment.paystack_reference},
+        )
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(payment.status, CoursePayment.Status.PAID)
 
     def test_due_course_reminder_sends_email_30_minutes_before_class(self):
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
