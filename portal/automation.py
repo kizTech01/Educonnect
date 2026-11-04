@@ -107,7 +107,7 @@ def _ai_extract(text, task):
     if not key:
         return None
     prompt = (
-        f"Extract {task} from this university document. Return JSON only, as an array of objects. "
+        f'Extract {task} from this university document. Return a JSON object with an "items" array of objects. '
         "Never invent information; use empty strings for unknown values.\n\n" + text[:60000]
     )
     body = json.dumps({
@@ -154,7 +154,7 @@ def _ai_extract_image(uploaded_file, task):
     suffix = os.path.splitext(uploaded_file.name)[1].lower()
     media_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}[suffix]
     prompt = (
-        f"Extract {task} from this scanned university document. Return JSON only, as an array of objects. "
+        f'Extract {task} from this scanned university document. Return a JSON object with an "items" array of objects. '
         "Never invent information; use empty strings for unknown values."
     )
     body = json.dumps({
@@ -318,9 +318,17 @@ def _generic_course_records(text):
 
 def course_records(text):
     ai = _ai_extract(text, "courses with code, title, level, semester, credit_units, and requirement (compulsory or elective)")
-    if ai:
-        return ai
-    return _outline_course_records(text) or _generic_course_records(text)
+    local_records = _outline_course_records(text) or _generic_course_records(text)
+    records_by_code = {
+        re.sub(r"[^A-Z0-9]", "", str(record.get("code", "")).upper()): record
+        for record in local_records
+        if record.get("code")
+    }
+    for record in ai or []:
+        code = re.sub(r"[^A-Z0-9]", "", str(_course_record_value(record, "code", "course_code")).upper())
+        if code:
+            records_by_code.setdefault(code, record)
+    return list(records_by_code.values())
 
 
 def handbook_course_records(handbook):
@@ -770,12 +778,12 @@ def _create_course_from_allocation(department, row, course_code, session):
 
 def import_department_lecturers(upload):
     rows = _records_from_upload(upload, "lecturers with full_name, lecturer_id, email, and phone_number")
-    created = existing = skipped = tenant_conflicts = 0
+    created = existing = skipped = tenant_conflicts = role_conflicts = 0
     with transaction.atomic():
         for row in rows:
             lecturer_id = _field(row, "lecturer_id", "staff_id", "id")
             name = _field(row, "full_name", "lecturer_name", "name")
-            if not lecturer_id or not name:
+            if not lecturer_id or not name or len(lecturer_id) > 30:
                 skipped += 1
                 continue
             user = User.all_objects.filter(
@@ -790,6 +798,10 @@ def import_department_lecturers(upload):
                     tenant_conflicts += 1
                     skipped += 1
                     continue
+                if user.role != User.Role.LECTURER:
+                    role_conflicts += 1
+                    skipped += 1
+                    continue
                 if user.role == User.Role.LECTURER and not user.department_id:
                     user.department = upload.department
                     user.save(update_fields=["department"])
@@ -798,6 +810,7 @@ def import_department_lecturers(upload):
             name_parts = name.split(maxsplit=1)
             user = User.objects.create_user(
                 username=lecturer_id, password=provisioned_password_for(upload.institution), role=User.Role.LECTURER,
+                institution=upload.institution,
                 id_number=lecturer_id, first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
                 email=_field(row, "email"), phone_number=_field(row, "phone", "phone_number"),
                 department=upload.department, is_approved=True,
@@ -806,7 +819,8 @@ def import_department_lecturers(upload):
         if not created and not existing:
             raise ValueError("No valid lecturer records were found. Use Lecturer ID and Lecturer Name columns.")
     conflict_note = f" {tenant_conflicts} row(s) used a lecturer ID already assigned to another institution and were skipped." if tenant_conflicts else ""
-    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped.{conflict_note} New lecturer accounts use this institution's subdomain followed by 'educonnect' as the temporary password."
+    role_conflict_note = f" {role_conflicts} lecturer ID(s) already belong to non-lecturer accounts and were skipped." if role_conflicts else ""
+    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped.{conflict_note}{role_conflict_note} New lecturer accounts use this institution's subdomain followed by 'educonnect' as the temporary password."
 
 
 def import_course_allocations(upload):
