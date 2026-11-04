@@ -71,7 +71,7 @@ class SecurityHeadersMiddleware:
     policy = (
         "default-src 'self'; "
         "base-uri 'self'; "
-        "form-action 'self'; "
+        "form-action 'self' https://checkout.paystack.com; "
         "frame-ancestors 'none'; "
         "object-src 'none'; "
         "img-src 'self' data: blob:; "

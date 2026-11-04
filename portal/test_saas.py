@@ -1523,6 +1523,14 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
             PLATFORM_BASE_DOMAIN="example.test",
             ALLOWED_HOSTS=["billing.example.test"],
         ):
+            form_response = self.client.get(
+                reverse("portal:billing-renew"), HTTP_HOST="billing.example.test"
+            )
+            self.assertEqual(form_response.status_code, 200)
+            self.assertIn(
+                "form-action 'self' https://checkout.paystack.com",
+                form_response["Content-Security-Policy"],
+            )
             response = self.client.post(
                 reverse("portal:billing-renew"),
                 {"plan": self.plan.pk, "plan_duration": self.duration.pk},
@@ -1533,6 +1541,7 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
         self.assertEqual(
             response["Location"], "https://checkout.paystack.com/subscription-renewal"
         )
+        self.assertEqual(response["Content-Type"], "text/html; charset=utf-8")
         initialize_paystack_transaction.assert_called_once()
 
     def webhook_response(self, secret):
