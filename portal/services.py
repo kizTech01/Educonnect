@@ -242,6 +242,8 @@ def _paystack_request(secret_key, path, payload=None):
             operation,
             exc.code,
         )
+        if 500 <= exc.code < 600:
+            raise ValueError("Unable to reach Paystack right now. Please try again shortly.") from exc
         raw_body = exc.read().decode("utf-8", errors="replace").strip()
         try:
             error_payload = json.loads(raw_body)

@@ -2948,6 +2948,30 @@ class DashboardAndCourseFlowTests(TestCase):
             )
 
     @patch("portal.services.urlopen")
+    def test_paystack_server_error_uses_recoverable_checkout_fallback(self, urlopen):
+        urlopen.side_effect = HTTPError(
+            "https://api.paystack.co/transaction/initialize",
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=BytesIO(b'{"status":false,"message":"Temporarily unavailable"}'),
+        )
+
+        from .services import initialize_paystack_transaction
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "Unable to reach Paystack right now. Please try again shortly.",
+        ):
+            initialize_paystack_transaction(
+                secret_key="sk_test_ok",
+                email="student@example.com",
+                amount=Decimal("1000.00"),
+                reference="ref-503",
+                callback_url="https://example.com/callback",
+            )
+
+    @patch("portal.services.urlopen")
     def test_paystack_request_sends_browser_like_user_agent(self, urlopen):
         class DummyResponse:
             def __enter__(self):
