@@ -2714,6 +2714,7 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, "Paystack could not be reached from the server")
         self.assertContains(response, "https://js.paystack.co/v2/inline.js")
         self.assertContains(response, "button.addEventListener(\"click\", launchPaystack)")
+        self.assertContains(response, "launchPaystack();")
         nonce = response.context["csp_nonce"]
         self.assertContains(response, f'<script nonce="{nonce}">', html=False)
         self.assertIn(f"'nonce-{nonce}'", response["Content-Security-Policy"])

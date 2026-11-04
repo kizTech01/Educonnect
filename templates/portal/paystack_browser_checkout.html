@@ -39,6 +39,9 @@
         }
 
         const status = document.getElementById("paystack-status");
+        if (status) {
+            status.textContent = "Connecting to Paystack…";
+        }
         try {
             const popup = new PaystackPop();
             popup.newTransaction({
@@ -77,6 +80,7 @@
     if (button) {
         button.addEventListener("click", launchPaystack);
     }
+    launchPaystack();
 })();
 </script>
 {% endblock %}

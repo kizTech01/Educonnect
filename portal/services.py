@@ -225,7 +225,7 @@ def _paystack_request(secret_key, path, payload=None):
     )
     http_status = None
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=5) as response:
             http_status = getattr(response, "status", None)
             try:
                 body = response.read().decode("utf-8")
