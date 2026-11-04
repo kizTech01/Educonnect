@@ -2596,6 +2596,22 @@ class DashboardAndCourseFlowTests(TestCase):
             self.student.id_number,
         )
 
+    def test_course_payment_form_has_duplicate_submit_protection(self):
+        StudentCourseRegistration.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            registered_by=self.student,
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(
+            reverse("portal:student-courses"),
+            {"department": self.department.id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-payment-submit')
+
     @patch("portal.views.initialize_paystack_transaction")
     def test_paid_course_payment_prefers_its_department_course_api(self, initialize_paystack_transaction):
         initialize_paystack_transaction.return_value = {"authorization_url": "https://checkout.paystack.com/department-course"}
