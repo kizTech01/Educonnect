@@ -2,7 +2,7 @@ import json
 import logging
 import secrets
 from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -193,11 +193,19 @@ def grant_free_trial_subscription(institution):
 
 
 def paystack_amount_in_kobo(amount):
-    normalized = Decimal(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    try:
+        normalized = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Payment amount must be a valid positive number.") from exc
+    if not normalized.is_finite() or normalized <= 0:
+        raise ValueError("Payment amount must be a valid positive number.")
     return int(normalized * 100)
 
 
 def _paystack_request(secret_key, path, payload=None):
+    if not secret_key:
+        raise ValueError("Paystack secret key is not configured.")
+    operation = path.split("/", 1)[0]
     headers = {
         "Authorization": f"Bearer {secret_key}",
         "Accept": "application/json",
@@ -215,10 +223,17 @@ def _paystack_request(secret_key, path, payload=None):
         headers=headers,
         method=method,
     )
+    http_status = None
     try:
         with urlopen(request, timeout=20) as response:
+            http_status = getattr(response, "status", None)
             body = response.read().decode("utf-8")
     except HTTPError as exc:
+        logger.warning(
+            "paystack_api_request_failed operation=%s http_status=%s failure_kind=http_error",
+            operation,
+            exc.code,
+        )
         raw_body = exc.read().decode("utf-8", errors="replace").strip()
         try:
             payload = json.loads(raw_body)
@@ -236,17 +251,37 @@ def _paystack_request(secret_key, path, payload=None):
     # Treat both as a recoverable gateway failure so a browser callback never
     # becomes an unhandled 500 merely because Paystack is temporarily slow.
     except (URLError, OSError) as exc:
+        logger.warning(
+            "paystack_api_request_failed operation=%s failure_kind=transport error_type=%s",
+            operation,
+            type(exc).__name__,
+        )
         raise ValueError("Unable to reach Paystack right now. Please try again shortly.") from exc
 
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
+        logger.warning(
+            "paystack_api_request_failed operation=%s http_status=%s failure_kind=invalid_json",
+            operation,
+            http_status,
+        )
         raise ValueError("Paystack returned an unreadable response.") from exc
 
     if not isinstance(parsed, dict):
+        logger.warning(
+            "paystack_api_request_failed operation=%s http_status=%s failure_kind=invalid_response_shape",
+            operation,
+            http_status,
+        )
         raise ValueError("Paystack returned an unreadable response.")
 
     if not parsed.get("status"):
+        logger.warning(
+            "paystack_api_request_failed operation=%s http_status=%s failure_kind=provider_rejected",
+            operation,
+            http_status,
+        )
         raise ValueError(parsed.get("message") or "Paystack could not process the request.")
     return parsed
 
@@ -263,6 +298,7 @@ def initialize_paystack_transaction(*, secret_key, email, amount, reference, cal
     response = _paystack_request(secret_key, "transaction/initialize", payload=payload)
     data = response.get("data") or {}
     if not data.get("authorization_url"):
+        logger.warning("paystack_api_request_failed operation=transaction failure_kind=missing_authorization_url")
         raise ValueError("Paystack did not return an authorization URL.")
     return data
 
@@ -271,6 +307,7 @@ def verify_paystack_transaction(secret_key, reference):
     response = _paystack_request(secret_key, f"transaction/verify/{quote(reference)}")
     data = response.get("data") or {}
     if not isinstance(data, dict) or not data:
+        logger.warning("paystack_api_request_failed operation=transaction failure_kind=missing_verification_data")
         raise ValueError("Paystack did not return transaction details.")
     return data
 

@@ -1359,7 +1359,7 @@ class CoursePayment(TimeStampedModel):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     enrollment_sequence = models.PositiveIntegerField(default=1)
     is_active_for_registration = models.BooleanField(default=True)
-    paystack_reference = models.CharField(max_length=64, blank=True, default="")
+    paystack_reference = models.CharField(max_length=64, blank=True, default="", unique=True)
     paystack_public_key_used = models.CharField(max_length=255, blank=True)
     paystack_secret_key_used = EncryptedTextField(max_length=2048, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
@@ -1381,7 +1381,7 @@ class CoursePayment(TimeStampedModel):
             raise ValidationError({"amount": "Payment amount must be greater than zero."})
 
     def rotate_paystack_reference(self):
-        self.paystack_reference = f"COURSE-{timezone.now():%Y%m%d}-{uuid4().hex[:10].upper()}"
+        self.paystack_reference = f"COURSE-{uuid4().hex.upper()}"
 
     @property
     def is_paid(self):

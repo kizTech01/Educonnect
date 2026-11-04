@@ -2678,6 +2678,24 @@ class DashboardAndCourseFlowTests(TestCase):
             payment.paystack_reference,
         )
 
+    def test_course_payment_references_are_database_unique_and_high_entropy(self):
+        first_payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            enrollment_sequence=1,
+        )
+        second_payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            enrollment_sequence=2,
+        )
+
+        self.assertTrue(CoursePayment._meta.get_field("paystack_reference").unique)
+        self.assertNotEqual(first_payment.paystack_reference, second_payment.paystack_reference)
+        self.assertEqual(len(first_payment.paystack_reference), len("COURSE-") + 32)
+
     @patch("portal.views.initialize_paystack_transaction")
     def test_course_payment_falls_back_to_browser_checkout_when_paystack_is_unreachable(self, initialize_paystack_transaction):
         initialize_paystack_transaction.side_effect = ValueError("Unable to reach Paystack right now. Please try again shortly.")
@@ -2814,14 +2832,24 @@ class DashboardAndCourseFlowTests(TestCase):
 
         from .services import initialize_paystack_transaction
 
-        with self.assertRaisesMessage(ValueError, "Paystack rejected the request: Invalid secret key"):
-            initialize_paystack_transaction(
-                secret_key="sk_test_bad",
-                email="student@example.com",
-                amount=Decimal("1000.00"),
-                reference="ref-123",
-                callback_url="https://example.com/callback",
-            )
+        with self.assertLogs("portal.services", level="WARNING") as captured_logs:
+            with self.assertRaisesMessage(ValueError, "Paystack rejected the request: Invalid secret key"):
+                initialize_paystack_transaction(
+                    secret_key="sk_test_bad",
+                    email="student@example.com",
+                    amount=Decimal("1000.00"),
+                    reference="ref-123",
+                    callback_url="https://example.com/callback",
+                )
+        self.assertIn("http_status=400", captured_logs.output[0])
+        self.assertNotIn("sk_test_bad", captured_logs.output[0])
+
+    def test_paystack_amount_conversion_rejects_nonpositive_and_invalid_values(self):
+        from .services import paystack_amount_in_kobo
+
+        for amount in (Decimal("0.00"), Decimal("-1.00"), "NaN", "not-a-number"):
+            with self.subTest(amount=amount), self.assertRaises(ValueError):
+                paystack_amount_in_kobo(amount)
 
     @patch("portal.services.urlopen")
     def test_paystack_error_surfaces_http_body_when_not_json(self, urlopen):
@@ -3061,7 +3089,7 @@ class DashboardAndCourseFlowTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.url, reverse("portal:student-courses"))
+        self.assertEqual(response.url, reverse("portal:student-courses") + "#registered-courses")
         payment.refresh_from_db()
         self.assertEqual(payment.status, CoursePayment.Status.PENDING)
 
@@ -4022,6 +4050,28 @@ class DashboardAndCourseFlowTests(TestCase):
         payment.refresh_from_db()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payment.status, CoursePayment.Status.PAID)
+
+    def test_paystack_webhook_rejects_malformed_data_shape(self):
+        payment = CoursePayment.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            amount=self.paid_course.amount,
+            status=CoursePayment.Status.PENDING,
+            paystack_secret_key_used="sk_test_course",
+        )
+        body = json.dumps({"event": "charge.success", "data": []}).encode("utf-8")
+        signature = hmac.new(b"sk_test_course", body, hashlib.sha512).hexdigest()
+
+        response = self.client.post(
+            reverse("portal:paystack-webhook"),
+            data=body,
+            content_type="application/json",
+            HTTP_X_PAYSTACK_SIGNATURE=signature,
+        )
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payment.status, CoursePayment.Status.PENDING)
 
     def test_paystack_webhook_rejects_course_payment_with_wrong_currency(self):
         payment = CoursePayment.objects.create(

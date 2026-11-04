@@ -1,3 +1,4 @@
+import re
 from secrets import token_urlsafe
 
 from django.conf import settings
@@ -279,6 +280,12 @@ class TenantAccessMiddleware:
             elif institution:
                 subscription = institution.current_subscription
                 path_is_billing = request.path.startswith(self.billing_prefixes)
+                path_is_payment_callback = bool(
+                    re.fullmatch(
+                        r"/student/(?:departmental|courses/payments)/\d+/callback/",
+                        request.path,
+                    )
+                )
                 is_restricted = (
                     institution.status != Institution.Status.ACTIVE
                     or not subscription
@@ -298,6 +305,7 @@ class TenantAccessMiddleware:
                     is_restricted
                     and not legacy_without_subscription
                     and not path_is_billing
+                    and not path_is_payment_callback
                     and request.path not in {"/logout/", "/"}
                 ):
                     messages.warning(

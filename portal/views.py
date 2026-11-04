@@ -1273,18 +1273,31 @@ def _paystack_callback_has_conflicting_references(request):
     return bool(reference and trxref and reference != trxref)
 
 
+def _student_callback_redirect(request, student_id, destination):
+    if request.user.is_authenticated and request.user.pk == student_id:
+        return redirect(destination)
+    return redirect("portal:home")
+
+
 def _student_identifier(user):
     return user.id_number or user.username or str(user.pk)
 
 
 def _verification_matches_payment(verification, *, reference, amount, currency="NGN"):
+    if not isinstance(verification, dict):
+        return False
+    verified_currency = verification.get("currency")
+    if not isinstance(verified_currency, str):
+        return False
+    try:
+        verified_amount = int(verification.get("amount") or 0)
+    except (TypeError, ValueError, OverflowError):
+        verified_amount = 0
     return (
-        isinstance(verification, dict)
-        and
         verification.get("reference") == reference
         and verification.get("status") == "success"
-        and int(verification.get("amount") or 0) == paystack_amount_in_kobo(amount)
-        and (verification.get("currency") or "").upper() == currency
+        and verified_amount == paystack_amount_in_kobo(amount)
+        and verified_currency.upper() == currency
     )
 
 
@@ -1337,28 +1350,43 @@ def _paystack_signature_is_valid(request, secret_keys):
 
 def _mark_payment_paid_from_paystack(reference, amount, currency, *, signing_secret):
     if not reference:
+        logger.warning("paystack_webhook_event_rejected reason=missing_reference")
         return False
     # The signed webhook is authoritative, but it must still describe the
     # currency this application charges in.  Do not turn a correctly signed
     # transaction in another currency into a course entitlement.
-    if (currency or "").upper() != "NGN":
+    if not isinstance(currency, str) or currency.upper() != "NGN":
+        logger.warning("paystack_webhook_event_rejected reason=currency_mismatch")
         return False
     course_payment = CoursePayment.objects.filter(paystack_reference=reference).select_related("course").first()
-    if (
-        course_payment
-        and hmac.compare_digest(course_payment.paystack_secret_key_used, signing_secret)
-        and int(amount or 0) == paystack_amount_in_kobo(course_payment.amount)
-    ):
+    if course_payment:
+        if not hmac.compare_digest(course_payment.paystack_secret_key_used, signing_secret):
+            logger.warning("paystack_webhook_event_rejected workflow=course reason=secret_mismatch")
+            return False
+        try:
+            amount_matches = int(amount or 0) == paystack_amount_in_kobo(course_payment.amount)
+        except (TypeError, ValueError, OverflowError):
+            amount_matches = False
+        if not amount_matches:
+            logger.warning("paystack_webhook_event_rejected workflow=course reason=amount_mismatch")
+            return False
         _finalize_course_payment(course_payment)
         return True
     departmental_payment = DepartmentalPayment.objects.filter(paystack_reference=reference).first()
-    if (
-        departmental_payment
-        and hmac.compare_digest(departmental_payment.paystack_secret_key_used, signing_secret)
-        and int(amount or 0) == paystack_amount_in_kobo(departmental_payment.total_amount)
-    ):
+    if departmental_payment:
+        if not hmac.compare_digest(departmental_payment.paystack_secret_key_used, signing_secret):
+            logger.warning("paystack_webhook_event_rejected workflow=departmental reason=secret_mismatch")
+            return False
+        try:
+            amount_matches = int(amount or 0) == paystack_amount_in_kobo(departmental_payment.total_amount)
+        except (TypeError, ValueError, OverflowError):
+            amount_matches = False
+        if not amount_matches:
+            logger.warning("paystack_webhook_event_rejected workflow=departmental reason=amount_mismatch")
+            return False
         _finalize_departmental_payment(departmental_payment)
         return True
+    logger.warning("paystack_webhook_event_rejected reason=unknown_reference")
     return False
 
 
@@ -2329,35 +2357,43 @@ def paystack_webhook(request):
         return JsonResponse({"ok": False, "message": "POST required."}, status=405)
     signing_secret = _paystack_signing_secret(request, _configured_paystack_webhook_secrets())
     if not signing_secret:
+        logger.warning("paystack_webhook_rejected reason=invalid_signature")
         return JsonResponse({"ok": False, "message": "Invalid Paystack signature."}, status=400)
     try:
         payload = json.loads(request.body.decode("utf-8"))
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("paystack_webhook_rejected reason=invalid_json")
         return JsonResponse({"ok": False, "message": "Invalid JSON payload."}, status=400)
 
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        logger.warning("paystack_webhook_rejected reason=invalid_payload_shape")
+        return JsonResponse({"ok": False, "message": "Invalid webhook payload."}, status=400)
     event = payload.get("event", "")
-    data = payload.get("data") or {}
+    if not isinstance(event, str):
+        logger.warning("paystack_webhook_rejected reason=invalid_event_type")
+        return JsonResponse({"ok": False, "message": "Invalid webhook event."}, status=400)
+    data = payload["data"]
     processed = False
     if event == "charge.success":
-        processed = _mark_payment_paid_from_paystack(
-            data.get("reference"),
-            data.get("amount"),
-            data.get("currency"),
-            signing_secret=signing_secret,
-        )
-        subscription_secret = subscription_paystack_secret_key()
-        if (
-            not processed
-            and subscription_secret
-            and hmac.compare_digest(signing_secret, subscription_secret)
-            and Payment.objects.filter(reference=data.get("reference")).exists()
-        ):
-            try:
+        try:
+            processed = _mark_payment_paid_from_paystack(
+                data.get("reference"),
+                data.get("amount"),
+                data.get("currency"),
+                signing_secret=signing_secret,
+            )
+            subscription_secret = subscription_paystack_secret_key()
+            if (
+                not processed
+                and subscription_secret
+                and hmac.compare_digest(signing_secret, subscription_secret)
+                and Payment.objects.filter(reference=data.get("reference")).exists()
+            ):
                 _, processed = verify_and_finalize_subscription_payment(data.get("reference"))
-            except ValueError:
-                # A failed verification is recorded by the finalizer; do not
-                # acknowledge it as a successful subscription update.
-                processed = False
+        except Exception:
+            logger.exception("paystack_webhook_processing_failed event=charge.success")
+            return JsonResponse({"ok": False, "message": "Webhook processing failed."}, status=500)
+    logger.info("paystack_webhook_processed event=%s processed=%s", str(event)[:80], processed)
     return JsonResponse({"ok": True, "event": event, "processed": processed})
 
 
@@ -3489,17 +3525,36 @@ def billing_renew(request):
     ))
 
 
-@role_required(User.Role.ADMIN)
+@require_http_methods(["GET"])
 def billing_callback(request):
-    reference = request.GET.get("reference", "")
-    payment = get_object_or_404(Payment, reference=reference, institution=getattr(request, "institution", None))
+    if _paystack_callback_has_conflicting_references(request):
+        logger.warning("paystack_callback_rejected workflow=subscription reason=conflicting_references")
+        messages.error(request, "The subscription payment callback contained conflicting references.")
+        return redirect("portal:home")
+    reference = _paystack_reference_from_request(request)
+    if not reference:
+        logger.warning("paystack_callback_rejected workflow=subscription reason=missing_reference")
+        messages.warning(request, "Subscription payment is still pending confirmation.")
+        return redirect("portal:home")
+    payment = get_object_or_404(Payment, reference=reference)
+    institution = getattr(request, "institution", None)
+    if institution and payment.institution_id != institution.id:
+        logger.warning("paystack_callback_rejected workflow=subscription reason=institution_mismatch")
+        raise Http404
     try:
         _, changed = verify_and_finalize_subscription_payment(payment.reference)
     except ValueError as exc:
+        logger.warning("paystack_callback_verification_failed workflow=subscription error_type=%s", type(exc).__name__)
         messages.error(request, str(exc))
-        return redirect("portal:billing-overview")
+        return redirect("portal:billing-overview" if institution else "portal:home")
     messages.success(request, "Payment verified and subscription updated." if changed else "This payment has already been processed.")
-    return redirect("portal:billing-receipt", payment_id=payment.id)
+    if (
+        request.user.is_authenticated
+        and request.user.institution_id == payment.institution_id
+        and request.user.has_role(User.Role.ADMIN)
+    ):
+        return redirect("portal:billing-receipt", payment_id=payment.id)
+    return redirect("portal:home")
 
 
 @role_required(User.Role.ADMIN)
@@ -4295,20 +4350,29 @@ def student_courses(request):
     return render(request, "portal/student_courses.html", context)
 
 
-@role_required(User.Role.STUDENT)
+@require_http_methods(["GET"])
 def departmental_payment_callback(request, payment_id):
     payment = get_object_or_404(
-        DepartmentalPayment.objects.select_related("student", "department", "session"),
+        DepartmentalPayment.all_objects.select_related("student", "department", "session"),
         pk=payment_id,
-        student=request.user,
     )
+    institution = getattr(request, "institution", None)
+    if institution and payment.institution_id != institution.id:
+        logger.warning("paystack_callback_rejected workflow=departmental reason=institution_mismatch")
+        raise Http404
+    destination = reverse("portal:student-departmental")
+    if _paystack_callback_has_conflicting_references(request):
+        logger.warning("paystack_callback_rejected workflow=departmental reason=conflicting_references")
+        messages.error(request, "The departmental payment callback contained conflicting references.")
+        return _student_callback_redirect(request, payment.student_id, destination)
     reference = _paystack_reference_from_request(request)
     if reference and reference != payment.paystack_reference:
+        logger.warning("paystack_callback_rejected workflow=departmental reason=reference_mismatch")
         messages.error(request, "The departmental payment reference did not match this record.")
-        return redirect("portal:student-departmental")
+        return _student_callback_redirect(request, payment.student_id, destination)
     if not reference:
         messages.warning(request, "Departmental payment is still pending confirmation.")
-        return redirect("portal:student-departmental")
+        return _student_callback_redirect(request, payment.student_id, destination)
     try:
         verification = verify_paystack_transaction(payment.paystack_secret_key_used, reference)
     except ValueError as exc:
@@ -4320,38 +4384,47 @@ def departmental_payment_callback(request, payment_id):
             messages.warning(request, "Departmental payment was submitted, but confirmation is still in progress. Please refresh shortly.")
         else:
             messages.error(request, str(exc))
-        return redirect("portal:student-departmental")
+        logger.warning("paystack_callback_verification_failed workflow=departmental error_type=%s", type(exc).__name__)
+        return _student_callback_redirect(request, payment.student_id, destination)
+    except Exception:
+        logger.exception("paystack_callback_verification_failed workflow=departmental")
+        messages.warning(request, "Departmental payment is still being confirmed. Please refresh shortly.")
+        return _student_callback_redirect(request, payment.student_id, destination)
     if _verification_matches_payment(verification, reference=payment.paystack_reference, amount=payment.total_amount):
         _finalize_departmental_payment(payment)
         messages.success(request, "Departmental payment confirmed successfully.")
     else:
+        logger.warning("paystack_callback_verification_failed workflow=departmental reason=verification_mismatch")
         payment.status = DepartmentalPayment.Status.FAILED
         payment.paid_at = None
         payment.save(update_fields=["status", "paid_at", "updated_at"])
         messages.warning(request, "Departmental payment was not confirmed by the gateway.")
-    return redirect("portal:student-departmental")
+    return _student_callback_redirect(request, payment.student_id, destination)
 
 
-@role_required(User.Role.STUDENT)
+@require_http_methods(["GET"])
 def course_payment_callback(request, payment_id):
     payment = get_object_or_404(
-        CoursePayment.objects.select_related("student", "course"),
+        CoursePayment.all_objects.select_related("student", "course"),
         pk=payment_id,
-        student=request.user,
     )
+    institution = getattr(request, "institution", None)
+    if institution and payment.institution_id != institution.id:
+        logger.warning("paystack_callback_rejected workflow=course reason=institution_mismatch")
+        raise Http404
+    destination = _redirect_with_anchor("portal:student-courses", "registered-courses")
     if _paystack_callback_has_conflicting_references(request):
+        logger.warning("paystack_callback_rejected workflow=course reason=conflicting_references")
         messages.error(request, "The course payment callback contained conflicting references.")
-        return redirect("portal:student-courses")
+        return _student_callback_redirect(request, payment.student_id, destination)
     reference = _paystack_reference_from_request(request)
     if reference and reference != payment.paystack_reference:
+        logger.warning("paystack_callback_rejected workflow=course reason=reference_mismatch")
         messages.error(request, "The course payment reference did not match this record.")
-        return redirect("portal:student-courses")
+        return _student_callback_redirect(request, payment.student_id, destination)
     if not reference:
         messages.warning(request, f"{payment.course.code} payment is still pending confirmation.")
-        return redirect("portal:student-courses")
-    registered_courses_url = _redirect_with_anchor(
-        "portal:student-courses", "registered-courses"
-    )
+        return _student_callback_redirect(request, payment.student_id, destination)
     # An authenticated Paystack webhook may complete before the browser
     # returns. This retry is idempotent and repairs registration/access.
     if payment.is_paid:
@@ -4363,9 +4436,9 @@ def course_payment_callback(request, payment_id):
             # retry it safely.
             logger.exception("Could not repair paid course payment %s", payment.pk)
             messages.warning(request, f"{payment.course.code} payment is confirmed; course registration is still being completed. Please refresh shortly.")
-            return redirect("portal:student-courses")
+            return _student_callback_redirect(request, payment.student_id, destination)
         messages.success(request, f"{payment.course.code} payment confirmed successfully.")
-        return redirect(registered_courses_url)
+        return _student_callback_redirect(request, payment.student_id, destination)
     try:
         verification = verify_paystack_transaction(payment.paystack_secret_key_used, reference)
     except ValueError as exc:
@@ -4376,36 +4449,37 @@ def course_payment_callback(request, payment_id):
             except Exception:
                 logger.exception("Could not repair paid course payment %s", payment.pk)
                 messages.warning(request, f"{payment.course.code} payment is confirmed; course registration is still being completed. Please refresh shortly.")
-                return redirect("portal:student-courses")
+                return _student_callback_redirect(request, payment.student_id, destination)
             messages.success(request, f"{payment.course.code} payment confirmed successfully.")
-            return redirect(registered_courses_url)
+            return _student_callback_redirect(request, payment.student_id, destination)
         elif _is_paystack_transport_error(exc):
             messages.warning(request, f"{payment.course.code} payment was submitted, but confirmation is still in progress. Please refresh shortly.")
         else:
             messages.error(request, str(exc))
-        return redirect("portal:student-courses")
+        return _student_callback_redirect(request, payment.student_id, destination)
     except Exception:
         # A gateway client failure must not leave the student on a 500 page.
         # Keep the pending payment untouched so Paystack's webhook or a retry
         # can still complete it.
         logger.exception("Unexpected Paystack verification error for course payment %s", payment.pk)
         messages.warning(request, f"{payment.course.code} payment is still being confirmed. Please refresh shortly.")
-        return redirect("portal:student-courses")
+        return _student_callback_redirect(request, payment.student_id, destination)
     if _verification_matches_payment(verification, reference=payment.paystack_reference, amount=payment.amount):
         try:
             _finalize_course_payment(payment)
         except Exception:
             logger.exception("Could not finalize verified course payment %s", payment.pk)
             messages.warning(request, "Your payment was verified, but course registration is still being completed. Please refresh shortly.")
-            return redirect("portal:student-courses")
+            return _student_callback_redirect(request, payment.student_id, destination)
         messages.success(request, f"{payment.course.code} payment confirmed successfully.")
-        return redirect(registered_courses_url)
+        return _student_callback_redirect(request, payment.student_id, destination)
     else:
+        logger.warning("paystack_callback_verification_failed workflow=course reason=verification_mismatch")
         payment.status = CoursePayment.Status.PENDING
         payment.paid_at = None
         payment.save(update_fields=["status", "paid_at", "updated_at"])
         messages.warning(request, f"{payment.course.code} payment is still pending confirmation.")
-    return redirect("portal:student-courses")
+    return _student_callback_redirect(request, payment.student_id, destination)
 
 
 @role_required(User.Role.STUDENT)
