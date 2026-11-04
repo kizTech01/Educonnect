@@ -235,6 +235,7 @@ from .services import (
     verify_paystack_transaction,
     create_subscription_payment,
     dispatch_due_course_reminders,
+    subscription_paystack_credentials,
     subscription_paystack_secret_key,
     verify_and_finalize_subscription_payment,
     issue_account_activation,
@@ -3006,9 +3007,10 @@ def super_admin_settings(request):
             AuditLog.objects.create(user=request.user, action="subscription_gateway_updated", description="Updated the subscription payment gateway.")
             messages.success(request, "Subscription payment gateway saved.")
             return redirect("portal:super-admin-settings")
+    subscription_public_key, subscription_secret_key = subscription_paystack_credentials()
     return render(request, "portal/super_admin_settings.html", {
         "platform_domain": settings.PLATFORM_BASE_DOMAIN,
-        "paystack_configured": gateway.is_configured,
+        "paystack_configured": bool(subscription_public_key and subscription_secret_key),
         "gateway_form": form,
     })
 
@@ -3487,11 +3489,8 @@ def billing_renew(request):
             except ValueError as exc:
                 payment = getattr(exc, "payment", payment)
                 if payment and _is_paystack_transport_error(exc):
-                    gateway = SubscriptionPaymentGateway.objects.filter(
-                        slug="subscription",
-                        is_active=True,
-                    ).first()
-                    if gateway and gateway.is_configured:
+                    public_key, secret_key = subscription_paystack_credentials()
+                    if public_key and secret_key:
                         AuditLog.objects.create(
                             user=request.user,
                             institution=institution,
@@ -3508,7 +3507,7 @@ def billing_renew(request):
                             callback_url=request.build_absolute_uri(reverse("portal:billing-callback")),
                             cancel_url=reverse("portal:billing-renew"),
                             notice="The server could not reach Paystack directly. Continue securely in your browser.",
-                            public_key=gateway.paystack_public_key,
+                            public_key=public_key,
                             email=request.user.email or institution.email,
                             reference=payment.reference,
                         )

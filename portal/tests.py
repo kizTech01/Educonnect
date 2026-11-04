@@ -2873,6 +2873,54 @@ class DashboardAndCourseFlowTests(TestCase):
             )
 
     @patch("portal.services.urlopen")
+    def test_paystack_initialization_handles_malformed_provider_data(self, urlopen):
+        class DummyResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"status":true,"data":[]}'
+
+        urlopen.return_value = DummyResponse()
+
+        from .services import initialize_paystack_transaction
+
+        with self.assertRaisesMessage(ValueError, "Paystack did not return an authorization URL."):
+            initialize_paystack_transaction(
+                secret_key="sk_test_ok",
+                email="student@example.com",
+                amount=Decimal("1000.00"),
+                reference="ref-123",
+                callback_url="https://example.com/callback",
+            )
+
+    @patch("portal.services.urlopen")
+    def test_paystack_http_error_with_non_object_json_does_not_crash(self, urlopen):
+        urlopen.side_effect = HTTPError(
+            "https://api.paystack.co/transaction/initialize",
+            400,
+            "Bad Request",
+            hdrs=None,
+            fp=BytesIO(b"[]"),
+        )
+
+        from .services import initialize_paystack_transaction
+
+        with self.assertRaisesMessage(ValueError, "Paystack rejected the request (HTTP 400): []"):
+            initialize_paystack_transaction(
+                secret_key="sk_test_bad",
+                email="student@example.com",
+                amount=Decimal("1000.00"),
+                reference="ref-123",
+                callback_url="https://example.com/callback",
+            )
+
+    @patch("portal.services.urlopen")
     def test_paystack_request_sends_browser_like_user_agent(self, urlopen):
         class DummyResponse:
             def __enter__(self):

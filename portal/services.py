@@ -4,7 +4,7 @@ import secrets
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -227,7 +227,15 @@ def _paystack_request(secret_key, path, payload=None):
     try:
         with urlopen(request, timeout=20) as response:
             http_status = getattr(response, "status", None)
-            body = response.read().decode("utf-8")
+            try:
+                body = response.read().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                logger.warning(
+                    "paystack_api_request_failed operation=%s http_status=%s failure_kind=invalid_encoding",
+                    operation,
+                    http_status,
+                )
+                raise ValueError("Paystack returned an unreadable response.") from exc
     except HTTPError as exc:
         logger.warning(
             "paystack_api_request_failed operation=%s http_status=%s failure_kind=http_error",
@@ -236,10 +244,10 @@ def _paystack_request(secret_key, path, payload=None):
         )
         raw_body = exc.read().decode("utf-8", errors="replace").strip()
         try:
-            payload = json.loads(raw_body)
+            error_payload = json.loads(raw_body)
         except json.JSONDecodeError:
-            payload = {}
-        message = payload.get("message")
+            error_payload = {}
+        message = error_payload.get("message") if isinstance(error_payload, dict) else None
         if message:
             raise ValueError(f"Paystack rejected the request: {message}") from exc
         if raw_body:
@@ -297,9 +305,12 @@ def initialize_paystack_transaction(*, secret_key, email, amount, reference, cal
         payload["metadata"] = metadata
     response = _paystack_request(secret_key, "transaction/initialize", payload=payload)
     data = response.get("data") or {}
-    if not data.get("authorization_url"):
+    authorization_url = data.get("authorization_url") if isinstance(data, dict) else None
+    parsed_url = urlsplit(authorization_url) if isinstance(authorization_url, str) else None
+    if not parsed_url or parsed_url.scheme != "https" or not parsed_url.netloc:
         logger.warning("paystack_api_request_failed operation=transaction failure_kind=missing_authorization_url")
         raise ValueError("Paystack did not return an authorization URL.")
+    data["authorization_url"] = authorization_url
     return data
 
 
@@ -312,13 +323,19 @@ def verify_paystack_transaction(secret_key, reference):
     return data
 
 
-def subscription_paystack_secret_key():
-    """Use only the Paystack secret saved by the Super Admin in Settings."""
+def subscription_paystack_credentials():
+    """Prefer the Super Admin gateway, retaining supported deployment-key fallback."""
     gateway = SubscriptionPaymentGateway.objects.filter(
         slug="subscription",
         is_active=True,
     ).first()
-    return gateway.paystack_secret_key if gateway and gateway.is_configured else ""
+    if gateway and gateway.is_configured:
+        return gateway.paystack_public_key, gateway.paystack_secret_key
+    return settings.PAYSTACK_PUBLIC_KEY, settings.PAYSTACK_SECRET_KEY
+
+
+def subscription_paystack_secret_key():
+    return subscription_paystack_credentials()[1]
 
 
 def create_subscription_payment(*, institution, plan_duration, email, callback_url):

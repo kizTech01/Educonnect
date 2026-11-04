@@ -49,6 +49,7 @@ from .models import (
 )
 from .forms import InstitutionCreateForm, InstitutionUpdateForm, SubscriptionRenewalForm
 from .services import (
+    create_subscription_payment,
     finalize_subscription_payment,
     paystack_amount_in_kobo,
     send_subscription_expiry_notifications,
@@ -1424,6 +1425,34 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
             plan=self.plan,
             duration_days=365,
             price=self.plan.price,
+        )
+
+    @patch("portal.services.initialize_paystack_transaction")
+    @override_settings(PAYSTACK_PUBLIC_KEY="pk_env_subscription", PAYSTACK_SECRET_KEY="sk_env_subscription")
+    def test_subscription_checkout_uses_deployment_keys_when_database_gateway_is_inactive(
+        self, initialize_paystack_transaction
+    ):
+        self.gateway.is_active = False
+        self.gateway.save(update_fields=["is_active"])
+        initialize_paystack_transaction.return_value = {
+            "authorization_url": "https://checkout.paystack.com/environment-configured"
+        }
+
+        payment, checkout = create_subscription_payment(
+            institution=self.institution,
+            plan_duration=self.duration,
+            email="billing@example.test",
+            callback_url="https://educonnect.example.test/billing/callback/",
+        )
+
+        self.assertTrue(payment.reference)
+        self.assertEqual(
+            initialize_paystack_transaction.call_args.kwargs["secret_key"],
+            "sk_env_subscription",
+        )
+        self.assertEqual(
+            checkout["authorization_url"],
+            "https://checkout.paystack.com/environment-configured",
         )
 
     @patch("portal.services.initialize_paystack_transaction")
