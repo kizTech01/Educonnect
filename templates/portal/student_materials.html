@@ -44,7 +44,7 @@
             </div>
 
             {% if row.needs_payment %}
-                <form method="post" action="{% url 'portal:student-courses' %}" class="stack-form">
+                <form method="post" data-payment-submit action="{% url 'portal:student-courses' %}" class="stack-form">
                     {% csrf_token %}
                     <input type="hidden" name="action" value="pay-course">
                     <input type="hidden" name="course_id" value="{{ row.registration.course.id }}">

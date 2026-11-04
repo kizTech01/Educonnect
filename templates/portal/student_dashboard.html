@@ -56,7 +56,7 @@
                             <td>{{ row.registration.course.schedule_day|default:"TBA" }} {{ row.registration.course.schedule_time|time:"H:i"|default:"" }}</td>
                             <td class="actions-cell">
                                 {% if row.needs_payment %}
-                                    <form method="post" action="{% url 'portal:student-courses' %}">
+                                    <form method="post" data-payment-submit action="{% url 'portal:student-courses' %}">
                                         {% csrf_token %}
                                         <input type="hidden" name="action" value="pay-course">
                                         <input type="hidden" name="course_id" value="{{ row.registration.course.id }}">

@@ -1501,6 +1501,40 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
         payment = Payment.objects.filter(institution=self.institution).latest("created_at")
         self.assertEqual(payment.status, Payment.Status.PENDING)
 
+    @patch("portal.services.initialize_paystack_transaction")
+    def test_subscription_renewal_redirects_to_paystack_authorization_url(
+        self, initialize_paystack_transaction
+    ):
+        initialize_paystack_transaction.return_value = {
+            "authorization_url": "https://checkout.paystack.com/subscription-renewal"
+        }
+        administrator = User.objects.create_user(
+            username="renewal-admin",
+            email="renewal-admin@example.test",
+            password="safe-password-123",
+            role=User.Role.ADMIN,
+            institution=self.institution,
+            is_approved=True,
+        )
+        self.client.force_login(administrator)
+
+        with override_settings(
+            CORE_DOMAIN="example.test",
+            PLATFORM_BASE_DOMAIN="example.test",
+            ALLOWED_HOSTS=["billing.example.test"],
+        ):
+            response = self.client.post(
+                reverse("portal:billing-renew"),
+                {"plan": self.plan.pk, "plan_duration": self.duration.pk},
+                HTTP_HOST="billing.example.test",
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"], "https://checkout.paystack.com/subscription-renewal"
+        )
+        initialize_paystack_transaction.assert_called_once()
+
     def webhook_response(self, secret):
         body = json.dumps({
             "event": "charge.success",

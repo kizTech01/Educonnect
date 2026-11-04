@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from django.apps import apps
 from django.contrib import messages
@@ -41,8 +42,22 @@ from .departmental_document_diagnostics import log_departmental_document_diagnos
 
 
 UPLOAD_LOGGER = logging.getLogger("portal.uploads")
+PAYMENT_LOGGER = logging.getLogger("portal.views")
 DOCUMENT_UPLOAD_ERROR = "The file could not be processed. It was not applied to your records; check the format and try again."
 DOCUMENT_STORAGE_ERROR = "The file could not be stored. Please try again shortly."
+
+
+def _paystack_redirect_response(workflow, reference, authorization_url):
+    response = redirect(authorization_url)
+    location_host = urlsplit(response["Location"]).hostname or "unknown"
+    PAYMENT_LOGGER.info(
+        "paystack_checkout_redirect_response workflow=%s reference=%s status=%s location_host=%s",
+        workflow,
+        reference,
+        response.status_code,
+        location_host,
+    )
+    return response
 
 
 def _save_uploaded_document(document, *, operation):
@@ -3490,7 +3505,9 @@ def billing_renew(request):
                     callback_url=request.build_absolute_uri(reverse("portal:billing-callback")),
                 )
                 AuditLog.objects.create(user=request.user, institution=institution, action="subscription_checkout_started", description=f"Started checkout {payment.reference}.")
-                return redirect(checkout["authorization_url"])
+                return _paystack_redirect_response(
+                    "subscription", payment.reference, checkout["authorization_url"]
+                )
             except ValueError as exc:
                 payment = getattr(exc, "payment", payment)
                 if payment and _is_paystack_transport_error(exc):
@@ -4141,11 +4158,9 @@ def student_departmental(request):
                 messages.error(request, str(exc))
                 return redirect("portal:student-departmental")
             messages.success(request, "Departmental payment request prepared. Continue on Paystack to complete payment.")
-            logger.info(
-                "paystack_checkout_redirect workflow=departmental reference=%s destination_host=checkout.paystack.com",
-                payment.paystack_reference,
+            return _paystack_redirect_response(
+                "departmental", payment.paystack_reference, checkout["authorization_url"]
             )
-            return redirect(checkout["authorization_url"])
         else:
             missing_fields = _form_error_labels(form)
             if missing_fields:
@@ -4338,11 +4353,9 @@ def student_courses(request):
                     messages.error(request, str(exc))
                     return redirect(_redirect_with_query(request, "portal:student-courses"))
                 messages.success(request, f"Course payment request prepared for {course.code}. Continue on Paystack to complete payment.")
-                logger.info(
-                    "paystack_checkout_redirect workflow=course reference=%s destination_host=checkout.paystack.com",
-                    payment.paystack_reference,
+                return _paystack_redirect_response(
+                    "course", payment.paystack_reference, checkout["authorization_url"]
                 )
-                return redirect(checkout["authorization_url"])
             return redirect(_redirect_with_query(request, "portal:student-courses"))
 
         if action == "register-course":

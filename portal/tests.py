@@ -2589,6 +2589,7 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, "https://checkout.paystack.com/mock-course")
+        self.assertEqual(response["Location"], "https://checkout.paystack.com/mock-course")
         initialize_paystack_transaction.assert_called_once()
         self.assertEqual(initialize_paystack_transaction.call_args.kwargs["secret_key"], "sk_test_course")
         self.assertEqual(
@@ -2611,6 +2612,20 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'data-payment-submit')
+
+    def test_dashboard_and_materials_paid_course_forms_have_duplicate_submit_protection(self):
+        StudentCourseRegistration.objects.create(
+            student=self.student,
+            course=self.paid_course,
+            registered_by=self.student,
+        )
+        self.client.force_login(self.student)
+
+        dashboard_response = self.client.get(reverse("portal:student-dashboard"))
+        materials_response = self.client.get(reverse("portal:student-materials"))
+
+        self.assertContains(dashboard_response, 'data-payment-submit')
+        self.assertContains(materials_response, 'data-payment-submit')
 
     @patch("portal.views.initialize_paystack_transaction")
     def test_paid_course_payment_prefers_its_department_course_api(self, initialize_paystack_transaction):
@@ -2756,6 +2771,7 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, "https://checkout.paystack.com/mock-department")
+        self.assertEqual(response["Location"], "https://checkout.paystack.com/mock-department")
         initialize_paystack_transaction.assert_called_once()
         self.assertEqual(initialize_paystack_transaction.call_args.kwargs["secret_key"], "sk_test_department")
 
