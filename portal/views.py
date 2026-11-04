@@ -4030,8 +4030,13 @@ def student_departmental(request):
         form = DepartmentalStudentPaymentForm(request.POST, request.FILES, session=session, fee_map=fee_map)
         gateway = department_payment_gateway_for_payment(request.user.department)
         if not request.user.department_id:
+            logger.warning("paystack_checkout_not_started workflow=departmental failure_kind=student_department_missing")
             messages.error(request, "Your account does not have a department yet.")
         elif not gateway or not gateway.is_configured:
+            logger.warning(
+                "paystack_checkout_not_started workflow=departmental failure_kind=gateway_not_configured department_id=%s",
+                request.user.department_id,
+            )
             messages.error(request, "Your department payment gateway has not been configured by the admin yet.")
         elif existing_payment and existing_payment.is_paid:
             messages.info(request, "You have already completed departmental payment for the current session.")
@@ -4113,6 +4118,10 @@ def student_departmental(request):
                     },
                 )
             except ValueError as exc:
+                logger.warning(
+                    "paystack_checkout_initialization_rejected workflow=departmental error_type=%s",
+                    type(exc).__name__,
+                )
                 if _is_paystack_transport_error(exc):
                     messages.warning(
                         request,
@@ -4132,6 +4141,10 @@ def student_departmental(request):
                 messages.error(request, str(exc))
                 return redirect("portal:student-departmental")
             messages.success(request, "Departmental payment request prepared. Continue on Paystack to complete payment.")
+            logger.info(
+                "paystack_checkout_redirect workflow=departmental reference=%s destination_host=checkout.paystack.com",
+                payment.paystack_reference,
+            )
             return redirect(checkout["authorization_url"])
         else:
             missing_fields = _form_error_labels(form)
@@ -4228,6 +4241,10 @@ def student_courses(request):
         course = get_object_or_404(_student_course_catalog_queryset(request.user), pk=request.POST.get("course_id"))
 
         if action in {"pay-course", "register-course"} and not course.is_available:
+            logger.warning(
+                "paystack_checkout_not_started workflow=course failure_kind=course_unavailable course_id=%s",
+                course.pk,
+            )
             messages.error(request, f"{course.code} is not currently available for registration.")
             return redirect(_redirect_with_query(request, "portal:student-courses"))
 
@@ -4237,6 +4254,11 @@ def student_courses(request):
             else:
                 gateway = course_payment_gateway_for_department(course.department)
                 if not gateway or not gateway.is_configured:
+                    logger.warning(
+                        "paystack_checkout_not_started workflow=course failure_kind=gateway_not_configured department_id=%s course_id=%s",
+                        course.department_id,
+                        course.pk,
+                    )
                     messages.error(request, f"The HOD has not configured a paid-course API for {course.department.name} yet.")
                     return redirect(_redirect_with_query(request, "portal:student-courses"))
                 payment = _active_course_payment(request.user, course, current_session)
@@ -4292,6 +4314,11 @@ def student_courses(request):
                         },
                     )
                 except ValueError as exc:
+                    logger.warning(
+                        "paystack_checkout_initialization_rejected workflow=course course_id=%s error_type=%s",
+                        course.pk,
+                        type(exc).__name__,
+                    )
                     if _is_paystack_transport_error(exc):
                         messages.warning(
                             request,
@@ -4311,6 +4338,10 @@ def student_courses(request):
                     messages.error(request, str(exc))
                     return redirect(_redirect_with_query(request, "portal:student-courses"))
                 messages.success(request, f"Course payment request prepared for {course.code}. Continue on Paystack to complete payment.")
+                logger.info(
+                    "paystack_checkout_redirect workflow=course reference=%s destination_host=checkout.paystack.com",
+                    payment.paystack_reference,
+                )
                 return redirect(checkout["authorization_url"])
             return redirect(_redirect_with_query(request, "portal:student-courses"))
 

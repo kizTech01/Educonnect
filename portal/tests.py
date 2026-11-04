@@ -2621,13 +2621,15 @@ class DashboardAndCourseFlowTests(TestCase):
         DepartmentCoursePaymentGateway.objects.filter(department=self.department).delete()
         self.client.force_login(self.student)
 
-        response = self.client.post(
-            reverse("portal:student-courses"),
-            {"action": "pay-course", "course_id": self.paid_course.id},
-            follow=True,
-        )
+        with self.assertLogs("portal.views", level="WARNING") as captured_logs:
+            response = self.client.post(
+                reverse("portal:student-courses"),
+                {"action": "pay-course", "course_id": self.paid_course.id},
+                follow=True,
+            )
 
         self.assertContains(response, "The HOD has not configured a paid-course API")
+        self.assertIn("failure_kind=gateway_not_configured", " ".join(captured_logs.output))
 
     @patch("portal.views.initialize_paystack_transaction")
     def test_course_payment_starts_without_registration(self, initialize_paystack_transaction):
