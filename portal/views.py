@@ -3105,6 +3105,7 @@ def ai_assistant(request):
 @require_http_methods(["GET", "POST"])
 def ai_automation(request):
     """Execute a validated tenant account-import proposal as soon as it is uploaded."""
+    institution = request.institution or request.user.institution
     jobs = AIAutomationJob.objects.select_related("requested_by", "approved_by").order_by("-created_at")
 
     form = AIAutomationUploadForm()
@@ -3116,7 +3117,7 @@ def ai_automation(request):
                 upload = form.cleaned_data["file"]
                 command = form.cleaned_data["command"]
                 try:
-                    proposal = analyze_institution_automation(upload, command, request.institution)
+                    proposal = analyze_institution_automation(upload, command, institution)
                 except (ValueError, ValidationError) as exc:
                     form.add_error(None, str(exc))
                 else:
@@ -3129,7 +3130,7 @@ def ai_automation(request):
                         requested_by=request.user,
                     )
                     AuditLog.objects.create(
-                        institution=request.institution, user=request.user,
+                        institution=institution, user=request.user,
                         action="ai_automation_analyzed", object_type="AIAutomationJob", object_id=str(job.id),
                         new_value={"action": job.action, "proposed_count": len(job.proposed_changes)},
                         description="AI/document automation proposal generated for immediate execution.",
@@ -3140,7 +3141,7 @@ def ai_automation(request):
                     job.approved_at = timezone.now()
                     job.save(update_fields=["status", "approved_by", "approved_at", "updated_at"])
                     AuditLog.objects.create(
-                        institution=request.institution, user=request.user,
+                        institution=institution, user=request.user,
                         action="ai_automation_approved", object_type="AIAutomationJob", object_id=str(job.id),
                         new_value={"action": job.action, "proposed_count": len(job.proposed_changes)},
                         description="Institution Admin automatically approved the uploaded automation proposal.",
@@ -3158,7 +3159,7 @@ def ai_automation(request):
                         form.add_error(None, str(exc))
                     else:
                         AuditLog.objects.create(
-                            institution=request.institution, user=request.user,
+                            institution=institution, user=request.user,
                             action="ai_automation_executed", object_type="AIAutomationJob", object_id=str(job.id),
                             new_value=summary,
                             description="Institution Admin automatically executed an uploaded automation proposal.",

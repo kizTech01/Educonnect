@@ -878,6 +878,9 @@ def analyze_institution_automation(upload, command, institution):
     proposal stored on the job.  That prevents a later model response from
     changing the approved operation.
     """
+    if institution is None:
+        raise ValueError("An institution context is required before accounts can be imported.")
+
     command = (command or "").strip()
     lowered = command.casefold()
     if not any(token in lowered for token in ("account", "staff", "lecturer", "student", "import")):
@@ -921,6 +924,13 @@ def analyze_institution_automation(upload, command, institution):
             "id_number": staff_id[:30], "name": name[:300], "department_id": department.id if department else None,
             "role": role,
         })
+    if not proposed:
+        if errors:
+            raise ValueError(errors[0]["error"])
+        if duplicates:
+            raise ValueError("Every row in this file already belongs to an existing account.")
+        raise ValueError("No account records were found in the uploaded file.")
+
     return {
         "action": "create_accounts",
         "analysis": {"records_found": len(rows), "valid_records": len(proposed), "duplicates": duplicates, "errors": errors},
@@ -943,10 +953,10 @@ def execute_institution_automation(job, approver, activation_url_builder=None):
             skipped += 1
             continue
         name_parts = record["name"].split(maxsplit=1)
-        user = User.objects.create_user(
+        user = User.all_objects.create_user(
             username=record["username"], email=record.get("email", ""), id_number=record.get("id_number") or None,
             first_name=name_parts[0], last_name=name_parts[1] if len(name_parts) > 1 else "",
-            department_id=record.get("department_id"), role=record["role"],
+            institution=job.institution, department_id=record.get("department_id"), role=record["role"],
             password=None,
             is_approved=True,
         )

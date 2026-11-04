@@ -311,6 +311,26 @@ class InstitutionalRBACTests(TestCase):
         self.assertFalse(User.objects.filter(username="LEC-002").exists())
         self.assertFalse(AIAutomationJob.objects.exists())
 
+    def test_ai_automation_uses_the_authenticated_users_institution_without_a_tenant_host(self):
+        administrator = User.objects.create_user(
+            username="automation-platform-host-admin", password="pass1234", role=User.Role.ADMIN,
+        )
+        self.client.force_login(administrator)
+        upload = SimpleUploadedFile(
+            "lecturers.csv",
+            b"name,email,lecturer_id,department_code\nGrace Hopper,grace@example.test,LEC-003,SEC\n",
+            content_type="text/csv",
+        )
+
+        response = self.client.post(
+            reverse("portal:ai-automation"),
+            {"action": "run", "file": upload, "command": "Create lecturer accounts from this file"},
+        )
+
+        self.assertRedirects(response, reverse("portal:ai-automation"))
+        lecturer = User.all_objects.get(username="LEC-003", role=User.Role.LECTURER)
+        self.assertEqual(lecturer.institution, administrator.institution)
+
 class DepartmentAutomationTests(TestCase):
     def setUp(self):
         self.department = Department.objects.create(name="Computer Science", code="CSC")
