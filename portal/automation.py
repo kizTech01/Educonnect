@@ -80,6 +80,7 @@ def extract_text(uploaded_file):
 def _xlsx_text(data):
     with zipfile.ZipFile(BytesIO(data)) as archive:
         shared = []
+        namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
         if "xl/sharedStrings.xml" in archive.namelist():
             root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
             shared = ["".join(item.itertext()) for item in root]
@@ -87,16 +88,28 @@ def _xlsx_text(data):
         lines = []
         for sheet in sheets:
             root = ElementTree.fromstring(archive.read(sheet))
-            for row in root.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row"):
+            for row in root.iter(f"{namespace}row"):
                 cells = []
                 for cell in row:
-                    value = cell.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
-                    if value is None or not value.text:
-                        continue
-                    text = value.text
+                    reference = re.match(r"[A-Z]+", cell.attrib.get("r", ""))
+                    if reference:
+                        column_index = 0
+                        for character in reference.group():
+                            column_index = column_index * 26 + ord(character) - ord("A") + 1
+                        column_index -= 1
+                    else:
+                        column_index = len(cells)
+                    while len(cells) <= column_index:
+                        cells.append("")
+                    value = cell.find(f"{namespace}v")
+                    if cell.attrib.get("t") == "inlineStr":
+                        inline_value = cell.find(f"{namespace}is")
+                        text = "".join(inline_value.itertext()) if inline_value is not None else ""
+                    else:
+                        text = value.text if value is not None and value.text else ""
                     if cell.attrib.get("t") == "s" and text.isdigit() and int(text) < len(shared):
                         text = shared[int(text)]
-                    cells.append(text)
+                    cells[column_index] = text
                 if cells:
                     lines.append(",".join(cells))
         return "\n".join(lines)
@@ -550,11 +563,18 @@ def _course_allocation_records(text):
 def _records_from_upload(upload, task):
     suffix = os.path.splitext(upload.file.name)[1].lower()
     if suffix in IMAGE_SUFFIXES:
-        return _ai_extract_image(upload.file, task) or []
+        records = _ai_extract_image(upload.file, task)
+        if records is None and "lecturers with" in task:
+            raise ValueError("Scanned lecturer lists need a working OPENAI_API_KEY for automatic extraction.")
+        return records or []
     text = extract_text(upload.file)
     local_rows = _rows(text)
     if "lecturers with" in task:
-        usable_rows = [row for row in local_rows if _field(row, "lecturer_id", "staff_id", "id") and _field(row, "full_name", "lecturer_name", "name")]
+        usable_rows = [
+            row for row in local_rows
+            if _field(row, "lecturer_id", "staff_id", "staff_no", "staff_number", "id")
+            and _field(row, "full_name", "lecturer_name", "lecturer_full_name", "staff_name", "employee_name", "name_of_lecturer", "name")
+        ]
     else:
         usable_rows = _course_allocation_records(text)
     # Let AI read every supported text document when it is configured, including
@@ -565,10 +585,10 @@ def _records_from_upload(upload, task):
     if "lecturers with" in task:
         usable_ai_rows = [
             row for row in ai_rows
-            if _field(row, "lecturer_id", "staff_id", "id")
-            and _field(row, "full_name", "lecturer_name", "name")
+            if _field(row, "lecturer_id", "staff_id", "staff_no", "staff_number", "id")
+            and _field(row, "full_name", "lecturer_name", "lecturer_full_name", "staff_name", "employee_name", "name_of_lecturer", "name")
         ]
-        record_key = lambda row: _allocation_key(_field(row, "lecturer_id", "staff_id", "id"))
+        record_key = lambda row: _allocation_key(_field(row, "lecturer_id", "staff_id", "staff_no", "staff_number", "id"))
     else:
         usable_ai_rows = [
             row for row in ai_rows
@@ -579,6 +599,8 @@ def _records_from_upload(upload, task):
             _allocation_key(_field(row, "lecturer_id", "staff_id", "lecturer_name", "full_name", "name")),
             _allocation_key(_field(row, "course_code", "course", "code")),
         )
+    if "lecturers with" in task and not usable_rows and not usable_ai_rows:
+        return []
     if not usable_rows:
         return usable_ai_rows or local_rows
     merged = {record_key(row): row for row in usable_rows}
@@ -781,8 +803,8 @@ def import_department_lecturers(upload):
     created = existing = skipped = tenant_conflicts = role_conflicts = 0
     with transaction.atomic():
         for row in rows:
-            lecturer_id = _field(row, "lecturer_id", "staff_id", "id")
-            name = _field(row, "full_name", "lecturer_name", "name")
+            lecturer_id = _field(row, "lecturer_id", "staff_id", "staff_no", "staff_number", "id")
+            name = _field(row, "full_name", "lecturer_name", "lecturer_full_name", "staff_name", "employee_name", "name_of_lecturer", "name")
             if not lecturer_id or not name or len(lecturer_id) > 30:
                 skipped += 1
                 continue
@@ -817,7 +839,23 @@ def import_department_lecturers(upload):
             )
             created += 1
         if not created and not existing:
-            raise ValueError("No valid lecturer records were found. Use Lecturer ID and Lecturer Name columns.")
+            if role_conflicts:
+                raise ValueError(
+                    f"No lecturer accounts were created because {role_conflicts} ID(s) already belong to non-lecturer accounts."
+                )
+            if tenant_conflicts:
+                raise ValueError(
+                    f"No lecturer accounts were created because {tenant_conflicts} ID(s) are already registered at another institution."
+                )
+            if not rows:
+                raise ValueError(
+                    "No lecturer rows could be extracted. Upload a roster with Lecturer ID and Lecturer Name columns. "
+                    "Scanned images need a working OPENAI_API_KEY."
+                )
+            raise ValueError(
+                "No lecturer account was created. Check that every row includes a Lecturer ID and Lecturer Name, "
+                "and that each ID is 30 characters or fewer."
+            )
     conflict_note = f" {tenant_conflicts} row(s) used a lecturer ID already assigned to another institution and were skipped." if tenant_conflicts else ""
     role_conflict_note = f" {role_conflicts} lecturer ID(s) already belong to non-lecturer accounts and were skipped." if role_conflicts else ""
     return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped.{conflict_note}{role_conflict_note} New lecturer accounts use this institution's subdomain followed by 'educonnect' as the temporary password."
