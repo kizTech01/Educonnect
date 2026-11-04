@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from django.apps import apps
 from django.contrib import messages
@@ -1219,6 +1220,19 @@ def _initialize_checkout_or_message(request, *, secret_key, email, amount, refer
 
 def _is_paystack_transport_error(exc):
     return str(exc) == "Unable to reach Paystack right now. Please try again shortly."
+
+
+def _paystack_checkout_redirect(checkout, *, workflow, reference):
+    response = redirect(checkout["authorization_url"])
+    location = urlsplit(response["Location"])
+    logger.info(
+        "paystack_redirect_response_sent workflow=%s reference=%s status=%s destination_host=%s",
+        workflow,
+        reference,
+        response.status_code,
+        location.hostname or "unknown",
+    )
+    return response
 
 
 def _render_paystack_browser_checkout(
@@ -3490,7 +3504,11 @@ def billing_renew(request):
                     callback_url=request.build_absolute_uri(reverse("portal:billing-callback")),
                 )
                 AuditLog.objects.create(user=request.user, institution=institution, action="subscription_checkout_started", description=f"Started checkout {payment.reference}.")
-                return redirect(checkout["authorization_url"])
+                return _paystack_checkout_redirect(
+                    checkout,
+                    workflow="subscription",
+                    reference=payment.reference,
+                )
             except ValueError as exc:
                 payment = getattr(exc, "payment", payment)
                 if payment and _is_paystack_transport_error(exc):
@@ -4141,11 +4159,11 @@ def student_departmental(request):
                 messages.error(request, str(exc))
                 return redirect("portal:student-departmental")
             messages.success(request, "Departmental payment request prepared. Continue on Paystack to complete payment.")
-            logger.info(
-                "paystack_checkout_redirect workflow=departmental reference=%s destination_host=checkout.paystack.com",
-                payment.paystack_reference,
+            return _paystack_checkout_redirect(
+                checkout,
+                workflow="departmental",
+                reference=payment.paystack_reference,
             )
-            return redirect(checkout["authorization_url"])
         else:
             missing_fields = _form_error_labels(form)
             if missing_fields:
@@ -4338,11 +4356,11 @@ def student_courses(request):
                     messages.error(request, str(exc))
                     return redirect(_redirect_with_query(request, "portal:student-courses"))
                 messages.success(request, f"Course payment request prepared for {course.code}. Continue on Paystack to complete payment.")
-                logger.info(
-                    "paystack_checkout_redirect workflow=course reference=%s destination_host=checkout.paystack.com",
-                    payment.paystack_reference,
+                return _paystack_checkout_redirect(
+                    checkout,
+                    workflow="course",
+                    reference=payment.paystack_reference,
                 )
-                return redirect(checkout["authorization_url"])
             return redirect(_redirect_with_query(request, "portal:student-courses"))
 
         if action == "register-course":

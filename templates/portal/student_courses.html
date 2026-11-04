@@ -148,14 +148,14 @@
                             {% elif course.id in registered_course_ids %}
                                 <span class="muted-note">Already registered</span>
                             {% elif course.is_free or course.id in paid_course_ids %}
-                                <form method="post" action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                <form method="post" data-payment-submit action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                     {% csrf_token %}
                                     <input type="hidden" name="action" value="register-course">
                                     <input type="hidden" name="course_id" value="{{ course.id }}">
                                     <button type="submit" class="ghost-btn small">Register</button>
                                 </form>
                             {% else %}
-                                <form method="post" action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                                <form method="post" data-payment-submit action="{% url 'portal:student-courses' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
                                     {% csrf_token %}
                                     <input type="hidden" name="action" value="pay-course">
                                     <input type="hidden" name="course_id" value="{{ course.id }}">
