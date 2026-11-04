@@ -74,7 +74,14 @@ from .services import (
     ensure_default_admin_user,
     provisioned_password_for,
 )
-from .forms import CourseForm, LecturerSignupForm, ProvisionedLecturerForm
+from .forms import (
+    CourseAllocationUploadForm,
+    CourseForm,
+    DepartmentLecturerUploadForm,
+    HandbookForm,
+    LecturerSignupForm,
+    ProvisionedLecturerForm,
+)
 from .views import (
     AI_ROLE_EXAMPLES,
     _ai_answer,
@@ -357,6 +364,23 @@ class DepartmentAutomationTests(TestCase):
         created_course = Course.objects.get(code="CSC424")
         self.assertEqual(created_course.level, "400")
         self.assertTrue(LecturerCourseRegistration.objects.filter(lecturer=co_lecturer, course=created_course).exists())
+
+    def test_ai_document_forms_reject_unsupported_file_types_before_uploading(self):
+        unsupported_file = SimpleUploadedFile("lecturers.exe", b"not a document")
+        lecturer_form = DepartmentLecturerUploadForm(files={"file": unsupported_file})
+        allocation_form = CourseAllocationUploadForm(
+            files={"file": SimpleUploadedFile("allocation.exe", b"not a document")},
+            department=self.department,
+        )
+        handbook_form = HandbookForm(
+            data={"department": self.department.id},
+            files={"file": SimpleUploadedFile("handbook.exe", b"not a document")},
+        )
+
+        self.assertFalse(lecturer_form.is_valid())
+        self.assertFalse(allocation_form.is_valid())
+        self.assertFalse(handbook_form.is_valid())
+        self.assertIn("Use a CSV", lecturer_form.errors["file"][0])
 
     def test_ai_lecturer_extraction_creates_departmental_accounts(self):
         lecturer_upload = DepartmentLecturerUpload.objects.create(

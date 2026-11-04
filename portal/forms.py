@@ -542,16 +542,37 @@ class PlatformAdminForm(forms.Form):
         return email
 
 
-class DepartmentLecturerUploadForm(StyledModelForm):
+AI_DOCUMENT_EXTENSIONS = ("csv", "txt", "docx", "xlsx", "pdf", "jpg", "jpeg", "png", "webp")
+AI_DOCUMENT_ACCEPT = ",".join(f".{extension}" for extension in AI_DOCUMENT_EXTENSIONS)
+
+
+class AIDocumentUploadValidationMixin:
+    """Keep every AI document entry point within the formats the parser supports."""
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data["file"]
+        extension = uploaded_file.name.rsplit(".", 1)[-1].lower() if "." in uploaded_file.name else ""
+        if extension not in AI_DOCUMENT_EXTENSIONS:
+            raise forms.ValidationError(
+                "Use a CSV, TXT, DOCX, XLSX, text-based PDF, JPG, JPEG, PNG, or WebP file."
+            )
+        if uploaded_file.size > settings.EDUCONNECT_MAX_UPLOAD_BYTES:
+            raise forms.ValidationError("This file is larger than the configured upload limit.")
+        return uploaded_file
+
+
+class DepartmentLecturerUploadForm(AIDocumentUploadValidationMixin, StyledModelForm):
     class Meta:
         model = DepartmentLecturerUpload
         fields = ["file"]
+        widgets = {"file": forms.ClearableFileInput(attrs={"accept": AI_DOCUMENT_ACCEPT})}
 
 
-class CourseAllocationUploadForm(StyledModelForm):
+class CourseAllocationUploadForm(AIDocumentUploadValidationMixin, StyledModelForm):
     class Meta:
         model = CourseAllocationUpload
         fields = ["file"]
+        widgets = {"file": forms.ClearableFileInput(attrs={"accept": AI_DOCUMENT_ACCEPT})}
 
     def __init__(self, *args, department=None, **kwargs):
         """Accept trusted HOD context without exposing department to the POST."""
@@ -920,10 +941,11 @@ class HandbookFilterForm(forms.Form):
             field.widget.attrs["class"] = "input-field"
 
 
-class HandbookForm(StyledModelForm):
+class HandbookForm(AIDocumentUploadValidationMixin, StyledModelForm):
     class Meta:
         model = Handbook
         fields = ["department", "programme", "file"]
+        widgets = {"file": forms.ClearableFileInput(attrs={"accept": AI_DOCUMENT_ACCEPT})}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

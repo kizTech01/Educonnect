@@ -30,9 +30,10 @@
     <form method="post" enctype="multipart/form-data" class="stack-form">
         {% csrf_token %}
         <input type="hidden" name="action" value="upload-allocations">
-        <p class="muted-note">Upload CSV, Excel, Word, text, text-based PDF, or a scanned image. Use <strong>Lecturer ID</strong> and <strong>Course Code</strong> columns, or a Word table with <strong>Lecturer Name</strong>, <strong>Lecturer ID</strong>, and <strong>Allocated Courses</strong>. Scanned images use configured AI extraction; every result is still matched only within this department.</p>
+        <p class="muted-note">Upload CSV, Excel, Word, text, text-based PDF, or a scanned image. Use <strong>Lecturer ID</strong> and <strong>Course Code</strong> columns, or a Word table with <strong>Lecturer Name</strong>, <strong>Lecturer ID</strong>, and <strong>Allocated Courses</strong>. After choosing a file, use the button below to upload it and run extraction. Scanned images use configured AI extraction; every result is still matched only within this department.</p>
         <label>{{ allocation_form.file.label }} {{ allocation_form.file }} {{ allocation_form.file.errors }}</label>
-        <button type="submit" class="primary-btn">Add Course Allocation</button>
+        {{ allocation_form.non_field_errors }}
+        <button type="submit" class="primary-btn">Upload and Run AI Allocation</button>
     </form>
 </section>
 <section class="panel-card">
@@ -40,9 +41,10 @@
     <form method="post" enctype="multipart/form-data" class="stack-form">
         {% csrf_token %}
         <input type="hidden" name="action" value="upload-handbook">
-        <p class="muted-note">Upload a handbook for {{ department.name }}. Course codes and titles are extracted into a new curriculum version. CSV, Excel, Word, text, text-based PDF, and scanned images are supported; scanned images require configured AI extraction. It is available only to students in this department.</p>
+        <p class="muted-note">Upload a handbook for {{ department.name }}. Course codes and titles are extracted into a new curriculum version. After choosing a file, use the button below to upload it and run extraction. CSV, Excel, Word, text, text-based PDF, and scanned images are supported; scanned images require configured AI extraction. It is available only to students in this department.</p>
         <label>{{ handbook_form.file.label }} {{ handbook_form.file }} {{ handbook_form.file.errors }}</label>
-        <button type="submit" class="primary-btn">Upload Handbook</button>
+        {{ handbook_form.non_field_errors }}
+        <button type="submit" class="primary-btn">Upload Handbook and Run AI</button>
     </form>
 </section>
 </section>

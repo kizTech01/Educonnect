@@ -5645,9 +5645,11 @@ def hod_departmental_apis(request):
                 upload.save(update_fields=["processing_summary", "updated_at"])
                 messages.success(request, upload.processing_summary)
             except ValueError as exc:
+                upload.processing_summary = str(exc)
+                upload.save(update_fields=["processing_summary", "updated_at"])
                 messages.error(request, str(exc))
             return redirect("portal:hod-api-and-document")
-        messages.error(request, "Choose a valid course-allocation file.")
+        messages.error(request, f"Choose a valid course-allocation file. {' '.join(allocation_form.errors.get('file', []))}")
     elif request.method == "POST" and request.POST.get("action") == "upload-handbook":
         handbook_data = request.POST.copy()
         handbook_data["department"] = str(department.id)
@@ -5659,7 +5661,7 @@ def hod_departmental_apis(request):
             except ValueError as exc:
                 messages.warning(request, f"Handbook uploaded, but course automation could not run: {exc}")
             return redirect("portal:hod-api-and-document")
-        messages.error(request, "Choose a valid handbook file.")
+            messages.error(request, f"Choose a valid handbook file. {' '.join(handbook_form.errors.get('file', []))}")
     elif request.method == "POST" and request.POST.get("action") == "save-course-gateway":
         course_gateway_form = DepartmentCoursePaymentGatewayForm(request.POST, instance=course_gateway)
         if course_gateway_form.is_valid():
@@ -5961,7 +5963,7 @@ def admin_departments(request):
                     upload.save(update_fields=["processing_summary", "updated_at"])
                     messages.error(request, str(exc))
                 return redirect(_redirect_with_query(request, "portal:admin-departments"))
-            messages.error(request, "Choose a valid department-lecturers file.")
+            messages.error(request, f"Choose a valid department-lecturers file. {' '.join(upload_form.errors.get('file', []))}")
     context = dashboard_context(
         request,
         "Manage Departments",
