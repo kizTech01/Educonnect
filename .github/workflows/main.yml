@@ -83,6 +83,12 @@ jobs:
             -e CORE_DOMAIN \
             -e DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1 \
             -e DJANGO_TIME_ZONE=Africa/Lagos \
+            -e AWS_ACCESS_KEY_ID=ci-r2-access-key \
+            -e AWS_SECRET_ACCESS_KEY=ci-r2-secret-key \
+            -e AWS_STORAGE_BUCKET_NAME=educonnect-ci \
+            -e AWS_S3_ENDPOINT_URL=https://example.invalid \
+            -e AWS_S3_REGION_NAME=auto \
+            -e AWS_QUERYSTRING_AUTH=True \
             educonnect-test
 
       - name: Wait for application

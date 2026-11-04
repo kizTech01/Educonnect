@@ -56,4 +56,10 @@ jobs:
           DJANGO_SECRET_KEY: ci-only-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDE
           DJANGO_ALLOWED_HOSTS: example.com
           CSRF_TRUSTED_ORIGINS: https://example.com
+          AWS_ACCESS_KEY_ID: ci-r2-access-key
+          AWS_SECRET_ACCESS_KEY: ci-r2-secret-key
+          AWS_STORAGE_BUCKET_NAME: educonnect-ci
+          AWS_S3_ENDPOINT_URL: https://example.invalid
+          AWS_S3_REGION_NAME: auto
+          AWS_QUERYSTRING_AUTH: "True"
         run: python manage.py check --deploy
