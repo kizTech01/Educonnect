@@ -168,10 +168,131 @@ def _ai_extract_image(uploaded_file, task):
     return _openai_extract(body, key)
 
 
-def course_records(text):
-    ai = _ai_extract(text, "courses with code, title, level, semester, credit_units, and requirement (compulsory or elective)")
-    if ai:
-        return ai
+def _outline_title_and_units(value):
+    """Remove the table's status/unit columns from a handbook course title."""
+    value = re.sub(r"\s+(?:C|E|G)\s*(\d+)\b.*$", "", value, flags=re.I).strip()
+    # Some handbook tables omit the status column and put the unit/load values
+    # directly after the title (for example, ``Introduction to Computing I 3 30``).
+    value = re.sub(r"\s+\d{1,2}\s+(?:\d{1,3}|-)\b.*$", "", value).strip()
+    return value.strip(" :-\t")
+
+
+def _outline_course_records(text):
+    """Read paginated handbook course-outline tables without importing syllabi.
+
+    Student handbooks usually place every course in a ``COURSE OUTLINE`` table,
+    with level, semester, requirement and title spread across neighbouring
+    lines.  The later ``Course Contents`` pages repeat the same course codes
+    but contain syllabus prose, which must never become catalogue titles.
+    """
+    records = []
+    seen_codes = set()
+    in_outline = False
+    outline_window = 0
+    level = "100"
+    semester = "first"
+    requirement = "compulsory"
+    pending = None
+
+    def save_pending():
+        nonlocal pending
+        if not pending:
+            return
+        title = _outline_title_and_units(pending["title"])
+        code = pending["code"]
+        if len(title) >= 3 and code not in seen_codes:
+            pending["title"] = title[:200]
+            records.append(pending)
+            seen_codes.add(code)
+        pending = None
+
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if "COURSE OUTLINE" in upper:
+            save_pending()
+            # The table of contents also contains "Course Outline".  Do not
+            # start parsing until a nearby ``100 LEVEL`` heading confirms this
+            # is the actual course-table section.
+            in_outline = False
+            outline_window = 12
+            continue
+        if in_outline and re.search(
+            r"\b(?:\d+(?:\.\d+)?)?\s*COURSES?\s+(?:CONTENTS?|DESCRIPTIONS?)\b",
+            upper,
+        ):
+            save_pending()
+            in_outline = False
+            outline_window = 0
+            continue
+
+        level_match = re.search(r"\b([1-5]00)\s+LEVEL\b", upper)
+        if level_match and outline_window:
+            in_outline = True
+            outline_window = 0
+        elif outline_window:
+            outline_window -= 1
+        if not in_outline:
+            continue
+        if level_match:
+            save_pending()
+            level = level_match.group(1)
+            continue
+        if re.search(r"\bFIRST\s+SEMESTER\b", upper):
+            save_pending()
+            semester = "first"
+            continue
+        if re.search(r"\bSECOND\s+SEMESTER\b", upper):
+            save_pending()
+            semester = "second"
+            continue
+        if re.search(r"\bELECTIVES?\b", upper):
+            save_pending()
+            requirement = "elective"
+            continue
+        if re.search(r"\b(?:COMPULSORY|GENERAL)\s+COURSES?\b", upper):
+            save_pending()
+            requirement = "compulsory"
+            continue
+        if re.search(r"\b(?:SEMESTER\s+TOTAL|COURSE\s+(?:CODE|TITLE)|STATUS\s+UNITS?)\b", upper):
+            save_pending()
+            continue
+
+        match = COURSE_CODE_RE.search(line)
+        if match:
+            save_pending()
+            code = _allocation_key(match.group(1))
+            title = _outline_title_and_units(line[match.end():])
+            units_match = re.search(r"\s(?:C|E|G)\s*(\d+)\b", line, re.I)
+            if not units_match:
+                units_match = re.search(r"\s(\d{1,2})\s+(?:\d{1,3}|-)\b", line)
+            pending = {
+                "code": code,
+                "title": title,
+                "level": level,
+                "semester": semester,
+                "credit_units": int(units_match.group(1)) if units_match else 2,
+                "requirement": requirement,
+            }
+            continue
+
+        if not pending:
+            continue
+        status_match = re.match(r"^(?:C|E|G)\s*(\d+)\b", line, re.I)
+        if status_match:
+            pending["credit_units"] = int(status_match.group(1))
+            save_pending()
+            continue
+        if not re.search(r"\b(?:STUDENT.?S HANDBOOK|PAGE)\b", upper):
+            pending["title"] = f"{pending['title']} {line}".strip()
+
+    save_pending()
+    return records
+
+
+def _generic_course_records(text):
     records = []
     for line in text.splitlines():
         match = COURSE_CODE_RE.search(line)
@@ -193,6 +314,13 @@ def course_records(text):
             "requirement": "elective" if re.search(r"\belective\b", line, re.I) else "compulsory",
         })
     return records
+
+
+def course_records(text):
+    ai = _ai_extract(text, "courses with code, title, level, semester, credit_units, and requirement (compulsory or elective)")
+    if ai:
+        return ai
+    return _outline_course_records(text) or _generic_course_records(text)
 
 
 def handbook_course_records(handbook):

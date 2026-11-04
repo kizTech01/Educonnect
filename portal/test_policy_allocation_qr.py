@@ -7,13 +7,53 @@ from django.db import transaction
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
-from .automation import _allocation_key, import_course_allocations
+from .automation import _allocation_key, course_records, import_course_allocations
 from .services import deliver_notification
 from .models import (
     AcademicSession, Course, CourseAllocationUpload, Department, DepartmentalPayment,
     Faculty, Institution, LecturerCourseRegistration, Programme, CoursePayment,
     Notification, NotificationRecipient, StudentCourseRegistration, User,
 )
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class HandbookOutlineParserTests(TestCase):
+    def test_paginated_handbook_outline_keeps_context_and_skips_course_descriptions(self):
+        text = """
+        Contents
+        COURSE OUTLINE
+        100 LEVEL
+        FIRST SEMESTER
+        Course Code Title Status Units L T P
+        CSC 101 Introduction to Computer
+        Science
+        C 3 30 15 0
+        Electives
+        CSC 199 Special Topics in
+        Computing
+        E 2 15 15 0
+        SECOND SEMESTER
+        CSC 102 Introduction to Problem Solving C 3 30 15 0
+        11.0 Course Contents
+        CSC 101: Introduction to Computer Science (3 Units)
+        This syllabus prose must not become a second course record.
+        COURSE OUTLINE
+        100 LEVEL
+        FIRST SEMESTER
+        CSC 101 Introduction to Computing I 3 30 15 0
+        CSC 103 Computer Installation and Management 2 15 15 0
+        COURSES DESCRIPTION
+        CSC 103: Computer installation syllabus text
+        """
+
+        records = course_records(text)
+        by_code = {record["code"]: record for record in records}
+
+        self.assertEqual(set(by_code), {"CSC101", "CSC102", "CSC103", "CSC199"})
+        self.assertEqual(by_code["CSC101"]["title"], "Introduction to Computer Science")
+        self.assertEqual(by_code["CSC101"]["credit_units"], 3)
+        self.assertEqual(by_code["CSC102"]["semester"], "second")
+        self.assertEqual(by_code["CSC199"]["requirement"], "elective")
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
