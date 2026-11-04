@@ -19,18 +19,18 @@
     </div>
 
     <div class="reader-body">
-        <p class="muted-note">Paystack will open directly in your browser. If it does not appear automatically, use the button below.</p>
+        <p class="muted-note">Select Open Paystack to start the secure checkout in your browser.</p>
         <button type="button" class="primary-btn" id="open-paystack">Open Paystack</button>
         <p class="muted-note" id="paystack-status" role="status" aria-live="polite"></p>
         <a href="{{ checkout_cancel_url }}" class="ghost-btn small">Cancel</a>
     </div>
 </section>
 
-<script src="https://js.paystack.co/v1/inline.js"></script>
+<script src="https://js.paystack.co/v2/inline.js"></script>
 <script nonce="{{ csp_nonce }}">
 (function () {
     const launchPaystack = function () {
-        if (!window.PaystackPop || typeof window.PaystackPop.setup !== "function") {
+        if (typeof window.PaystackPop !== "function") {
             const status = document.getElementById("paystack-status");
             if (status) {
                 status.textContent = "Paystack checkout could not load. Check your connection or disable content blockers, then reload this page.";
@@ -38,28 +38,37 @@
             return;
         }
 
-        const handler = PaystackPop.setup({
+        const status = document.getElementById("paystack-status");
+        try {
+            const popup = new PaystackPop();
+            popup.newTransaction({
             key: "{{ checkout_public_key|escapejs }}",
             email: "{{ checkout_email|escapejs }}",
             amount: {{ checkout_amount_in_kobo }},
-            ref: "{{ checkout_reference|escapejs }}",
-            callback: function (response) {
-                const reference = response && (response.reference || response.trxref)
-                    ? (response.reference || response.trxref)
+            currency: "NGN",
+            reference: "{{ checkout_reference|escapejs }}",
+            onSuccess: function (response) {
+                const reference = response && response.reference
+                    ? response.reference
                     : "{{ checkout_reference|escapejs }}";
                 window.location.href = "{{ checkout_callback_url|escapejs }}?reference=" + encodeURIComponent(reference);
             },
-            onClose: function () {
+            onCancel: function () {
                 window.location.href = "{{ checkout_cancel_url|escapejs }}";
             },
-        });
-
-        try {
-            handler.openIframe();
+            onError: function (error) {
+                if (status) {
+                    status.textContent = error && error.message
+                        ? "Paystack error: " + error.message
+                        : "Paystack could not start checkout. Verify the gateway configuration and try again.";
+                }
+            },
+            });
         } catch (error) {
-            const status = document.getElementById("paystack-status");
             if (status) {
-                status.textContent = "Paystack checkout could not open. Please use the Open Paystack button or try another browser.";
+                status.textContent = error && error.message
+                    ? "Paystack could not start checkout: " + error.message
+                    : "Paystack checkout could not start. Verify the gateway configuration and try again.";
             }
         }
     };
@@ -68,8 +77,6 @@
     if (button) {
         button.addEventListener("click", launchPaystack);
     }
-
-    launchPaystack();
 })();
 </script>
 {% endblock %}
