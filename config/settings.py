@@ -419,6 +419,11 @@ LOGGING = {
             "level": "WARNING",
             "propagate": False,
         },
+        "portal.uploads": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
     },
 }
 

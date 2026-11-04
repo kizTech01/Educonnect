@@ -38,6 +38,59 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from pypdf import PdfReader
 
 from .departmental_document_diagnostics import log_departmental_document_diagnostic
+
+
+UPLOAD_LOGGER = logging.getLogger("portal.uploads")
+DOCUMENT_UPLOAD_ERROR = "The file could not be processed. It was not applied to your records; check the format and try again."
+DOCUMENT_STORAGE_ERROR = "The file could not be stored. Please try again shortly."
+
+
+def _save_uploaded_document(document, *, operation):
+    """Persist an upload without allowing storage failures to become a user-facing 500."""
+    try:
+        document.save()
+        return True
+    except Exception:
+        UPLOAD_LOGGER.exception(
+            "document_upload_storage_failed operation=%s document_id=%s department_id=%s institution_id=%s",
+            operation,
+            getattr(document, "pk", None),
+            getattr(document, "department_id", None),
+            getattr(document, "institution_id", None),
+        )
+        return False
+
+
+def _run_document_automation(document, *, operation, processor):
+    """Return a safe message for malformed files and log unexpected failures."""
+    try:
+        return processor(document), None
+    except ValueError as exc:
+        return None, str(exc)
+    except Exception:
+        UPLOAD_LOGGER.exception(
+            "document_automation_failed operation=%s document_id=%s department_id=%s institution_id=%s",
+            operation,
+            getattr(document, "pk", None),
+            getattr(document, "department_id", None),
+            getattr(document, "institution_id", None),
+        )
+        return None, DOCUMENT_UPLOAD_ERROR
+
+
+def _store_processing_summary(document, summary, *, operation):
+    """Best-effort status persistence; storage failures are logged safely."""
+    document.processing_summary = summary
+    try:
+        document.save(update_fields=["processing_summary", "updated_at"])
+    except Exception:
+        UPLOAD_LOGGER.exception(
+            "document_upload_summary_failed operation=%s document_id=%s department_id=%s institution_id=%s",
+            operation,
+            getattr(document, "pk", None),
+            getattr(document, "department_id", None),
+            getattr(document, "institution_id", None),
+        )
 from .forms import (
     CourseForm,
     CourseResultForm,
@@ -5389,11 +5442,15 @@ def hod_programme_detail(request, programme_id):
         form_data["programme"] = str(programme.pk)
         handbook_form = HandbookForm(form_data, request.FILES)
         if handbook_form.is_valid():
-            handbook = handbook_form.save()
-            try:
-                summary = import_handbook_courses(handbook)
-            except ValueError as exc:
-                messages.warning(request, f"Handbook uploaded, but course automation could not run: {exc}")
+            handbook = handbook_form.save(commit=False)
+            if not _save_uploaded_document(handbook, operation="programme_handbook"):
+                messages.error(request, DOCUMENT_STORAGE_ERROR)
+                return redirect("portal:hod-programme-detail", programme_id=programme.pk)
+            summary, error = _run_document_automation(
+                handbook, operation="programme_handbook", processor=import_handbook_courses,
+            )
+            if error:
+                messages.warning(request, f"Handbook uploaded, but course automation could not run: {error}")
             else:
                 AuditLog.objects.create(
                     institution=request.institution, user=request.user, action="programme_handbook_uploaded",
@@ -5640,15 +5697,17 @@ def hod_departmental_apis(request):
             upload = allocation_form.save(commit=False)
             upload.department = department
             upload.uploaded_by = request.user
-            upload.save()
-            try:
-                upload.processing_summary = import_course_allocations(upload)
-                upload.save(update_fields=["processing_summary", "updated_at"])
-                messages.success(request, upload.processing_summary)
-            except ValueError as exc:
-                upload.processing_summary = str(exc)
-                upload.save(update_fields=["processing_summary", "updated_at"])
-                messages.error(request, str(exc))
+            if not _save_uploaded_document(upload, operation="course_allocation"):
+                messages.error(request, DOCUMENT_STORAGE_ERROR)
+                return redirect("portal:hod-api-and-document")
+            summary, error = _run_document_automation(
+                upload, operation="course_allocation", processor=import_course_allocations
+            )
+            _store_processing_summary(upload, summary or error, operation="course_allocation")
+            if error:
+                messages.error(request, error)
+            else:
+                messages.success(request, summary)
             return redirect("portal:hod-api-and-document")
         messages.error(request, f"Choose a valid course-allocation file. {' '.join(allocation_form.errors.get('file', []))}")
     elif request.method == "POST" and request.POST.get("action") == "upload-handbook":
@@ -5656,11 +5715,17 @@ def hod_departmental_apis(request):
         handbook_data["department"] = str(department.id)
         handbook_form = HandbookForm(handbook_data, request.FILES)
         if handbook_form.is_valid():
-            handbook = handbook_form.save()
-            try:
-                messages.success(request, import_handbook_courses(handbook))
-            except ValueError as exc:
-                messages.warning(request, f"Handbook uploaded, but course automation could not run: {exc}")
+            handbook = handbook_form.save(commit=False)
+            if not _save_uploaded_document(handbook, operation="department_handbook"):
+                messages.error(request, DOCUMENT_STORAGE_ERROR)
+                return redirect("portal:hod-api-and-document")
+            summary, error = _run_document_automation(
+                handbook, operation="department_handbook", processor=import_handbook_courses
+            )
+            if error:
+                messages.warning(request, f"Handbook uploaded, but course automation could not run: {error}")
+            else:
+                messages.success(request, summary)
             return redirect("portal:hod-api-and-document")
             messages.error(request, f"Choose a valid handbook file. {' '.join(handbook_form.errors.get('file', []))}")
     elif request.method == "POST" and request.POST.get("action") == "save-course-gateway":
@@ -5954,15 +6019,17 @@ def admin_departments(request):
             if upload_form.is_valid():
                 upload = upload_form.save(commit=False)
                 upload.department, upload.uploaded_by = department, request.user
-                upload.save()
-                try:
-                    upload.processing_summary = import_department_lecturers(upload)
-                    upload.save(update_fields=["processing_summary", "updated_at"])
-                    messages.success(request, upload.processing_summary)
-                except ValueError as exc:
-                    upload.processing_summary = str(exc)
-                    upload.save(update_fields=["processing_summary", "updated_at"])
-                    messages.error(request, str(exc))
+                if not _save_uploaded_document(upload, operation="department_lecturers"):
+                    messages.error(request, DOCUMENT_STORAGE_ERROR)
+                    return redirect(_redirect_with_query(request, "portal:admin-departments"))
+                summary, error = _run_document_automation(
+                    upload, operation="department_lecturers", processor=import_department_lecturers
+                )
+                _store_processing_summary(upload, summary or error, operation="department_lecturers")
+                if error:
+                    messages.error(request, error)
+                else:
+                    messages.success(request, summary)
                 return redirect(_redirect_with_query(request, "portal:admin-departments"))
             messages.error(request, f"Choose a valid department-lecturers file. {' '.join(upload_form.errors.get('file', []))}")
     context = dashboard_context(

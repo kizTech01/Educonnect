@@ -84,6 +84,7 @@ from .forms import (
 )
 from .views import (
     AI_ROLE_EXAMPLES,
+    DOCUMENT_UPLOAD_ERROR,
     _ai_answer,
     _departmental_storage_status,
     download_departmental_document,
@@ -4173,6 +4174,68 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["student@example.com"])
         self.assertIn("verification code", mail.outbox[0].body)
+
+    def test_department_and_hod_document_uploads_handle_unexpected_processor_errors(self):
+        """Bad documents or parser failures must become safe feedback, never a 500."""
+        self.department.head_of_department = self.lecturer
+        self.department.save(update_fields=["head_of_department", "updated_at"])
+        programme = Programme.objects.create(
+            department=self.department,
+            name="Computer Science",
+            code="BSC-CS-ERROR",
+            award="BSc",
+        )
+
+        self.client.force_login(self.admin)
+        with patch("portal.views.import_department_lecturers", side_effect=RuntimeError("broken lecturer parser")):
+            response = self.client.post(
+                reverse("portal:admin-departments"),
+                {
+                    "action": "upload-lecturers",
+                    "department_id": self.department.pk,
+                    "file": SimpleUploadedFile(
+                        "lecturers.csv", b"Lecturer ID,Lecturer Name\nLEC-ERR,Ada Lecturer\n", content_type="text/csv",
+                    ),
+                },
+            )
+        self.assertRedirects(response, reverse("portal:admin-departments"))
+        self.assertEqual(DepartmentLecturerUpload.objects.latest("pk").processing_summary, DOCUMENT_UPLOAD_ERROR)
+
+        self.client.force_login(self.lecturer)
+        with patch("portal.views.import_course_allocations", side_effect=RuntimeError("broken allocation parser")):
+            response = self.client.post(
+                reverse("portal:hod-api-and-document"),
+                {
+                    "action": "upload-allocations",
+                    "file": SimpleUploadedFile(
+                        "allocations.csv", b"Lecturer ID,Course Code\nLEC-ERR,CSC101\n", content_type="text/csv",
+                    ),
+                },
+            )
+        self.assertRedirects(response, reverse("portal:hod-api-and-document"))
+        self.assertEqual(CourseAllocationUpload.objects.latest("pk").processing_summary, DOCUMENT_UPLOAD_ERROR)
+
+        with patch("portal.views.import_handbook_courses", side_effect=RuntimeError("broken handbook parser")):
+            response = self.client.post(
+                reverse("portal:hod-api-and-document"),
+                {
+                    "action": "upload-handbook",
+                    "file": SimpleUploadedFile("handbook.txt", b"CSC101 Introduction", content_type="text/plain"),
+                },
+            )
+        self.assertRedirects(response, reverse("portal:hod-api-and-document"))
+        self.assertTrue(Handbook.objects.filter(department=self.department, programme__isnull=True).exists())
+
+        with patch("portal.views.import_handbook_courses", side_effect=RuntimeError("broken programme handbook parser")):
+            response = self.client.post(
+                reverse("portal:hod-programme-detail", args=[programme.pk]),
+                {
+                    "action": "upload-handbook",
+                    "file": SimpleUploadedFile("programme-handbook.txt", b"CSC101 Introduction", content_type="text/plain"),
+                },
+            )
+        self.assertRedirects(response, reverse("portal:hod-programme-detail", args=[programme.pk]))
+        self.assertTrue(Handbook.objects.filter(department=self.department, programme=programme).exists())
 
 
 @override_settings(

@@ -642,7 +642,7 @@ def _create_course_from_allocation(department, row, course_code, session):
 
 def import_department_lecturers(upload):
     rows = _records_from_upload(upload, "lecturers with full_name, lecturer_id, email, and phone_number")
-    created = existing = skipped = 0
+    created = existing = skipped = tenant_conflicts = 0
     with transaction.atomic():
         for row in rows:
             lecturer_id = _field(row, "lecturer_id", "staff_id", "id")
@@ -651,9 +651,17 @@ def import_department_lecturers(upload):
                 skipped += 1
                 continue
             user = User.all_objects.filter(
-                institution=upload.institution,
-            ).filter(Q(username__iexact=lecturer_id) | Q(id_number__iexact=lecturer_id)).first()
+                Q(username__iexact=lecturer_id)
+                | Q(institution=upload.institution, id_number__iexact=lecturer_id)
+            ).first()
             if user:
+                if user.institution_id != upload.institution_id:
+                    # Django usernames are globally unique. Treat an ID used by a
+                    # different tenant as a recoverable row conflict instead of a
+                    # database IntegrityError that would turn an upload into a 500.
+                    tenant_conflicts += 1
+                    skipped += 1
+                    continue
                 if user.role == User.Role.LECTURER and not user.department_id:
                     user.department = upload.department
                     user.save(update_fields=["department"])
@@ -669,7 +677,8 @@ def import_department_lecturers(upload):
             created += 1
         if not created and not existing:
             raise ValueError("No valid lecturer records were found. Use Lecturer ID and Lecturer Name columns.")
-    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped. New lecturer accounts use this institution's subdomain followed by 'educonnect' as the temporary password."
+    conflict_note = f" {tenant_conflicts} row(s) used a lecturer ID already assigned to another institution and were skipped." if tenant_conflicts else ""
+    return f"Lecturer automation finished: {created} accounts created, {existing} already existed, {skipped} skipped.{conflict_note} New lecturer accounts use this institution's subdomain followed by 'educonnect' as the temporary password."
 
 
 def import_course_allocations(upload):
