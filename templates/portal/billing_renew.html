@@ -21,6 +21,6 @@
             </tbody>
         </table>
     </div>
-    <form method="post" class="stack-form" data-payment-submit>{% csrf_token %}{{ form.as_p }}<button class="primary-btn">Continue to secure checkout</button></form>
+    <form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="primary-btn">Continue to secure checkout</button></form>
 </section>
 {% endblock %}
