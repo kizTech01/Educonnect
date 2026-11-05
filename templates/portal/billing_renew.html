@@ -3,20 +3,21 @@
 {% block dashboard_content %}
 <section class="panel narrow-panel">
     <h2>Renew {{ institution.name }}</h2>
-    <p>Select a plan and duration. The selected duration price is the amount sent to Paystack.</p>
+    <p>Choose a subscription plan. Its listed price is the amount sent to Paystack.</p>
     <div class="table-wrap">
         <table>
-            <thead><tr><th>Plan</th><th>What it includes</th><th>Limits</th><th>Available durations</th></tr></thead>
+            <thead><tr><th>Plan</th><th>Price</th><th>Term</th><th>What it includes</th><th>Limits</th></tr></thead>
             <tbody>
                 {% for plan in plans %}
                     <tr>
                         <td><strong>{{ plan.name }}</strong></td>
+                        <td>₦{{ plan.price|floatformat:2 }}</td>
+                        <td>{{ plan.duration_label }}</td>
                         <td>{{ plan.description|default:"No additional description supplied." }}</td>
                         <td>{{ plan.max_students|default:"Unlimited" }} students · {{ plan.max_staff|default:"Unlimited" }} staff · {{ plan.max_storage_mb|default:"Unlimited" }} MB storage</td>
-                        <td>{% for duration in plan.durations.all %}{% if duration.is_active %}{{ duration.duration_label }} — ₦{{ duration.price|floatformat:2 }}{% if not forloop.last %}<br>{% endif %}{% endif %}{% empty %}No active duration{% endfor %}</td>
                     </tr>
                 {% empty %}
-                    <tr><td colspan="4">No subscription plans are currently available.</td></tr>
+                    <tr><td colspan="5">No subscription plans are currently available.</td></tr>
                 {% endfor %}
             </tbody>
         </table>

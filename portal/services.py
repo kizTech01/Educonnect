@@ -31,7 +31,6 @@ from .models import (
     Payment,
     Subscription,
     SubscriptionPlan,
-    SubscriptionPlanDuration,
     SubscriptionPaymentGateway,
     SubscriptionEvent,
     SubscriptionNotification,
@@ -367,29 +366,23 @@ def verify_paystack_transaction(secret_key, reference):
 
 
 def subscription_paystack_credentials():
-    """Prefer the Super Admin gateway, retaining supported deployment-key fallback."""
+    """Return credentials configured by the Super Admin for subscriptions."""
     gateway = SubscriptionPaymentGateway.objects.filter(
         slug="subscription",
         is_active=True,
     ).first()
     if gateway and gateway.is_configured:
         return gateway.paystack_public_key, gateway.paystack_secret_key
-    return settings.PAYSTACK_PUBLIC_KEY, settings.PAYSTACK_SECRET_KEY
+    return "", ""
 
 
 def subscription_paystack_secret_key():
     return subscription_paystack_credentials()[1]
 
 
-def create_subscription_payment(*, institution, plan_duration, email, callback_url):
-    """Create a pending payment for the selected plan duration and its amount."""
-    plan = plan_duration.plan
-    if (
-        not plan.is_active
-        or plan.is_trial
-        or not plan_duration.is_active
-        or plan_duration.duration_days not in {183, 365, 730, 1825}
-    ):
+def create_subscription_payment(*, institution, plan, email, callback_url):
+    """Create a pending payment using the plan's own price and billing period."""
+    if not plan.is_active or plan.is_trial or plan.price <= 0 or plan.duration_days <= 0:
         raise ValueError("That subscription plan is unavailable.")
     secret_key = subscription_paystack_secret_key()
     if not secret_key:
@@ -409,9 +402,9 @@ def create_subscription_payment(*, institution, plan_duration, email, callback_u
         institution=institution,
         subscription=subscription,
         plan=plan,
-        duration_days=plan_duration.duration_days,
+        duration_days=plan.duration_days,
         reference=f"SUB-{timezone.now():%Y%m%d}-{uuid4().hex[:14].upper()}",
-        amount=plan_duration.price,
+        amount=plan.price,
     )
     try:
         transaction_data = initialize_paystack_transaction(

@@ -129,8 +129,6 @@ from .forms import (
     InstitutionUpdateForm,
     SubscriptionPlanForm,
     SubscriptionPlanEditForm,
-    SubscriptionPlanDurationForm,
-    SubscriptionPlanDurationEditForm,
     SubscriptionPaymentGatewayForm,
     ScreeningIntegrationForm,
     SubscriptionRenewalForm,
@@ -225,7 +223,6 @@ from .models import (
     Programme,
     Subscription,
     SubscriptionPlan,
-    SubscriptionPlanDuration,
     SubscriptionPaymentGateway,
     GuardianRelationship,
     ScreeningIntegration,
@@ -2766,30 +2763,16 @@ def super_admin_reset_institution_admin_password(request, user_id):
 @super_admin_required
 def super_admin_plans(request):
     form = SubscriptionPlanForm()
-    duration_form = SubscriptionPlanDurationForm()
     if request.method == "POST":
-        if request.POST.get("action") == "add-duration":
-            duration_form = SubscriptionPlanDurationForm(request.POST)
-            if duration_form.is_valid():
-                duration = duration_form.save()
-                AuditLog.objects.create(
-                    user=request.user,
-                    action="subscription_plan_duration_created",
-                    description=f"Added {duration.duration_label} pricing for {duration.plan.name}.",
-                )
-                messages.success(request, f"Added {duration.duration_label} pricing for {duration.plan.name}.")
-                return redirect("portal:super-admin-plans")
-        else:
-            form = SubscriptionPlanForm(request.POST)
-            if form.is_valid():
-                plan = form.save()
-                AuditLog.objects.create(user=request.user, action="subscription_plan_created", description=f"Created plan {plan.name}.")
-                messages.success(request, "Subscription plan created with its first duration and amount.")
-                return redirect("portal:super-admin-plans")
+        form = SubscriptionPlanForm(request.POST)
+        if form.is_valid():
+            plan = form.save()
+            AuditLog.objects.create(user=request.user, action="subscription_plan_created", description=f"Created plan {plan.name}.")
+            messages.success(request, "Subscription plan created.")
+            return redirect("portal:super-admin-plans")
     return render(request, "portal/super_admin_plans.html", {
-        "plans": SubscriptionPlan.objects.prefetch_related("durations"),
+        "plans": SubscriptionPlan.objects.all(),
         "form": form,
-        "duration_form": duration_form,
     })
 
 
@@ -2812,27 +2795,6 @@ def super_admin_plan_edit(request, plan_id):
         messages.success(request, f"{plan.name} has been updated.")
         return redirect("portal:super-admin-plans")
     return render(request, "portal/super_admin_plan_form.html", {"form": form, "plan": plan})
-
-
-@super_admin_required
-@require_http_methods(["GET", "POST"])
-def super_admin_plan_duration_edit(request, duration_id):
-    duration = get_object_or_404(SubscriptionPlanDuration.objects.select_related("plan"), pk=duration_id)
-    if duration.plan.is_trial:
-        raise Http404
-    form = SubscriptionPlanDurationEditForm(request.POST or None, instance=duration)
-    if request.method == "POST" and form.is_valid():
-        duration = form.save()
-        AuditLog.objects.create(
-            user=request.user,
-            action="subscription_plan_duration_updated",
-            description=f"Updated {duration.duration_label} pricing for {duration.plan.name}.",
-            object_type="SubscriptionPlanDuration",
-            object_id=str(duration.id),
-        )
-        messages.success(request, f"{duration.duration_label} pricing has been updated.")
-        return redirect("portal:super-admin-plans")
-    return render(request, "portal/super_admin_plan_duration_form.html", {"form": form, "duration": duration})
 
 
 @super_admin_required
@@ -3494,13 +3456,14 @@ def billing_renew(request):
     form = SubscriptionRenewalForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         if not subscription_paystack_secret_key():
+            messages.error(request, "Subscription billing is not configured. Please contact Educonnect support.")
             form.add_error(None, "Subscription billing is not configured. Please contact Educonnect support.")
         else:
             payment = None
             try:
                 payment, checkout = create_subscription_payment(
                     institution=institution,
-                    plan_duration=form.cleaned_data["plan_duration"],
+                    plan=form.cleaned_data["plan"],
                     email=request.user.email or institution.email,
                     callback_url=request.build_absolute_uri(reverse("portal:billing-callback")),
                 )
@@ -3525,7 +3488,7 @@ def billing_renew(request):
                             checkout_heading="Renew Institution Subscription",
                             payment=payment,
                             checkout_label="Plan",
-                            checkout_value=f"{payment.plan.name} ({payment.duration_days} days)",
+                            checkout_value=payment.plan.name,
                             callback_url=request.build_absolute_uri(reverse("portal:billing-callback")),
                             cancel_url=reverse("portal:billing-renew"),
                             notice="The server could not reach Paystack directly. Continue securely in your browser.",
@@ -3533,6 +3496,7 @@ def billing_renew(request):
                             email=request.user.email or institution.email,
                             reference=payment.reference,
                         )
+                messages.error(request, str(exc))
                 form.add_error(None, str(exc))
     return render(request, "portal/billing_renew.html", dashboard_context(
         request,
@@ -3542,7 +3506,8 @@ def billing_renew(request):
         plans=SubscriptionPlan.objects.filter(
             is_active=True,
             is_trial=False,
-        ).prefetch_related("durations"),
+            price__gt=0,
+        ),
     ))
 
 

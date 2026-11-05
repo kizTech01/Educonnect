@@ -24,7 +24,6 @@ urlpatterns = [
     path("super-admin/institution-admins/<int:user_id>/reset-password/", views.super_admin_reset_institution_admin_password, name="super-admin-reset-institution-admin-password"),
     path("super-admin/plans/", views.super_admin_plans, name="super-admin-plans"),
     path("super-admin/plans/<int:plan_id>/edit/", views.super_admin_plan_edit, name="super-admin-plan-edit"),
-    path("super-admin/plans/durations/<int:duration_id>/edit/", views.super_admin_plan_duration_edit, name="super-admin-plan-duration-edit"),
     path("super-admin/plans/<int:plan_id>/toggle/", views.super_admin_plan_toggle, name="super-admin-plan-toggle"),
     path("super-admin/plans/<int:plan_id>/delete/", views.super_admin_plan_delete, name="super-admin-plan-delete"),
     path("super-admin/subscriptions/", views.super_admin_subscriptions, name="super-admin-subscriptions"),

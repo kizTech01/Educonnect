@@ -12,6 +12,13 @@
     <link rel="stylesheet" href="{% static 'css/app.css' %}">
 </head>
 <body class="{% block body_class %}{% endblock %}">
+    {% if messages %}
+        <section class="flash-stack container" aria-live="polite" aria-atomic="false">
+            {% for message in messages %}
+                <div class="flash {{ message.tags }}"{% if 'error' in message.tags %} role="alert"{% else %} role="status"{% endif %}>{{ message }}</div>
+            {% endfor %}
+        </section>
+    {% endif %}
     <header class="site-header">
         <div class="container nav-shell">
             <a href="{% url 'portal:home' %}" class="brand-mark">
@@ -36,14 +43,6 @@
             {% endif %}
         </div>
     </header>
-
-    {% if messages %}
-        <section class="flash-stack container">
-            {% for message in messages %}
-                <div class="flash {{ message.tags }}">{{ message }}</div>
-            {% endfor %}
-        </section>
-    {% endif %}
 
     {% block content %}{% endblock %}
 

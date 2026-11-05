@@ -41,7 +41,6 @@ from .models import (
     User,
     get_default_institution,
     SubscriptionPlan,
-    SubscriptionPlanDuration,
     SubscriptionPaymentGateway,
     ScreeningIntegration,
     AccommodationApplication,
@@ -408,7 +407,7 @@ class SubscriptionPlanForm(StyledModelForm):
         ("730", "2 years"),
         ("1825", "5 years"),
     )
-    duration_days = forms.ChoiceField(choices=DURATION_CHOICES, label="Plan duration")
+    duration_days = forms.ChoiceField(choices=DURATION_CHOICES, label="Access period")
 
     class Meta:
         model = SubscriptionPlan
@@ -427,88 +426,33 @@ class SubscriptionPlanForm(StyledModelForm):
         plan.is_trial = False
         if commit:
             plan.save()
-            SubscriptionPlanDuration.objects.get_or_create(
-                plan=plan,
-                duration_days=plan.custom_duration_days,
-                defaults={"price": plan.price},
-            )
         return plan
 
 
 class SubscriptionPlanEditForm(StyledModelForm):
-    """Edit commercial plan details without changing its existing durations."""
+    """Edit a plan's single price and commercial details."""
 
     class Meta:
         model = SubscriptionPlan
         fields = [
-            "name", "description", "max_students", "max_staff", "max_storage_mb",
+            "name", "description", "price", "max_students", "max_staff", "max_storage_mb",
             "is_active",
         ]
-
-
-class SubscriptionPlanDurationForm(StyledModelForm):
-    class Meta:
-        model = SubscriptionPlanDuration
-        fields = ["plan", "duration_days", "price", "is_active"]
-        widgets = {
-            "price": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
-        }
-
-    def clean_price(self):
-        price = self.cleaned_data["price"]
-        if price <= 0:
-            raise forms.ValidationError("A subscription duration must have an amount greater than zero.")
-        return price
-
-
-class SubscriptionPlanDurationEditForm(StyledModelForm):
-    """Change a duration's selling price or availability, never its identity."""
-
-    class Meta:
-        model = SubscriptionPlanDuration
-        fields = ["price", "is_active"]
-        widgets = {
-            "price": forms.NumberInput(attrs={"step": "0.01", "min": "0"}),
-        }
-
-    def clean_price(self):
-        price = self.cleaned_data["price"]
-        if price <= 0:
-            raise forms.ValidationError("A subscription duration must have an amount greater than zero.")
-        return price
+        widgets = {"price": forms.NumberInput(attrs={"step": "0.01", "min": "0"})}
 
 
 class SubscriptionRenewalForm(forms.Form):
     plan = forms.ModelChoiceField(queryset=SubscriptionPlan.objects.none())
-    plan_duration = forms.ModelChoiceField(queryset=SubscriptionPlanDuration.objects.none(), label="Plan duration")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        available_durations = SubscriptionPlanDuration.objects.filter(
-            is_active=True,
-            plan__is_active=True,
-            plan__is_trial=False,
-        ).select_related("plan")
         self.fields["plan"].queryset = SubscriptionPlan.objects.filter(
             is_active=True,
             is_trial=False,
-            durations__in=available_durations,
-        ).distinct()
-        self.fields["plan_duration"].queryset = available_durations
-        self.fields["plan"].label_from_instance = lambda plan: plan.name
-        self.fields["plan_duration"].label_from_instance = (
-            lambda duration: f"{duration.duration_label} — ₦{duration.price:,.2f}"
+            price__gt=0,
         )
+        self.fields["plan"].label_from_instance = lambda plan: plan.name
         self.fields["plan"].widget.attrs["class"] = "input-field"
-        self.fields["plan_duration"].widget.attrs["class"] = "input-field"
-
-    def clean(self):
-        cleaned_data = super().clean()
-        plan = cleaned_data.get("plan")
-        duration = cleaned_data.get("plan_duration")
-        if plan and duration and duration.plan_id != plan.id:
-            self.add_error("plan_duration", "Choose a duration offered by the selected plan.")
-        return cleaned_data
 
 
 class SubscriptionPaymentGatewayForm(StyledModelForm):

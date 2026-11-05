@@ -823,7 +823,7 @@ class ScreeningIntegrationTests(TestCase):
         Image.new("RGB", (1, 1), "white").save(image, format="PNG")
         return SimpleUploadedFile(name, image.getvalue(), content_type="image/png")
 
-    def test_renewal_form_offers_only_the_requested_paid_plan_durations(self):
+    def test_renewal_form_offers_paid_plans_without_duration_choices(self):
         trial = SubscriptionPlan.objects.create(
             name="Six-month free trial", price=Decimal("0.00"),
             billing_period=SubscriptionPlan.BillingPeriod.CUSTOM,
@@ -838,19 +838,17 @@ class ScreeningIntegrationTests(TestCase):
             )
             for label, duration in (("Standard", 183), ("Premium", 365))
         ]
-        durations = [
-            SubscriptionPlanDuration.objects.create(plan=plan, duration_days=duration, price=Decimal("10000.00"))
-            for plan, duration in zip(plans, (183, 365))
-        ]
-        SubscriptionPlan.objects.create(
+        SubscriptionPlanDuration.objects.create(plan=plans[0], duration_days=183, price=Decimal("25000.00"))
+        monthly = SubscriptionPlan.objects.create(
             name="Monthly", price=Decimal("1000.00"),
             billing_period=SubscriptionPlan.BillingPeriod.MONTHLY,
         )
 
         form = SubscriptionRenewalForm()
 
-        self.assertEqual(set(form.fields["plan"].queryset), set(plans))
-        self.assertEqual(set(form.fields["plan_duration"].queryset), set(durations))
+        available_plans = set(form.fields["plan"].queryset)
+        self.assertTrue({*plans, monthly}.issubset(available_plans))
+        self.assertNotIn("plan_duration", form.fields)
         self.assertNotIn(trial, form.fields["plan"].queryset)
 
     def test_super_admin_can_save_the_subscription_payment_gateway(self):
@@ -1334,35 +1332,38 @@ class SubscriptionPlanManagementTests(TestCase):
             billing_period=SubscriptionPlan.BillingPeriod.CUSTOM,
             custom_duration_days=365,
         )
-        self.duration = SubscriptionPlanDuration.objects.create(
-            plan=self.plan, duration_days=365, price=Decimal("12000.00"),
-        )
         self.client.force_login(self.super_admin)
 
-    def test_super_admin_can_edit_a_plan_and_its_duration(self):
+    def test_super_admin_can_edit_a_plan_and_its_single_price(self):
         plan_response = self.client.post(
             reverse("portal:super-admin-plan-edit", args=[self.plan.id]),
             {
                 "name": "Standard Plus",
                 "description": "More storage and support",
+                "price": "15000.00",
                 "max_students": "1000",
                 "max_staff": "100",
                 "max_storage_mb": "20480",
                 "is_active": "on",
             },
         )
-        duration_response = self.client.post(
-            reverse("portal:super-admin-plan-duration-edit", args=[self.duration.id]),
-            {"price": "15000.00", "is_active": "on"},
+        self.assertRedirects(plan_response, reverse("portal:super-admin-plans"))
+        self.plan.refresh_from_db()
+        self.assertEqual(self.plan.name, "Standard Plus")
+        self.assertEqual(self.plan.price, Decimal("15000.00"))
+        self.assertEqual(self.plan.max_students, 1000)
+
+    def test_global_notifications_render_before_the_site_header(self):
+        response = self.client.post(
+            reverse("portal:super-admin-plan-toggle", args=[self.plan.id]),
+            follow=True,
         )
 
-        self.assertRedirects(plan_response, reverse("portal:super-admin-plans"))
-        self.assertRedirects(duration_response, reverse("portal:super-admin-plans"))
-        self.plan.refresh_from_db()
-        self.duration.refresh_from_db()
-        self.assertEqual(self.plan.name, "Standard Plus")
-        self.assertEqual(self.plan.max_students, 1000)
-        self.assertEqual(self.duration.price, Decimal("15000.00"))
+        self.assertContains(response, "Standard has been deactivated.")
+        self.assertLess(
+            response.content.index(b"flash-stack"),
+            response.content.index(b"site-header"),
+        )
 
     def test_super_admin_can_deactivate_or_delete_an_unused_plan_but_not_history(self):
         toggle_response = self.client.post(reverse("portal:super-admin-plan-toggle", args=[self.plan.id]))
@@ -1439,31 +1440,44 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
 
     @patch("portal.services.initialize_paystack_transaction")
     @override_settings(PAYSTACK_PUBLIC_KEY="pk_env_subscription", PAYSTACK_SECRET_KEY="sk_env_subscription")
-    def test_subscription_checkout_uses_deployment_keys_when_database_gateway_is_inactive(
+    def test_subscription_checkout_requires_active_super_admin_gateway(
         self, initialize_paystack_transaction
     ):
         self.gateway.is_active = False
         self.gateway.save(update_fields=["is_active"])
+
+        with self.assertRaisesMessage(ValueError, "Subscription billing is not configured"):
+            create_subscription_payment(
+                institution=self.institution,
+                plan=self.plan,
+                email="billing@example.test",
+                callback_url="https://educonnect.example.test/billing/callback/",
+            )
+        initialize_paystack_transaction.assert_not_called()
+
+    @patch("portal.services.initialize_paystack_transaction")
+    def test_subscription_checkout_can_start_during_trial_at_the_plan_price(
+        self, initialize_paystack_transaction
+    ):
+        self.subscription.status = Subscription.Status.TRIAL
+        self.subscription.save(update_fields=["status"])
+        SubscriptionPlanDuration.objects.filter(plan=self.plan).update(price=Decimal("1.00"))
         initialize_paystack_transaction.return_value = {
-            "authorization_url": "https://checkout.paystack.com/environment-configured"
+            "authorization_url": "https://checkout.paystack.com/trial-upgrade"
         }
 
-        payment, checkout = create_subscription_payment(
+        payment, _ = create_subscription_payment(
             institution=self.institution,
-            plan_duration=self.duration,
+            plan=self.plan,
             email="billing@example.test",
             callback_url="https://educonnect.example.test/billing/callback/",
         )
 
-        self.assertTrue(payment.reference)
-        self.assertEqual(
-            initialize_paystack_transaction.call_args.kwargs["secret_key"],
-            "sk_env_subscription",
-        )
-        self.assertEqual(
-            checkout["authorization_url"],
-            "https://checkout.paystack.com/environment-configured",
-        )
+        self.assertEqual(payment.amount, self.plan.price)
+        self.assertEqual(payment.duration_days, self.plan.duration_days)
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+        self.assertEqual(self.subscription.status, Subscription.Status.TRIAL)
+        initialize_paystack_transaction.assert_called_once()
 
     @patch("portal.services.initialize_paystack_transaction")
     def test_subscription_checkout_falls_back_to_browser_when_server_cannot_reach_paystack(
@@ -1489,7 +1503,7 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
         ):
             response = self.client.post(
                 reverse("portal:billing-renew"),
-                {"plan": self.plan.pk, "plan_duration": self.duration.pk},
+                {"plan": self.plan.pk},
                 HTTP_HOST="billing.example.test",
             )
 
@@ -1533,7 +1547,7 @@ class SubscriptionWebhookAndExpiryNotificationTests(TestCase):
             )
             response = self.client.post(
                 reverse("portal:billing-renew"),
-                {"plan": self.plan.pk, "plan_duration": self.duration.pk},
+                {"plan": self.plan.pk},
                 HTTP_HOST="billing.example.test",
             )
 
