@@ -63,3 +63,59 @@ jobs:
           AWS_S3_REGION_NAME: auto
           AWS_QUERYSTRING_AUTH: "True"
         run: python manage.py check --deploy
+
+  postgresql-payment-locking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: educonnect_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d educonnect_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DJANGO_DEBUG: "True"
+      DJANGO_USE_LOCAL_SQLITE: "False"
+      DJANGO_TEST_FAST_PASSWORD_HASHER: "True"
+      DJANGO_SECRET_KEY: ci-only-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDE
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      CORE_DOMAIN: educonnect.com
+      DJANGO_TIME_ZONE: Africa/Lagos
+      DB_ENGINE: postgresql
+      DB_NAME: educonnect_test
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_SSLMODE: disable
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run PostgreSQL row-locking regression test
+        run: >-
+          python manage.py test
+          portal.tests.DashboardAndCourseFlowTests.test_course_payment_finalization_locks_a_payment_with_a_null_session_on_postgresql
+          --verbosity 2
