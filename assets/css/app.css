@@ -479,6 +479,10 @@ textarea {
     min-width: 0;
 }
 
+.stack-form > [hidden] {
+    display: none !important;
+}
+
 .stack-form > label,
 .stack-form > p {
     font-weight: 700;
