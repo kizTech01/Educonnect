@@ -3,30 +3,16 @@
 {% block title %}Lecturer Messages | EduConnect{% endblock %}
 
 {% block dashboard_content %}
-<section class="split-layout">
-    <div class="panel-card">
-        <div class="panel-head">
-            <h2>Send Message</h2>
-        </div>
-        <form method="post" enctype="multipart/form-data" class="stack-form message-compose-form" data-message-targeting>
-            {% csrf_token %}
-            {{ form.as_p }}
-            <button type="submit" class="primary-btn">Send Notification</button>
-        </form>
-        {{ message_programme_options|json_script:"lecturer-message-programme-options" }}
+<section class="panel-card">
+    <div class="panel-head">
+        <h2>Send Message</h2>
     </div>
-
-    <div class="panel-card">
-        <div class="panel-head">
-            <h2>How Targeting Works</h2>
-        </div>
-        <ul class="bullet-list">
-            <li>Send to every department in your faculty, or choose one or more listed departments.</li>
-            <li>When you choose one department, you can narrow delivery to programmes under that department.</li>
-            <li>Choose a level to target that class year across the selected departments or programmes.</li>
-            <li>If no department is selected, your message reaches students across your registered courses.</li>
-        </ul>
-    </div>
+    <form method="post" enctype="multipart/form-data" class="stack-form message-compose-form" data-message-targeting>
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="primary-btn">Send Notification</button>
+    </form>
+    {{ message_programme_options|json_script:"lecturer-message-programme-options" }}
 </section>
 
 <section class="panel-card">

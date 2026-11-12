@@ -691,13 +691,10 @@ def deliver_notification(notification):
     programme_ids = list(notification.programmes.values_list("id", flat=True))
     course_ids = list(notification.courses.values_list("id", flat=True))
 
-    if department_ids:
-        students = students.filter(department_id__in=department_ids)
-    if notification.level:
-        students = students.filter(level=notification.level)
-    if programme_ids:
-        students = students.filter(programme_id__in=programme_ids)
     if course_ids:
+        # Course selections define the audience completely. Do not narrow
+        # enrolled students using profile-based department, programme, or
+        # level fields; registration in a selected current course is decisive.
         course_registration_filter = Q(
             student_registrations__course_id__in=course_ids,
             student_registrations__is_active=True,
@@ -705,22 +702,29 @@ def deliver_notification(notification):
         if current_session:
             course_registration_filter &= Q(student_registrations__session=current_session)
         students = students.filter(course_registration_filter).distinct()
-    elif notification.sender.has_role(User.Role.LECTURER) and not department_ids:
-        lecturer_registration_filter = (
-            Q(student_registrations__course__lecturer=notification.sender)
-            | Q(
-                student_registrations__course__lecturer_registrations__lecturer=notification.sender,
-                student_registrations__course__lecturer_registrations__is_active=True,
+    else:
+        if department_ids:
+            students = students.filter(department_id__in=department_ids)
+        if notification.level:
+            students = students.filter(level=notification.level)
+        if programme_ids:
+            students = students.filter(programme_id__in=programme_ids)
+        if notification.sender.has_role(User.Role.LECTURER) and not department_ids:
+            lecturer_registration_filter = (
+                Q(student_registrations__course__lecturer=notification.sender)
+                | Q(
+                    student_registrations__course__lecturer_registrations__lecturer=notification.sender,
+                    student_registrations__course__lecturer_registrations__is_active=True,
+                )
+            ) & Q(student_registrations__is_active=True)
+            if current_session:
+                lecturer_registration_filter &= Q(student_registrations__session=current_session)
+            students = students.filter(lecturer_registration_filter).distinct()
+        elif not department_ids and current_session:
+            students = students.filter(
+                student_registrations__session=current_session,
+                student_registrations__is_active=True,
             )
-        ) & Q(student_registrations__is_active=True)
-        if current_session:
-            lecturer_registration_filter &= Q(student_registrations__session=current_session)
-        students = students.filter(lecturer_registration_filter).distinct()
-    elif not department_ids and current_session:
-        students = students.filter(
-            student_registrations__session=current_session,
-            student_registrations__is_active=True,
-        )
 
     recipient_rows = []
     for student_id in students.distinct().values_list("id", flat=True).iterator(

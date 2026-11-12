@@ -1108,6 +1108,20 @@ class NotificationForm(StyledModelForm):
         cleaned = super().clean()
         if getattr(self, "message_sender", None) and self.message_sender.has_role(User.Role.LECTURER):
             courses = cleaned.get("courses")
+            if courses:
+                # A selected course is its own audience: send to every active
+                # current-session registrant, regardless of department,
+                # programme, or level controls left in a stale browser form.
+                for field_name in ("all_departments", "departments", "programmes", "level"):
+                    self._errors.pop(field_name, None)
+                cleaned["all_departments"] = False
+                cleaned["departments"] = []
+                cleaned["programmes"] = []
+                cleaned["level"] = ""
+                if any(course.id not in self.allowed_course_ids for course in courses):
+                    self.add_error("courses", "You can only message students in your allocated courses.")
+                return cleaned
+
             departments = cleaned.get("departments")
             programmes = cleaned.get("programmes")
             if cleaned.get("all_departments"):
@@ -1296,19 +1310,27 @@ class BaseUserForm(StyledModelForm):
         # hostname, but User.save() assigns the compatibility institution in
         # that case, so validate against that same institution here.
         self.instance.institution = institution or get_default_institution()
-        if institution:
-            self.fields["faculty"].queryset = Faculty.objects.filter(institution=institution)
-            self.fields["department"].queryset = Department.objects.filter(institution=institution)
-            if "programme" in self.fields:
-                self.fields["programme"].queryset = Programme.objects.filter(
-                    institution=institution, is_active=True,
-                )
+        signup_institution = self.instance.institution
+        self.fields["faculty"].queryset = Faculty.objects.filter(institution=signup_institution)
+        departments = Department.objects.filter(institution=signup_institution)
+        selected_faculty = self.data.get(self.add_prefix("faculty")) if self.is_bound else None
+        selected_faculty = selected_faculty or self.initial.get("faculty")
+        if selected_faculty:
+            selected_faculty_id = getattr(selected_faculty, "pk", selected_faculty)
+            departments = departments.filter(faculty_id=selected_faculty_id)
+        self.fields["department"].queryset = departments
         if "programme" in self.fields:
             selected_department = self.data.get(self.add_prefix("department")) or self.initial.get("department")
+            programmes = Programme.objects.filter(
+                institution=signup_institution,
+                is_active=True,
+            )
             if selected_department:
-                self.fields["programme"].queryset = self.fields["programme"].queryset.filter(
-                    department_id=selected_department,
-                )
+                selected_department_id = getattr(selected_department, "pk", selected_department)
+                programmes = programmes.filter(department_id=selected_department_id)
+            else:
+                programmes = programmes.none()
+            self.fields["programme"].queryset = programmes
 
     def clean(self):
         cleaned_data = super().clean()

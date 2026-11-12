@@ -727,6 +727,8 @@ def auth_page_context(role, login_form=None, signup_form=None, *, is_super_admin
 
 def signup_page_context(role, signup_form=None):
     ensure_default_admin_user()
+    signup_form = signup_form or signup_form_for_role(role)
+    signup_institution_id = getattr(signup_form.instance, "institution_id", None)
     role_label = User.Role(role).label
     return {
         "auth_role": role,
@@ -737,13 +739,21 @@ def signup_page_context(role, signup_form=None):
             if role == User.Role.STUDENT
             else "Create your lecturer account. Admin approval is required before dashboard access."
         ),
-        "signup_form": signup_form or signup_form_for_role(role),
+        "signup_form": signup_form,
         "signup_action": reverse("portal:student-signup" if role == User.Role.STUDENT else "portal:lecturer-signup"),
         "back_url": reverse("portal:role-login", kwargs={"role": role}),
         "is_student": role == User.Role.STUDENT,
         "is_lecturer": role == User.Role.LECTURER,
+        "signup_departments": list(
+            Department.objects.filter(institution_id=signup_institution_id).values(
+                "id", "name", "code", "faculty_id",
+            )
+        ),
         "programme_departments": list(
-            Programme.objects.filter(is_active=True).values("id", "name", "department_id")
+            Programme.objects.filter(
+                institution_id=signup_institution_id,
+                is_active=True,
+            ).values("id", "name", "department_id")
         ) if role == User.Role.STUDENT else [],
     }
 

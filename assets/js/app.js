@@ -233,16 +233,30 @@ const messageTargetingForm = document.querySelector("[data-message-targeting]");
 const messageProgrammeOptionsNode = document.getElementById("lecturer-message-programme-options");
 if (messageTargetingForm && messageProgrammeOptionsNode) {
     const allDepartmentsToggle = messageTargetingForm.querySelector("#id_all_departments");
+    const allDepartmentsField = allDepartmentsToggle?.closest("p");
+    const departmentList = messageTargetingForm.querySelector("#id_departments");
+    const departmentField = departmentList?.closest("p");
     const departmentInputs = Array.from(messageTargetingForm.querySelectorAll('input[name="departments"]'));
     const programmeList = messageTargetingForm.querySelector("#id_programmes");
     const programmeField = programmeList?.closest("p");
+    const levelSelect = messageTargetingForm.querySelector("#id_level");
+    const levelField = levelSelect?.closest("p");
+    const courseInputs = Array.from(messageTargetingForm.querySelectorAll('input[name="courses"]'));
     const programmeOptions = JSON.parse(messageProgrammeOptionsNode.textContent);
 
     const updateMessageTargeting = () => {
+        const coursesSelected = courseInputs.some((input) => input.checked);
         const allDepartmentsSelected = Boolean(allDepartmentsToggle?.checked);
-        departmentInputs.forEach((input) => { input.disabled = allDepartmentsSelected; });
+        if (allDepartmentsToggle) allDepartmentsToggle.disabled = coursesSelected;
+        departmentInputs.forEach((input) => {
+            input.disabled = coursesSelected || allDepartmentsSelected;
+        });
+        if (levelSelect) levelSelect.disabled = coursesSelected;
+        if (allDepartmentsField) allDepartmentsField.hidden = coursesSelected;
+        if (departmentField) departmentField.hidden = coursesSelected;
+        if (levelField) levelField.hidden = coursesSelected;
         const selectedDepartments = departmentInputs.filter((input) => input.checked);
-        const departmentId = !allDepartmentsSelected && selectedDepartments.length === 1
+        const departmentId = !coursesSelected && !allDepartmentsSelected && selectedDepartments.length === 1
             ? selectedDepartments[0].value
             : null;
         const previouslySelectedProgrammes = new Set(
@@ -250,18 +264,18 @@ if (messageTargetingForm && messageProgrammeOptionsNode) {
                 .map((input) => input.value),
         );
 
-        if (!programmeList || !programmeField) return;
-        programmeList.replaceChildren();
-        const matchingProgrammes = departmentId
+        if (programmeList) programmeList.replaceChildren();
+        const matchingProgrammes = programmeList && departmentId
             ? programmeOptions.filter((item) => String(item.department_id) === departmentId)
             : [];
-        programmeField.hidden = matchingProgrammes.length === 0;
+        if (programmeField) programmeField.hidden = coursesSelected || matchingProgrammes.length === 0;
         matchingProgrammes.forEach((programme, index) => {
             const item = document.createElement("li");
             const label = document.createElement("label");
             const checkbox = document.createElement("input");
             checkbox.type = "checkbox";
             checkbox.name = "programmes";
+            checkbox.disabled = coursesSelected;
             checkbox.value = programme.id;
             checkbox.id = `id_programmes_${index}`;
             checkbox.checked = previouslySelectedProgrammes.has(String(programme.id));
@@ -274,6 +288,7 @@ if (messageTargetingForm && messageProgrammeOptionsNode) {
 
     allDepartmentsToggle?.addEventListener("change", updateMessageTargeting);
     departmentInputs.forEach((input) => input.addEventListener("change", updateMessageTargeting));
+    courseInputs.forEach((input) => input.addEventListener("change", updateMessageTargeting));
     updateMessageTargeting();
 }
 

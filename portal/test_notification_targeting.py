@@ -157,7 +157,7 @@ class LecturerMessageTargetingTests(TestCase):
         course_two = self.make_course("BIO201")
         unselected_course = self.make_course("BIO301")
         enrolled_one = self.make_student("registered-bio101")
-        enrolled_two = self.make_student("registered-bio201")
+        enrolled_two = self.make_student("registered-bio201", level="200")
         stale_selected_course = self.make_student("stale-bio101")
         unselected_course_student = self.make_student("registered-bio301")
         previous_session = AcademicSession.objects.create(name="MSG-OLD-TEST", is_current=False)
@@ -196,11 +196,12 @@ class LecturerMessageTargetingTests(TestCase):
         response = self.post_message(
             "Selected course update",
             courses=[str(course_one.pk), str(course_two.pk)],
+            departments=[str(self.department.pk)],
             level="100",
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            self.recipients_for("Selected course update"),
-            {enrolled_one.pk, enrolled_two.pk},
-        )
+        notification = Notification.objects.get(sender=self.lecturer, subject="Selected course update")
+        self.assertEqual(self.recipients_for("Selected course update"), {enrolled_one.pk, enrolled_two.pk})
+        self.assertFalse(notification.departments.exists())
+        self.assertFalse(notification.level)

@@ -34,7 +34,7 @@
                     <label>Faculty {{ signup_form.faculty }} {{ signup_form.faculty.errors }}</label>
                     <label>Department {{ signup_form.department }} {{ signup_form.department.errors }}</label>
                     {% if is_student %}
-                        <label>Programme {{ signup_form.programme }} {{ signup_form.programme.errors }}</label>
+                        <label id="signup-programme-field" hidden>Programme {{ signup_form.programme }} {{ signup_form.programme.errors }}</label>
                         <label>Level {{ signup_form.level }} {{ signup_form.level.errors }}</label>
                     {% endif %}
                     <label>Phone number {{ signup_form.phone_number }} {{ signup_form.phone_number.errors }}</label>
@@ -73,26 +73,69 @@
 </section>
 {% if is_student %}
 {{ programme_departments|json_script:"signup-programmes" }}
+{% endif %}
+{{ signup_departments|json_script:"signup-departments" }}
 <script>
 (() => {
+  const faculty = document.getElementById("id_faculty");
   const department = document.getElementById("id_department");
   const programme = document.getElementById("id_programme");
-  const dataNode = document.getElementById("signup-programmes");
-  if (!department || !programme || !dataNode) return;
-  const programmes = JSON.parse(dataNode.textContent);
-  const chosen = programme.value;
-  const update = () => {
+  const departmentDataNode = document.getElementById("signup-departments");
+  const programmeDataNode = document.getElementById("signup-programmes");
+  if (!faculty || !department || !departmentDataNode) return;
+
+  const departments = JSON.parse(departmentDataNode.textContent);
+  const programmes = programmeDataNode ? JSON.parse(programmeDataNode.textContent) : [];
+  const programmeField = document.getElementById("signup-programme-field");
+
+  const updateProgrammes = (preserveSelection) => {
+    if (!programme) return;
     const departmentId = department.value;
+    const currentProgrammeId = preserveSelection ? programme.value : "";
+    const matchingProgrammes = departmentId
+      ? programmes.filter(item => String(item.department_id) === departmentId)
+      : [];
+
     programme.replaceChildren(new Option("Select your programme", ""));
-    if (!departmentId) { programme.disabled = true; return; }
-    programme.disabled = false;
-    programmes.filter(item => String(item.department_id) === departmentId).forEach(item => {
-      programme.add(new Option(item.name, item.id, false, String(item.id) === chosen));
+    matchingProgrammes.forEach(item => {
+      programme.add(new Option(
+        item.name,
+        item.id,
+        false,
+        String(item.id) === currentProgrammeId,
+      ));
     });
+    programme.disabled = matchingProgrammes.length === 0;
+    programme.required = matchingProgrammes.length > 0;
+    if (programmeField) programmeField.hidden = matchingProgrammes.length === 0;
   };
-  department.addEventListener("change", update);
-  update();
+
+  const updateDepartments = (preserveSelection) => {
+    const facultyId = faculty.value;
+    const currentDepartmentId = preserveSelection ? department.value : "";
+    const matchingDepartments = facultyId
+      ? departments.filter(item => String(item.faculty_id) === facultyId)
+      : departments;
+    const keepDepartment = matchingDepartments.some(
+      item => String(item.id) === currentDepartmentId,
+    );
+
+    department.replaceChildren(new Option("Select your department", ""));
+    matchingDepartments.forEach(item => {
+      department.add(new Option(
+        `${item.name} (${item.code})`,
+        item.id,
+        false,
+        keepDepartment && String(item.id) === currentDepartmentId,
+      ));
+    });
+    department.disabled = matchingDepartments.length === 0;
+    updateProgrammes(keepDepartment);
+  };
+
+  faculty.addEventListener("change", () => updateDepartments(true));
+  department.addEventListener("change", () => updateProgrammes(false));
+  updateDepartments(true);
 })();
 </script>
-{% endif %}
 {% endblock %}
