@@ -85,6 +85,9 @@ class StudentSignupTargetingTests(TestCase):
         self.assertTrue({self.biology.pk, self.chemistry.pk, self.history.pk}.issubset(department_ids))
         self.assertTrue({self.biology_programme.pk, self.history_programme.pk}.issubset(programme_ids))
         self.assertContains(response, 'id="signup-departments"')
+        nonce = response.context["csp_nonce"]
+        self.assertContains(response, f'<script nonce="{nonce}">', html=False)
+        self.assertIn(f"'nonce-{nonce}'", response["Content-Security-Policy"])
 
     def test_signup_form_rejects_department_outside_selected_faculty(self):
         form = StudentSignupForm(

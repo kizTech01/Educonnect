@@ -725,7 +725,7 @@ def auth_page_context(role, login_form=None, signup_form=None, *, is_super_admin
     }
 
 
-def signup_page_context(role, signup_form=None):
+def signup_page_context(role, signup_form=None, csp_nonce=""):
     ensure_default_admin_user()
     signup_form = signup_form or signup_form_for_role(role)
     signup_institution_id = getattr(signup_form.instance, "institution_id", None)
@@ -740,6 +740,7 @@ def signup_page_context(role, signup_form=None):
             else "Create your lecturer account. Admin approval is required before dashboard access."
         ),
         "signup_form": signup_form,
+        "csp_nonce": csp_nonce,
         "signup_action": reverse("portal:student-signup" if role == User.Role.STUDENT else "portal:lecturer-signup"),
         "back_url": reverse("portal:role-login", kwargs={"role": role}),
         "is_student": role == User.Role.STUDENT,
@@ -2309,6 +2310,7 @@ def student_signup(request):
         return render(request, "portal/auth_signup.html", signup_page_context(
             User.Role.STUDENT,
             signup_form=StudentSignupForm(institution=getattr(request, "institution", None)),
+            csp_nonce=getattr(request, "csp_nonce", ""),
         ))
     form = StudentSignupForm(request.POST, institution=getattr(request, "institution", None))
     if form.is_valid():
@@ -2331,7 +2333,11 @@ def student_signup(request):
             login(request, user)
         messages.success(request, "Student account created successfully. You are now signed in.")
         return redirect("portal:student-dashboard")
-    return render(request, "portal/auth_signup.html", signup_page_context(User.Role.STUDENT, signup_form=form))
+    return render(request, "portal/auth_signup.html", signup_page_context(
+        User.Role.STUDENT,
+        signup_form=form,
+        csp_nonce=getattr(request, "csp_nonce", ""),
+    ))
 
 
 @ensure_csrf_cookie
@@ -2341,6 +2347,7 @@ def lecturer_signup(request):
         return render(request, "portal/auth_signup.html", signup_page_context(
             User.Role.LECTURER,
             signup_form=LecturerSignupForm(institution=getattr(request, "institution", None)),
+            csp_nonce=getattr(request, "csp_nonce", ""),
         ))
     form = LecturerSignupForm(request.POST, institution=getattr(request, "institution", None))
     if form.is_valid():
@@ -2353,7 +2360,11 @@ def lecturer_signup(request):
     return render(
         request,
         "portal/auth_signup.html",
-        signup_page_context(User.Role.LECTURER, signup_form=form),
+        signup_page_context(
+            User.Role.LECTURER,
+            signup_form=form,
+            csp_nonce=getattr(request, "csp_nonce", ""),
+        ),
     )
 
 

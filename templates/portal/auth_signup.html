@@ -75,7 +75,7 @@
 {{ programme_departments|json_script:"signup-programmes" }}
 {% endif %}
 {{ signup_departments|json_script:"signup-departments" }}
-<script>
+<script nonce="{{ csp_nonce }}">
 (() => {
   const faculty = document.getElementById("id_faculty");
   const department = document.getElementById("id_department");
