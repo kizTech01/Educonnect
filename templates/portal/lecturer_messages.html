@@ -8,11 +8,12 @@
         <div class="panel-head">
             <h2>Send Message</h2>
         </div>
-        <form method="post" enctype="multipart/form-data" class="stack-form">
+        <form method="post" enctype="multipart/form-data" class="stack-form message-compose-form" data-message-targeting>
             {% csrf_token %}
             {{ form.as_p }}
             <button type="submit" class="primary-btn">Send Notification</button>
         </form>
+        {{ message_programme_options|json_script:"lecturer-message-programme-options" }}
     </div>
 
     <div class="panel-card">
@@ -20,8 +21,9 @@
             <h2>How Targeting Works</h2>
         </div>
         <ul class="bullet-list">
-            <li>Select one or more departments to narrow the audience.</li>
-            <li>Choose a level from the dropdown when you want only students in that class year.</li>
+            <li>Send to every department in your faculty, or choose one or more listed departments.</li>
+            <li>When you choose one department, you can narrow delivery to programmes under that department.</li>
+            <li>Choose a level to target that class year across the selected departments or programmes.</li>
             <li>If no department is selected, your message reaches students across your registered courses.</li>
         </ul>
     </div>
@@ -61,6 +63,11 @@
                         {% if departments %}
                             <span><strong>Departments:</strong> {% for department in departments %}{{ department.name }}{% if not forloop.last %}, {% endif %}{% endfor %}</span>
                         {% endif %}
+                        {% with programmes=notification.programmes.all %}
+                            {% if programmes %}
+                                <span><strong>Programmes:</strong> {% for programme in programmes %}{{ programme.name }}{% if not forloop.last %}, {% endif %}{% endfor %}</span>
+                            {% endif %}
+                        {% endwith %}
                         {% if courses %}
                             <span><strong>Courses:</strong> {% for course in courses %}{{ course.code }}{% if not forloop.last %}, {% endif %}{% endfor %}</span>
                         {% endif %}

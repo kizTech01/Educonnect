@@ -36,6 +36,7 @@ from .models import (
     Institution,
     LecturerCourseRegistration,
     Notification,
+    RoleAssignment,
     StudentCourseRegistration,
     Timetable,
     User,
@@ -996,10 +997,24 @@ class NotificationForm(StyledModelForm):
         widget=MultipleFileInput(),
     )
     level = forms.ChoiceField(choices=LEVEL_FILTER_CHOICES, required=False)
+    all_departments = forms.BooleanField(
+        required=False,
+        label="Send to every department in my faculty",
+        help_text="When selected, the message targets all departments in the faculty linked to your account.",
+    )
     departments = forms.ModelMultipleChoiceField(
         queryset=Department.objects.all(),
         required=False,
         widget=forms.CheckboxSelectMultiple,
+        label="Departments",
+        help_text="Choose one or more departments, or use the all-departments option above.",
+    )
+    programmes = forms.ModelMultipleChoiceField(
+        queryset=Programme.objects.none(),
+        required=False,
+        widget=forms.CheckboxSelectMultiple,
+        label="Programmes",
+        help_text="Programmes are available when one department is selected.",
     )
     courses = forms.ModelMultipleChoiceField(
         queryset=Course.objects.none(),
@@ -1009,40 +1024,115 @@ class NotificationForm(StyledModelForm):
 
     class Meta:
         model = Notification
-        fields = ["subject", "body", "departments", "level", "courses"]
+        fields = ["subject", "body", "departments", "programmes", "level", "courses"]
         widgets = {"body": forms.Textarea(attrs={"rows": 5})}
 
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.message_sender = user
         if user and user.has_role(User.Role.LECTURER):
-            # A lecturer may communicate only with students connected to a
-            # current teaching allocation.  The querysets and the clean method
-            # both enforce this; the latter protects future UI changes too.
+            # Course recipients stay tied to teaching allocations. Department
+            # recipients can span the faculty linked through the lecturer's
+            # account, active role assignments, or allocated courses.
             allocated_courses = Course.objects.filter(
                 Q(lecturer=user)
                 | Q(lecturer_registrations__lecturer=user, lecturer_registrations__is_active=True)
             ).distinct()
             self.allowed_course_ids = set(allocated_courses.values_list("id", flat=True))
-            self.allowed_department_ids = set(
+            allocated_department_ids = set(
                 allocated_courses.values_list("department_id", flat=True)
+            )
+            assigned_department_ids = set(
+                RoleAssignment.objects.filter(
+                    user=user,
+                    is_active=True,
+                    department__isnull=False,
+                ).values_list("department_id", flat=True)
+            )
+            linked_department_ids = allocated_department_ids | assigned_department_ids
+            faculty_ids = set(
+                Department.objects.filter(id__in=linked_department_ids).values_list("faculty_id", flat=True)
+            )
+            if user.department_id:
+                user_faculty_id = Department.objects.filter(pk=user.department_id).values_list(
+                    "faculty_id", flat=True
+                ).first()
+                if user_faculty_id:
+                    faculty_ids.add(user_faculty_id)
+            self.allowed_department_ids = set(
+                Department.objects.filter(faculty_id__in=faculty_ids).values_list("id", flat=True)
             )
             self.fields["courses"].queryset = allocated_courses
             self.fields["departments"].queryset = Department.objects.filter(
                 id__in=self.allowed_department_ids
             )
+            self.allowed_programme_ids = set(
+                Programme.objects.filter(
+                    is_active=True,
+                    department_id__in=self.allowed_department_ids,
+                ).values_list("id", flat=True)
+            )
         else:
             self.fields["courses"].queryset = Course.objects.all()
+            self.allowed_department_ids = set(self.fields["departments"].queryset.values_list("id", flat=True))
+            self.allowed_programme_ids = set(
+                Programme.objects.filter(is_active=True).values_list("id", flat=True)
+            )
+
+        selected_department_ids = []
+        if self.is_bound:
+            selected_department_ids = self.data.getlist(self.add_prefix("departments"))
+        elif self.initial.get("departments"):
+            initial_departments = self.initial["departments"]
+            selected_department_ids = [str(getattr(item, "pk", item)) for item in initial_departments]
+        if len(selected_department_ids) == 1 and not (
+            self.is_bound and self.data.get(self.add_prefix("all_departments"))
+        ):
+            self.fields["programmes"].queryset = Programme.objects.filter(
+                is_active=True,
+                department_id=selected_department_ids[0],
+                id__in=self.allowed_programme_ids,
+            )
+        self.order_fields([
+            "subject",
+            "body",
+            "all_departments",
+            "departments",
+            "level",
+            "programmes",
+            "courses",
+            "attachments",
+        ])
 
     def clean(self):
         cleaned = super().clean()
         if getattr(self, "message_sender", None) and self.message_sender.has_role(User.Role.LECTURER):
             courses = cleaned.get("courses")
             departments = cleaned.get("departments")
+            programmes = cleaned.get("programmes")
+            if cleaned.get("all_departments"):
+                departments = list(Department.objects.filter(id__in=self.allowed_department_ids))
+                cleaned["departments"] = departments
+                if not departments:
+                    self.add_error("all_departments", "Your account is not linked to any faculty departments.")
+                if programmes:
+                    self.add_error(
+                        "programmes",
+                        "Choose either every faculty department or programmes in one department.",
+                    )
             if courses and any(course.id not in self.allowed_course_ids for course in courses):
                 self.add_error("courses", "You can only message students in your allocated courses.")
             if departments and any(department.id not in self.allowed_department_ids for department in departments):
-                self.add_error("departments", "You can only message departments where you have an allocated course.")
+                self.add_error("departments", "Choose departments in the faculty linked to your account.")
+            if programmes:
+                if len(departments or []) != 1:
+                    self.add_error("programmes", "Select one department before choosing its programmes.")
+                elif any(
+                    programme.id not in self.allowed_programme_ids
+                    or programme.department_id != departments[0].id
+                    for programme in programmes
+                ):
+                    self.add_error("programmes", "Choose programmes under the selected department.")
         return cleaned
 
 

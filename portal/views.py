@@ -5061,7 +5061,7 @@ def lecturer_messages(request):
     sent_notifications = (
         Notification.objects.filter(sender=request.user)
         .annotate(recipient_total=Count("recipients"))
-        .prefetch_related("departments", "courses", "attachments")
+        .prefetch_related("departments", "programmes", "courses", "attachments")
     )
     if request.method == "POST":
         form = NotificationForm(request.POST, request.FILES, user=request.user)
@@ -5075,9 +5075,21 @@ def lecturer_messages(request):
                 for attachment in form.cleaned_data["attachments"]
             ])
             deliver_notification(notification)
-            messages.success(request, "Message sent to the selected students and departments.")
+            messages.success(request, "Message sent to the selected student audience.")
             return redirect(_redirect_with_query(request, "portal:lecturer-messages"))
-    context = dashboard_context(request, "Messages", form=form, sent_notifications=sent_notifications)
+    programme_options = list(
+        Programme.objects.filter(
+            is_active=True,
+            department_id__in=getattr(form, "allowed_department_ids", set()),
+        ).values("id", "name", "code", "department_id")
+    )
+    context = dashboard_context(
+        request,
+        "Messages",
+        form=form,
+        sent_notifications=sent_notifications,
+        message_programme_options=programme_options,
+    )
     return render(request, "portal/lecturer_messages.html", context)
 
 

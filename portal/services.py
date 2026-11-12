@@ -688,12 +688,15 @@ def deliver_notification(notification):
         is_active=True,
     )
     department_ids = list(notification.departments.values_list("id", flat=True))
+    programme_ids = list(notification.programmes.values_list("id", flat=True))
     course_ids = list(notification.courses.values_list("id", flat=True))
 
     if department_ids:
         students = students.filter(department_id__in=department_ids)
     if notification.level:
         students = students.filter(level=notification.level)
+    if programme_ids:
+        students = students.filter(programme_id__in=programme_ids)
     if course_ids:
         students = students.filter(
             student_registrations__course_id__in=course_ids,

@@ -229,6 +229,54 @@ if (programmeOptionsNode && departmentOptionsNode) {
     });
 }
 
+const messageTargetingForm = document.querySelector("[data-message-targeting]");
+const messageProgrammeOptionsNode = document.getElementById("lecturer-message-programme-options");
+if (messageTargetingForm && messageProgrammeOptionsNode) {
+    const allDepartmentsToggle = messageTargetingForm.querySelector("#id_all_departments");
+    const departmentInputs = Array.from(messageTargetingForm.querySelectorAll('input[name="departments"]'));
+    const programmeList = messageTargetingForm.querySelector("#id_programmes");
+    const programmeField = programmeList?.closest("p");
+    const programmeOptions = JSON.parse(messageProgrammeOptionsNode.textContent);
+
+    const updateMessageTargeting = () => {
+        const allDepartmentsSelected = Boolean(allDepartmentsToggle?.checked);
+        departmentInputs.forEach((input) => { input.disabled = allDepartmentsSelected; });
+        const selectedDepartments = departmentInputs.filter((input) => input.checked);
+        const departmentId = !allDepartmentsSelected && selectedDepartments.length === 1
+            ? selectedDepartments[0].value
+            : null;
+        const previouslySelectedProgrammes = new Set(
+            Array.from(programmeList?.querySelectorAll('input[name="programmes"]:checked') || [])
+                .map((input) => input.value),
+        );
+
+        if (!programmeList || !programmeField) return;
+        programmeList.replaceChildren();
+        const matchingProgrammes = departmentId
+            ? programmeOptions.filter((item) => String(item.department_id) === departmentId)
+            : [];
+        programmeField.hidden = matchingProgrammes.length === 0;
+        matchingProgrammes.forEach((programme, index) => {
+            const item = document.createElement("li");
+            const label = document.createElement("label");
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.name = "programmes";
+            checkbox.value = programme.id;
+            checkbox.id = `id_programmes_${index}`;
+            checkbox.checked = previouslySelectedProgrammes.has(String(programme.id));
+            label.htmlFor = checkbox.id;
+            label.append(checkbox, document.createTextNode(` ${programme.name} (${programme.code})`));
+            item.append(label);
+            programmeList.append(item);
+        });
+    };
+
+    allDepartmentsToggle?.addEventListener("change", updateMessageTargeting);
+    departmentInputs.forEach((input) => input.addEventListener("change", updateMessageTargeting));
+    updateMessageTargeting();
+}
+
 const getCsrfToken = () => {
     const csrfCookie = document.cookie
         .split(";")

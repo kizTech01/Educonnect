@@ -1591,6 +1591,7 @@ class Notification(TimeStampedModel):
     body = models.TextField()
     attachment = models.FileField(upload_to="message_attachments/%Y/%m/", blank=True)
     departments = models.ManyToManyField(Department, blank=True, related_name="notifications")
+    programmes = models.ManyToManyField("Programme", blank=True, related_name="notifications")
     level = models.CharField(max_length=20, blank=True)
     courses = models.ManyToManyField(Course, blank=True, related_name="notifications")
 
