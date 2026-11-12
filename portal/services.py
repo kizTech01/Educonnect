@@ -675,9 +675,9 @@ def send_course_reminder_email(course: Course, recipients, scheduled_for, recipi
 
 
 def deliver_notification(notification):
-    # Messages and reminders must follow the active academic registration.
-    # Without this, a lecturer could unintentionally notify students from a
-    # previous session simply because their historical registration remains.
+    # Course-targeted messages use active registrations from the current session.
+    # Department, programme, and level targets use the student's current profile
+    # and can reach students who have not registered for a course yet.
     current_session = AcademicSession.all_objects.filter(
         institution_id=notification.institution_id,
         is_current=True,
@@ -698,21 +698,29 @@ def deliver_notification(notification):
     if programme_ids:
         students = students.filter(programme_id__in=programme_ids)
     if course_ids:
-        students = students.filter(
+        course_registration_filter = Q(
             student_registrations__course_id__in=course_ids,
             student_registrations__is_active=True,
-        ).distinct()
+        )
+        if current_session:
+            course_registration_filter &= Q(student_registrations__session=current_session)
+        students = students.filter(course_registration_filter).distinct()
     elif notification.sender.has_role(User.Role.LECTURER) and not department_ids:
-        students = students.filter(
+        lecturer_registration_filter = (
             Q(student_registrations__course__lecturer=notification.sender)
             | Q(
                 student_registrations__course__lecturer_registrations__lecturer=notification.sender,
                 student_registrations__course__lecturer_registrations__is_active=True,
-            ),
+            )
+        ) & Q(student_registrations__is_active=True)
+        if current_session:
+            lecturer_registration_filter &= Q(student_registrations__session=current_session)
+        students = students.filter(lecturer_registration_filter).distinct()
+    elif not department_ids and current_session:
+        students = students.filter(
+            student_registrations__session=current_session,
             student_registrations__is_active=True,
-        ).distinct()
-    if current_session:
-        students = students.filter(student_registrations__session=current_session)
+        )
 
     recipient_rows = []
     for student_id in students.distinct().values_list("id", flat=True).iterator(
