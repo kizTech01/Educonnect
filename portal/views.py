@@ -32,6 +32,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.crypto import constant_time_compare, salted_hmac
+from django.utils.text import slugify
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
@@ -3415,6 +3416,8 @@ def api_student_from_screening(request):
         identifier = str(payload.get("student_id") or application.jamb_number or application.applicant_reference or application.external_application_id).strip()
         if not identifier:
             raise ValidationError({"student_id": "A student or admission reference is required."})
+        if len(identifier) > User._meta.get_field("id_number").max_length:
+            raise ValidationError({"student_id": "Student IDs must be 150 characters or fewer."})
         with transaction.atomic():
             application = ScreeningApplication.objects.select_for_update().get(pk=application.pk)
             student = application.student or User.all_objects.filter(institution=institution, id_number=identifier).first()
@@ -6970,10 +6973,12 @@ def download_exam_card(request, payment_id):
         school_logo_bytes=logo_bytes,
         verification_url=verification_url,
     )
-    session_slug = payment.session.name.replace("/", "-")
+    student_slug = slugify(payment.student.id_number or payment.student.username) or str(payment.student.pk)
+    session_slug = slugify(payment.session.name) or str(payment.session_id)
+    filename = f"exam-card-{student_slug}-{session_slug}.pdf"
     response = HttpResponse(pdf_bytes, content_type="application/pdf")
     disposition = "attachment" if request.GET.get("download") == "1" else "inline"
-    response["Content-Disposition"] = f'{disposition}; filename="exam-card-{payment.student.id_number or payment.student.username}-{session_slug}.pdf"'
+    response["Content-Disposition"] = f'{disposition}; filename="{filename}"'
     return response
 
 

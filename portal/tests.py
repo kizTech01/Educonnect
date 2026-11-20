@@ -414,7 +414,7 @@ class DepartmentAutomationTests(TestCase):
 
         with patch("portal.automation._ai_extract", return_value=[
             {
-                "lecturer_id": "LEC-CS-AI-001",
+                "lecturer_id": "LEC/CS+AI!#?$%&*()_[]{}=001-LONG-1234567890",
                 "full_name": "Ada Lovelace",
                 "email": "ada@example.test",
                 "phone_number": "08030000001",
@@ -422,8 +422,9 @@ class DepartmentAutomationTests(TestCase):
         ]):
             self.assertIn("1 accounts created", import_department_lecturers(lecturer_upload))
 
-        lecturer = User.objects.get(username="LEC-CS-AI-001")
+        lecturer = User.objects.get(username="LEC/CS+AI!#?$%&*()_[]{}=001-LONG-1234567890")
         self.assertEqual(lecturer.role, User.Role.LECTURER)
+        self.assertEqual(lecturer.id_number, lecturer.username)
         self.assertEqual(lecturer.department, self.department)
 
     def test_allocation_upload_accepts_an_exact_unique_lecturer_name(self):
@@ -823,13 +824,14 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertContains(response, reverse("portal:profile"))
 
     def test_student_signup_redirects_to_dashboard(self):
+        student_identifier = "STU/NEW+ID!#?%&*()_{}-LONG-1234567890"
         response = self.client.post(
             reverse("portal:student-signup"),
             {
                 "first_name": "New",
                 "last_name": "Student",
                 "email": "newstudent@example.com",
-                "id_number": "STU-NEW",
+                "id_number": student_identifier,
                 "department": self.department.id,
                 "level": "100",
                 "phone_number": "08000000000",
@@ -841,7 +843,20 @@ class DashboardAndCourseFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, reverse("portal:student-dashboard"))
-        self.assertTrue(User.objects.get(username="STU-NEW").check_password("student-password-123"))
+        student = User.objects.get(username=student_identifier)
+        self.assertEqual(student.id_number, student_identifier)
+        self.assertTrue(student.check_password("student-password-123"))
+        self.client.logout()
+        login_response = self.client.post(
+            reverse("portal:role-login", kwargs={"role": User.Role.STUDENT}),
+            {
+                "role": User.Role.STUDENT,
+                "username": student_identifier,
+                "password": "student-password-123",
+            },
+        )
+        self.assertRedirects(login_response, reverse("portal:dashboard"), fetch_redirect_response=False)
+        self.assertEqual(self.client.session.get("_auth_user_id"), str(student.pk))
 
     def test_student_signup_shows_an_error_for_a_duplicate_institution_id(self):
         response = self.client.post(
@@ -3546,6 +3561,8 @@ class DashboardAndCourseFlowTests(TestCase):
         StudentCourseRegistration.objects.create(student=self.student, course=self.free_course, registered_by=self.student)
         StudentCourseRegistration.objects.create(student=self.student, course=self.paid_course, registered_by=self.student)
         InstitutionProfile.objects.create(name="Example University")
+        self.student.id_number = 'STU/"#\r\nInjected-Header'
+        self.student.save(update_fields=["id_number"])
         payment = DepartmentalPayment.objects.create(
             student=self.student,
             department=self.department,
@@ -3562,6 +3579,8 @@ class DashboardAndCourseFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertIn(".pdf", response["Content-Disposition"])
+        self.assertNotIn("\r", response["Content-Disposition"])
+        self.assertNotIn("\n", response["Content-Disposition"])
         self.assertTrue(response.content.startswith(b"%PDF"))
         self.assertIn(self.department.institution.name.encode("utf-8"), response.content)
         self.assertIn(self.student.full_name.encode("utf-8"), response.content)
@@ -4960,7 +4979,7 @@ class ProvisionedAccountTests(TestCase):
                 "first_name": "Ada",
                 "last_name": "Lovelace",
                 "email": "ada.lovelace@otp.example",
-                "id_number": "LEC-MANUAL-1",
+                "id_number": "LEC/MANUAL+!#-ID-12345678901234567890",
                 "faculty": faculty.pk,
                 "department": department.pk,
                 "phone_number": "08000000000",
@@ -4971,7 +4990,7 @@ class ProvisionedAccountTests(TestCase):
         self.assertTrue(form.is_valid(), form.errors)
         lecturer = form.save()
 
-        self.assertEqual(lecturer.username, "LEC-MANUAL-1")
+        self.assertEqual(lecturer.username, "LEC/MANUAL+!#-ID-12345678901234567890")
         self.assertTrue(lecturer.check_password("otp-unieduconnect"))
         self.assertFalse(lecturer.is_approved)
 
@@ -4985,7 +5004,7 @@ class ProvisionedAccountTests(TestCase):
                 "first_name": "Chinua",
                 "last_name": "Lecturer",
                 "email": "chinua@otp.example",
-                "id_number": "LEC-SIGNUP-1",
+                "id_number": "LEC/SIGNUP+!#-ID-12345678901234567890",
                 "faculty": faculty.pk,
                 "department": department.pk,
                 "phone_number": "08000000001",
@@ -4999,5 +5018,5 @@ class ProvisionedAccountTests(TestCase):
         self.assertTrue(form.is_valid(), form.errors)
         lecturer = form.save()
 
-        self.assertEqual(lecturer.username, "LEC-SIGNUP-1")
+        self.assertEqual(lecturer.username, "LEC/SIGNUP+!#-ID-12345678901234567890")
         self.assertTrue(lecturer.check_password("lecturer-password-123"))

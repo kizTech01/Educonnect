@@ -463,6 +463,17 @@ class User(AbstractUser):
         SENATE_MEMBER = "senate_member", "Senate Member"
         PARENT_GUARDIAN = "parent_guardian", "Parent/Guardian"
 
+    # Student and lecturer IDs double as usernames on the signup flows. Django's
+    # default username validators reject many punctuation characters that are
+    # valid in institution-issued identifiers, so keep only the length and
+    # uniqueness requirements here.
+    username = models.CharField(
+        max_length=150,
+        unique=True,
+        error_messages={"unique": "A user with that username already exists."},
+        help_text="Required. 150 characters or fewer.",
+        verbose_name="username",
+    )
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
     institution = models.ForeignKey(
         Institution,
@@ -494,7 +505,7 @@ class User(AbstractUser):
         help_text="The curriculum assigned when this student joined their department.",
     )
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES, blank=True)
-    id_number = models.CharField(max_length=30, null=True, blank=True)
+    id_number = models.CharField(max_length=150, null=True, blank=True)
     phone_number = models.CharField(max_length=30, blank=True)
     passport_photo = models.FileField(
         upload_to="passports/%Y/%m/",

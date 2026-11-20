@@ -805,7 +805,7 @@ def import_department_lecturers(upload):
         for row in rows:
             lecturer_id = _field(row, "lecturer_id", "staff_id", "staff_no", "staff_number", "id")
             name = _field(row, "full_name", "lecturer_name", "lecturer_full_name", "staff_name", "employee_name", "name_of_lecturer", "name")
-            if not lecturer_id or not name or len(lecturer_id) > 30:
+            if not lecturer_id or not name or len(lecturer_id) > User._meta.get_field("id_number").max_length:
                 skipped += 1
                 continue
             user = User.all_objects.filter(
@@ -854,7 +854,7 @@ def import_department_lecturers(upload):
                 )
             raise ValueError(
                 "No lecturer account was created. Check that every row includes a Lecturer ID and Lecturer Name, "
-                "and that each ID is 30 characters or fewer."
+                "and that each ID is 150 characters or fewer."
             )
     conflict_note = f" {tenant_conflicts} row(s) used a lecturer ID already assigned to another institution and were skipped." if tenant_conflicts else ""
     role_conflict_note = f" {role_conflicts} lecturer ID(s) already belong to non-lecturer accounts and were skipped." if role_conflicts else ""
@@ -1097,6 +1097,9 @@ def analyze_institution_automation(upload, command, institution):
                 "error": "Name, email, and a username or ID are required so the account owner can activate the account.",
             })
             continue
+        if len(staff_id) > User._meta.get_field("id_number").max_length:
+            errors.append({"row": row_number, "error": "Student or staff IDs must be 150 characters or fewer."})
+            continue
         if key in seen or User.all_objects.filter(username__iexact=username).exists() or (email and User.all_objects.filter(email__iexact=email).exists()):
             duplicates.append({"row": row_number, "identifier": email or username})
             continue
@@ -1110,7 +1113,7 @@ def analyze_institution_automation(upload, command, institution):
             continue
         proposed.append({
             "row": row_number, "username": username[:150], "email": email[:254],
-            "id_number": staff_id[:30], "name": name[:300], "department_id": department.id if department else None,
+            "id_number": staff_id, "name": name[:300], "department_id": department.id if department else None,
             "role": role,
         })
     if not proposed:
